@@ -1,212 +1,252 @@
-import { NextRequest } from "next/server"
-import plantumlEncoder from "plantuml-encoder"
+import { NextRequest, NextResponse } from "next/server";
+import plantumlEncoder from "plantuml-encoder";
 
-/* ---------------- Utilities ---------------- */
-type PrimType = "int" | "real" | "boolean" | "string"
+/**
+ * 変換API（全面差し替え版）
+ * - 型集合を保持して <!> / <?> を属性に付与
+ * - クラスタ単位で <<incomplete>> / <<contradictory>> をクラスに付与
+ * - 関連は“弱い観測/曖昧”を点線（..）で出力
+ * - 多重度は簡易（0..1 / 0..*）を右側に表示
+ *
+ * 期待する入力JSON（最低限）
+ * {
+ *   "objects": [
+ *     { "name": "商品1", "attrs": [{"key":"価格","value":"1200"}, ...] },
+ *     { "name": "会計1", "attrs": [{"key":"対象","value":"商品1"}, ...] }
+ *   ],
+ *   "links": [ // 任意（明示リンクがあれば参照として採用）
+ *     { "from": "会計1", "to": "商品1", "label": "対象" }
+ *   ]
+ * }
+ */
+
+// ===== 型定義 =====
+type PrimType = "int" | "real" | "boolean" | "string";
+
+type AttrIn = { key: string; value: string };
+type ObjIn  = { name: string; attrs: AttrIn[] };
+
+type LinkIn = { from: string; to: string; label?: string };
+
+type InputPayload = {
+  objects: ObjIn[];
+  links?: LinkIn[];
+};
+
+// ===== ユーティリティ =====
 const detectType = (v: string): PrimType => {
-  const t = v.trim().replace(/^["']|["']$/g, "")
-  if (/^-?\d+$/.test(t))                       return "int"
-  if (/^-?\d+\.\d+(e[-+]?\d+)?$/i.test(t))     return "real"
-  if (/^(?:true|false)$/i.test(t))             return "boolean"
-  return "string"
-}
-const canonical = (n: string) => (n || "").trim().replace(/\d+$/, "") || n
-const normKey = (k: string) => (k || "").trim().toLowerCase().normalize("NFKC").replace(/[_\s]+/g, " ")
-const tokenizeList = (v: string) => v.replace(/^\[/, "").replace(/\]$/, "").split(",").map(s => s.trim()).filter(Boolean)
-const toStraight = (l: string) => l.replace(/--[->|]/g, "--").replace(/->/g, "-")
+  const t = v.trim().replace(/^[[\s\n\r\t\"\']+|[\s\n\r\t\"\']+$/g, "");
+  if (/^-?\d+$/.test(t)) return "int";
+  if (/^-?\d+\.\d+(e[-+]?\d+)?$/i.test(t)) return "real";
+  if (/^(?:true|false)$/i.test(t)) return "boolean";
+  return "string";
+};
 
-/* ---------------- Types ---------------- */
-type Attr = { key: string; value: string }
-type Obj  = { id?: string; name: string; attrs: Attr[] }
-type ManualLink = { from: string; to: string; label?: string; mult?: string }
-type ParsedObj = { name: string; base: string; attrs: Attr[]; keyset: Set<string> }
-type ClassCandidate = { name: string; objs: ParsedObj[]; keys: Set<string> }
+/** 末尾の連番を落としたベース名（例：商品1, 商品02 → 商品） */
+const baseName = (s: string): string => s.trim().replace(/\d+$/g, "");
 
-/* ---------------- Parser (object PUML) ---------------- */
-const parseObjectPuml = (text: string): Obj[] => {
-  const out: Obj[] = []
-  const re = /object\s+([A-Za-z0-9_]+)\s*\{([\s\S]*?)\}/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(text)) !== null) {
-    const name = m[1].trim()
-    const body = m[2]
-    const attrs: Attr[] = []
-    body.split(/\r?\n/).forEach(line => {
-      const mm = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.+?)\s*$/)
-      if (mm) attrs.push({ key: mm[1], value: mm[2] })
-    })
-    out.push({ name, attrs })
+/** 属性キーの正規化（空白・全角半角の差を吸収、lower化） */
+const normKey = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
+
+/** [a,b,c] 形式（軽量パーサ）。かっこ無しは単一要素扱い */
+const tokenizeList = (raw: string): string[] => {
+  const t = raw.trim();
+  if (t.startsWith("[") && t.endsWith("]")) {
+    const inner = t.slice(1, -1);
+    return inner
+      .split(/[,、]\s*/)
+      .map(x => x.replace(/^['\"]|['\"]$/g, "").trim())
+      .filter(Boolean);
   }
-  return out
-}
+  return [t.replace(/^['\"]|['\"]$/g, "").trim()];
+};
 
-/* ---------------- Clustering (v0.1: baseName OR Jaccard≥θ) ---------------- */
-const clusterByKeys = (objs: ParsedObj[], theta = 0.7): ClassCandidate[] => {
-  const parent = new Map<number, number>()
-  const find = (i: number): number => {
-    let p = parent.get(i) ?? i
-    if (p !== i) { p = find(p); parent.set(i, p) }
-    return p
-  }
-  const union = (i: number, j: number) => {
-    const pi = find(i), pj = find(j)
-    if (pi !== pj) parent.set(pi, pj)
-  }
+/** PlantUML安全用：ダブルクオートをエスケープ */
+const esc = (s: string) => s.replace(/"/g, '\\"');
 
-  for (let i = 0; i < objs.length; i++) parent.set(i, i)
-
-  for (let i = 0; i < objs.length; i++) {
-    for (let j = i + 1; j < objs.length; j++) {
-      const a = objs[i], b = objs[j]
-      if (a.base && b.base && a.base === b.base) { union(i, j); continue }
-      const A = a.keyset, B = b.keyset
-      const inter = new Set([...A].filter(x => B.has(x))).size
-      const uni   = new Set([...A, ...B]).size || 1
-      const jacc  = inter / uni
-      if (jacc >= theta) union(i, j)
-    }
-  }
-
-  const groups = new Map<number, ParsedObj[]>()
-  for (let i = 0; i < objs.length; i++) {
-    const r = find(i)
-    if (!groups.has(r)) groups.set(r, [])
-    groups.get(r)!.push(objs[i])
-  }
-
-  const classes: ClassCandidate[] = []
-  for (const arr of groups.values()) {
-    const cnt = new Map<string, number>()
-    arr.forEach(o => cnt.set(o.base, (cnt.get(o.base) || 0) + 1))
-    let best = "", bestN = 0
-    for (const [k, v] of cnt) if (v > bestN) { best = k; bestN = v }
-    const className = (best || arr[0].base || "Class").replace(/(^|[_\s])(\w)/g, (_,$1,$2) => $2.toUpperCase()) || "Class"
-    const keys = new Set<string>()
-    arr.forEach(o => o.keyset.forEach(k => keys.add(k)))
-    classes.push({ name: className, objs: arr, keys })
-  }
-  return classes
-}
-
-/* ---------------- Evidence ---------------- */
-type AssocEvidence = {
-  from: string; to: string;
-  lower: number; upper: number;  // observed per-source degrees
-  counts: number[]; uncertain: boolean;
-}
-type BuildResult = {
-  classPuml: string;
-  encodedPuml: string;
-  evidence: AssocEvidence[];
-}
-
+// ====== ルート本体 ======
 export async function POST(req: NextRequest) {
-  const { objectPuml, manualLinks = [] }: { objectPuml: string; manualLinks?: ManualLink[] } = await req.json()
-
-  // 1) parse objects
-  const objs0 = parseObjectPuml(objectPuml)
-  if (!objs0.length) {
-    const empty = "@startuml\n' No objects\n@enduml"
-    return Response.json({ classPuml: empty, encodedPuml: plantumlEncoder.encode(empty), evidence: [] })
+  let payload: InputPayload;
+  try {
+    payload = (await req.json()) as InputPayload;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
-  const names = new Set(objs0.map(o => o.name))
 
-  // 2) normalize & cluster
-  const parsed: ParsedObj[] = objs0.map(o => ({
-    name: o.name,
-    base: canonical(o.name),
-    attrs: o.attrs,
-    keyset: new Set(o.attrs.map(a => normKey(a.key))),
-  }))
-  const classes = clusterByKeys(parsed, 0.7)
+  const objects = Array.isArray(payload.objects) ? payload.objects : [];
+  const links   = Array.isArray(payload.links) ? payload.links! : [];
 
-  // map object name -> class name
-  const obj2class = new Map<string, string>()
-  classes.forEach(c => c.objs.forEach(o => obj2class.set(o.name, c.name)))
+  // --- オブジェクト名 → インデックス ---
+  const byName = new Map<string, ObjIn>();
+  for (const o of objects) byName.set(o.name, o);
 
-  // 3) attributes per class（参照は属性から除外）
-  const classAttrs = new Map<string, Map<string, Set<PrimType>>>()
-  classes.forEach(c => {
-    const mp = new Map<string, Set<PrimType>>()
-    c.objs.forEach(o => {
-      o.attrs.forEach(a => {
-        const k = normKey(a.key)
-        const set = mp.get(k) || new Set<PrimType>()
-        const v = a.value.trim()
-        if (v.startsWith("[") && v.endsWith("]")) {
-          const arr = tokenizeList(v)
-          if (arr.every(x => names.has(x))) { /* reference list → skip */ }
-          else set.add(arr.length ? detectType(arr[0]) : "string")
-        } else if (names.has(v)) {
-          /* single reference → skip */
-        } else {
-          set.add(detectType(v))
-        }
-        if (!mp.has(k)) mp.set(k, set)
-      })
-    })
-    classAttrs.set(c.name, mp)
-  })
+  // --- オブジェクト → クラス（ベース名でクラスタリング） ---
+  const obj2class = new Map<string, string>();
+  const classesSet = new Set<string>();
+  for (const o of objects) {
+    const c = baseName(o.name) || o.name;
+    obj2class.set(o.name, c);
+    classesSet.add(c);
+  }
+  const classes = Array.from(classesSet).map(name => ({ name }));
 
-  // 4) reference observations（objects + manual links）
-  type EdgeObs = { srcClass: string; dstClass: string; srcName: string; dstNames: string[] }
-  const obs: EdgeObs[] = []
-  parsed.forEach(o => {
-    o.attrs.forEach(a => {
-      const v = a.value.trim()
-      if (v.startsWith("[") && v.endsWith("]")) {
-        const arr = tokenizeList(v).filter(x => names.has(x))
-        if (arr.length) obs.push({ srcClass: obj2class.get(o.name)!, dstClass: obj2class.get(arr[0])!, srcName: o.name, dstNames: arr })
-      } else if (names.has(v)) {
-        obs.push({ srcClass: obj2class.get(o.name)!, dstClass: obj2class.get(v)!, srcName: o.name, dstNames: [v] })
-      }
-    })
-  })
-  manualLinks.forEach(l => {
-    if (names.has(l.from) && names.has(l.to)) {
-      obs.push({ srcClass: obj2class.get(l.from)!, dstClass: obj2class.get(l.to)!, srcName: l.from, dstNames: [l.to] })
+  // --- 型集合と“空値観測”を保持 ---
+  const typeSets = new Map<string, Map<string, Set<PrimType>>>(); // class -> key -> set(types)
+  const emptySeen = new Map<string, Map<string, boolean>>();       // class -> key -> seenEmpty
+
+  // クラスごとの初期化
+  for (const c of classes) {
+    typeSets.set(c.name, new Map());
+    emptySeen.set(c.name, new Map());
+  }
+
+  // 属性から型集合を構築
+  for (const o of objects) {
+    const c = obj2class.get(o.name)!;
+    const tmap = typeSets.get(c)!;
+    const emap = emptySeen.get(c)!;
+
+    for (const a of o.attrs ?? []) {
+      const k = normKey(a.key);
+      if (!tmap.has(k)) tmap.set(k, new Set());
+      if (!emap.has(k)) emap.set(k, false);
+
+      const raw = (a.value ?? "").trim();
+      if (!raw) { emap.set(k, true); continue; }
+
+      const values = tokenizeList(raw);
+      for (const one of values) tmap.get(k)!.add(detectType(one));
     }
-  })
+  }
 
-  // per-association counts per source instance
-  const assocMap = new Map<string, Map<string, number>>() // key "A::B" -> (srcName -> count)
-  const keyOf = (a: string, b: string) => `${a}::${b}`
-  obs.forEach(o => {
-    const key = keyOf(o.srcClass, o.dstClass)
-    if (!assocMap.has(key)) assocMap.set(key, new Map())
-    const m = assocMap.get(key)!
-    m.set(o.srcName, (m.get(o.srcName) || 0) + o.dstNames.length)
-  })
+  // --- 参照（関連）観測 ---
+  // クラス対ごとに観測数（上限計算のため）
+  const assocCount = new Map<string, number>(); // key: "A::B" → total occurrences
+  const assocMulti = new Map<string, number>(); // key: "A::B" → max occurrences per (A-instance)
 
-  // 5) PlantUML + Evidence
-  let classPuml = "@startuml\nset separator none\nhide empty members\n"
-  classes.forEach(c => {
-    classPuml += `class ${c.name} {\n`
-    const mp = classAttrs.get(c.name)!
-    Array.from(mp.entries()).forEach(([k, types]) => {
-      if (types.size === 0) return
-      const t = Array.from(types)[0]
-      classPuml += `  ${k}: ${t}\n`
-    })
-    classPuml += "}\n"
-  })
+  // 1) 明示リンクを採用
+  for (const l of links) {
+    const a = obj2class.get(l.from);
+    const b = obj2class.get(l.to);
+    if (!a || !b) continue;
+    const key = `${a}::${b}`;
+    assocCount.set(key, (assocCount.get(key) ?? 0) + 1);
+    // 明示リンクは1つ/objとみなす
+    assocMulti.set(key, Math.max(assocMulti.get(key) ?? 0, 1));
+  }
 
-  const evidence: AssocEvidence[] = []
-  assocMap.forEach((m, key) => {
-    const [a, b] = key.split("::")
-    const counts = Array.from(m.values())
-    const lower = counts.length ? Math.min(...counts) : 0
-    const upper = counts.length ? Math.max(...counts) : 0
-    const uncertain = upper <= 1
-    evidence.push({ from: a, to: b, lower, upper, counts, uncertain })
-    const mult = upper > 1 ? "0..*" : "0..1"
-    classPuml += `${a} "1" -- "${mult}" ${b}\n`
-  })
+  // 2) 属性値が他オブジェクト名に一致する場合を参照としてカウント
+  const nameSet = new Set(objects.map(o => o.name));
+  for (const o of objects) {
+    const aClass = obj2class.get(o.name)!;
+    const perTargetCount = new Map<string, number>(); // B-class -> count from this A-obj
 
-  classPuml += "@enduml"
-  return Response.json({
-    classPuml,
-    encodedPuml: plantumlEncoder.encode(classPuml),
-    evidence,
-  } as BuildResult)
+    for (const a of o.attrs ?? []) {
+      const raw = (a.value ?? "").trim();
+      if (!raw) continue;
+      const values = tokenizeList(raw);
+      for (const v of values) {
+        if (nameSet.has(v)) {
+          const bClass = obj2class.get(v)!;
+          const key = `${aClass}::${bClass}`;
+          assocCount.set(key, (assocCount.get(key) ?? 0) + 1);
+          perTargetCount.set(bClass, (perTargetCount.get(bClass) ?? 0) + 1);
+        }
+      }
+    }
+
+    // この A-instance から B-class への最大出現数（多重度判断に使う）
+    for (const [bClass, cnt] of perTargetCount) {
+      const key = `${aClass}::${bClass}`;
+      assocMulti.set(key, Math.max(assocMulti.get(key) ?? 0, cnt));
+    }
+  }
+
+  // ===== PlantUML 出力 =====
+  let puml = "@startuml\n";
+  puml += "hide empty members\n";
+  puml += "skinparam classAttributeIconSize 0\n";
+  puml += "skinparam class {\n";
+  puml += "  BackgroundColor<<incomplete>> #fffbe6\n";    // 薄黄
+  puml += "  BackgroundColor<<contradictory>> #ffecec\n"; // 薄赤
+  puml += "  BorderColor<<contradictory>> #ff6666\n";
+  puml += "}\n";
+
+  // --- クラス定義 ---
+  for (const c of classes) {
+    const tmap = typeSets.get(c.name)!;
+    const emap = emptySeen.get(c.name)!;
+
+    let hasContradiction = false;
+    let hasIncomplete = false;
+
+    // 属性行を構築
+    let body = "";
+    for (const [k, setTypes] of tmap.entries()) {
+      const types = Array.from(setTypes.values());
+      let mark = "";
+      if (types.length === 0 && (emap.get(k) ?? false)) {
+        mark = "<?>"; hasIncomplete = true;
+      } else if (types.length > 1) {
+        mark = "<!>"; hasContradiction = true;
+      }
+      const showType: PrimType = (types[0] ?? "string");
+      body += `  ${esc(k)}: ${showType} ${mark}\n`;
+    }
+
+    const stereo = hasContradiction ? " <<contradictory>>" : (hasIncomplete ? " <<incomplete>>" : "");
+    puml += `class ${esc(c.name)}${stereo} {\n${body}}\n`;
+  }
+
+  // --- 関連（点線 or 実線） ---
+  // 簡易規則：
+  //  - 観測回数が少ない（<=1）→ “不確か” とみなし点線 ..
+  //  - A-instance→B-class の最大多重が >1 → 右側多重 0..*
+  //  - それ以外は 0..1
+  for (const [key, total] of assocCount.entries()) {
+    const [a, b] = key.split("::");
+    const maxPerA = assocMulti.get(key) ?? 0;
+    const dotted = total <= 1; // 観測が弱い→点線
+    const style = dotted ? ".." : "--";
+    const multRight = maxPerA > 1 ? "0..*" : "0..1";
+    // 左側は簡易に "1" を表示（Aから見て1基点）。必要なら両側多重の推定に拡張可。
+    puml += `${esc(a)} "1" ${style} "${multRight}" ${esc(b)}\n`;
+  }
+
+  puml += "@enduml";
+
+  const encoded = plantumlEncoder.encode(puml);
+
+  // 任意：フロントで活用しやすい“問題点ダイジェスト”
+  const issues = summarizeIssues(typeSets, emptySeen);
+
+  return NextResponse.json({
+    classPuml: puml,
+    encodedPuml: encoded,
+    issues,
+  });
+}
+
+// ===== Issues のダイジェスト（UIのEvidence用。任意） =====
+function summarizeIssues(
+  typeSets: Map<string, Map<string, Set<PrimType>>>,
+  emptySeen: Map<string, Map<string, boolean>>,
+) {
+  const classes: Array<{ name: string; incomplete: string[]; contradictory: string[] }> = [];
+  for (const [cname, tmap] of typeSets) {
+    const emap = emptySeen.get(cname) || new Map<string, boolean>();
+    const incomplete: string[] = [];
+    const contradictory: string[] = [];
+
+    for (const [k, setTypes] of tmap.entries()) {
+      const types = Array.from(setTypes.values());
+      if (types.length === 0 && (emap.get(k) ?? false)) incomplete.push(k);
+      else if (types.length > 1) contradictory.push(`${k} [${types.join(", ")}]`);
+    }
+
+    if (incomplete.length || contradictory.length) {
+      classes.push({ name: cname, incomplete, contradictory });
+    }
+  }
+  return { classes };
 }
