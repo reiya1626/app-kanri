@@ -408,7 +408,8 @@ function LinkMiniAdder({
   snapshot: Snapshot;
   setSnapshot: React.Dispatch<React.SetStateAction<Snapshot>>;
 }) {
-  const names = snapshot.objects.map((o) => o.name).filter(Boolean);
+  // オブジェクト名一覧（空文字は除外）
+  const names = snapshot.objects.map((o) => o.name).filter((n) => !!n);
   const [msg, setMsg] = useState<string | null>(null);
 
   // オブジェクトが足りないとき
@@ -420,13 +421,14 @@ function LinkMiniAdder({
     );
   }
 
-  // 重複判定ヘルパ（index は「自分自身は除外する」ために使用）
+  // 重複判定ヘルパ（selfIndex は「自分自身は除外する」ために使用）
   const isDuplicate = (
     links: Link[],
     candidate: Link,
     selfIndex: number | null
   ): boolean => {
-    const normLabel = (candidate.label ?? "");
+    const normLabel = candidate.label ?? "";
+    if (!candidate.from || !candidate.to) return false; // 未選択は重複扱いしない
     return links.some((l, i) => {
       if (selfIndex !== null && i === selfIndex) return false;
       return (
@@ -437,45 +439,13 @@ function LinkMiniAdder({
     });
   };
 
-  // 行追加
+  // 行追加：from/to/label を空で追加（ユーザーに選ばせる）
   const addRow = () => {
     setMsg(null);
-    setSnapshot((prev) => {
-      const links = prev.links ?? [];
-
-      // まずデフォルト案
-      let candidate: Link = {
-        from: names[0],
-        to: names[1],
-        label: "",
-      };
-
-      // すでに同じがあれば、他の組み合わせを探す
-      if (isDuplicate(links, candidate, null)) {
-        let found = false;
-        outer: for (let i = 0; i < names.length; i++) {
-          for (let j = 0; j < names.length; j++) {
-            if (i === j) continue;
-            const c: Link = { from: names[i], to: names[j], label: "" };
-            if (!isDuplicate(links, c, null)) {
-              candidate = c;
-              found = true;
-              break outer;
-            }
-          }
-        }
-        if (!found) {
-          // 全パターン埋まってたら追加しない
-          setMsg("これ以上追加できるユニークなリンクがありません。");
-          return prev;
-        }
-      }
-
-      return {
-        ...prev,
-        links: [...links, candidate],
-      };
-    });
+    setSnapshot((prev) => ({
+      ...prev,
+      links: [...(prev.links ?? []), { from: "", to: "", label: "" }],
+    }));
   };
 
   // 行更新（from/to/label を変えた瞬間に snapshot に反映）
@@ -483,26 +453,27 @@ function LinkMiniAdder({
     setSnapshot((prev) => {
       const links = [...(prev.links ?? [])];
       const current = links[index] || { from: "", to: "", label: "" };
+
       const next: Link = {
         from: patch.from ?? current.from,
         to: patch.to ?? current.to,
         label:
           patch.label !== undefined
-            ? (patch.label || undefined)
+            ? patch.label || undefined
             : current.label,
       };
 
-      // 入力途中（from/to 未選択など）はそのまま許容
+      // 入力途中（from/to のどちらかが空）はそのまま許容
       if (!next.from || !next.to) {
         links[index] = next;
         setMsg(null);
         return { ...prev, links };
       }
 
-      // 重複チェック（自分以外と同じならキャンセル）
+      // 重複チェック（自分以外と同じならエラー表示して変更しない）
       if (isDuplicate(links, next, index)) {
         setMsg("同じリンクがすでにあります。");
-        return prev; // 変更せず戻す
+        return prev;
       }
 
       links[index] = next;
@@ -533,7 +504,7 @@ function LinkMiniAdder({
       <div className="space-y-2 max-h-40 overflow-y-auto">
         {snapshot.links.length === 0 && (
           <div className="text-neutral-500">
-            まだリンクがありません．「＋ リンクを追加」で新しいリンクを作成してください．
+            まだリンクがありません。「＋ リンクを追加」で新しいリンクを作成してください。
           </div>
         )}
 
@@ -542,11 +513,10 @@ function LinkMiniAdder({
             {/* from */}
             <select
               className="border rounded px-2 py-1"
-              value={l.from || names[0]}
-              onChange={(e) =>
-                updateLink(i, { from: e.target.value })
-              }
+              value={l.from || ""}
+              onChange={(e) => updateLink(i, { from: e.target.value })}
             >
+              <option value="">from</option>
               {names.map((n) => (
                 <option key={n} value={n}>
                   {n}
@@ -559,11 +529,10 @@ function LinkMiniAdder({
             {/* to */}
             <select
               className="border rounded px-2 py-1"
-              value={l.to || names[0]}
-              onChange={(e) =>
-                updateLink(i, { to: e.target.value })
-              }
+              value={l.to || ""}
+              onChange={(e) => updateLink(i, { to: e.target.value })}
             >
+              <option value="">to</option>
               {names.map((n) => (
                 <option key={n} value={n}>
                   {n}
@@ -576,9 +545,7 @@ function LinkMiniAdder({
               className="border rounded px-2 py-1 w-28"
               placeholder="ラベル（任意）"
               value={l.label ?? ""}
-              onChange={(e) =>
-                updateLink(i, { label: e.target.value })
-              }
+              onChange={(e) => updateLink(i, { label: e.target.value })}
             />
 
             {/* 削除 */}
@@ -604,6 +571,7 @@ function LinkMiniAdder({
     </div>
   );
 }
+
 
 
 /** =========================
