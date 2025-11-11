@@ -34,11 +34,18 @@ function guessType(v: string): string {
 
 // ==== メイン：スナップショットからクラス図用 PUML を組み立て ====
 
-// 引数 snap は「きれいにした objects / links が入っている」前提
+// 引数 snap→画面から送られてきたオブジェクト図の中身
+//objcts→インスタンス(オブジェクト)一覧，links→リンク一覧
+//戻り値→クラス図のPlantUML文字列
+//つまり，「インスタインス＋リンクの集合→クラス＋関連＋多重度→PlantUML文字列」
 function buildClassDiagramPuml(snap: { objects: Obj[]; links: Link[] }): string {
+// オブジェクトとリンクの配列を安全に取得→これにより不正なデータでクラッシュしない
+// （不正な場合は空配列にする）
   const objs = Array.isArray(snap.objects) ? snap.objects : [];
   const links = Array.isArray(snap.links) ? snap.links : [];
 
+  //変換に使う３つの入れ物を用意
+  
   // 各インスタンス -> クラス名
   const classOf = new Map<string, string>();
   // 各クラス -> 属性 (Map で key 重複を防ぐ)
@@ -128,12 +135,12 @@ function buildClassDiagramPuml(snap: { objects: Obj[]; links: Link[] }): string 
   // --- オブジェクトもリンクも何も無いときの安全策 ---
   if (classes.size === 0) {
     return `@startuml
-title クラス図（データなし）
-class "Snapshot" {
-  note = "オブジェクト図を入力するとクラス図がここに生成されます"
-}
-@enduml`;
-  }
+    title クラス図（データなし）
+    class "Snapshot" {
+    note = "オブジェクト図を入力するとクラス図がここに生成されます"
+    }
+    @enduml`;
+    }
 
   // --- クラス定義ブロック ---
   const classBlocks = [...classes]
@@ -160,14 +167,14 @@ class "Snapshot" {
 
   // --- 最終的な PlantUML コード ---
   return `@startuml
-title クラス図（オブジェクト図からの推定）
-skinparam linetype ortho
-skinparam classAttributeFontSize 12
+    title クラス図（オブジェクト図からの推定）
+    skinparam linetype ortho
+    skinparam classAttributeFontSize 12
 
-${classBlocks}
+    ${classBlocks}
 
-${rels}
-@enduml`;
+    ${rels}
+    @enduml`;
 }
 
 // ==== エンドポイント本体 ====
