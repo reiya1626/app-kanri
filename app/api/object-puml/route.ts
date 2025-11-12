@@ -1,101 +1,123 @@
-// Next.js が提供するサーバー側の機能を利用するために
-// リクエストのデータ(NextRequest)と応答データ(NextResponse)という部品を読み込んでる
+//Next.jsが提供するサーバー側の機能を利用するために
+//リクエストのデータと応答データという部品を読み込んでる
 import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
 import { encode } from "plantuml-encoder"; // ← 型は types/plantuml-encoder.d.ts で補完
 
-/** =========================
- * ユーティリティ
- * ========================= */
-
 // ダブルクォート等の軽いエスケープ
 function esc(s: any): string {
   return String(s ?? "").replace(/"/g, '\\"');
 }
 
-// この API に渡されるスナップショットの型（ゆるめ）
-type SnapshotInput = {
+// 値を UML 記法として安全に出力するためのヘルパ
+// - 数値っぽい文字列: 120, -5, 3.14 → そのまま (例: key = 120)
+// - true / false (大文字小文字いろいろ): → 小文字でそのまま (例: key = true)
+// - それ以外: ダブルクォートで囲む (例: key = "長野市松代町")
+function toPumlLiteral(v: any): string {
+  const s = String(v ?? "").trim();
+
+  // 整数 or 小数
+  if (/^[+-]?\d+$/.test(s) || /^[+-]?\d+\.\d+$/.test(s)) {
+    return s;
+  }
+
+  // boolean
+  if (/^(true|false)$/i.test(s)) {
+    return s.toLowerCase();
+  }
+
+  // それ以外は文字列として扱う
+  return `"${esc(s)}"`;
+}
+
+// buildObjectDiagramPuml関数では，オブジェクトのリストとリンクのリストを含むsnapというデータを受け取り，
+// PlantUML のオブジェクト図コードを生成する
+function buildObjectDiagramPuml(snap: {
   id?: string;
   name?: string;
   objects?: Array<{
-    name: string;
-    attrs?: Array<{ key: string; value: string }>;
-    // 将来的に typeName / className を渡したい場合に備えておく
-    type?: string;
-    className?: string;
+    name?: any;
+    attrs?: Array<{ key?: any; value?: any }>;
+    // 将来的に typeName を渡したい場合に備え、柔軟に見る
+    type?: any;
+    className?: any;
   }>;
-  links?: Array<{ from: string; to: string; label?: string }>;
-};
-
-/** =========================
- * オブジェクト図用 PlantUML を組み立てる
- * ========================= */
-function buildObjectDiagramPuml(snap: SnapshotInput): string {
-  const titleRaw = typeof snap?.name === "string" ? snap.name.trim() : "";
-  const useTitle =
-    titleRaw && titleRaw !== "snapshot" ? `title ${esc(titleRaw)}\n` : "";
-
+  links?: Array<{ from?: any; to?: any; label?: any }>;
+}): string {
   const objs = Array.isArray(snap?.objects) ? snap.objects : [];
   const links = Array.isArray(snap?.links) ? snap.links : [];
 
+  // 表示ラベルの辞書（リンク生成で再利用）
+  // key: インスタンス名（元の name）、value: 下線付き表示ラベル "<u>instance : type</u>"
   const labelMap = new Map<string, string>();
 
+  // オブジェクト定義ブロック
   const objBlocks = objs
-    .filter(
-      (o): o is NonNullable<SnapshotInput["objects"]>[number] =>
-        typeof o?.name === "string" && o.name.trim().length > 0
-    )
-    .map((o) => {
-      const instanceName = o.name.trim();
+    .map((raw) => {
+      const name = String(raw?.name ?? "").trim();
+      if (!name) return null; // 未入力行は捨てる
+
+      // type / className があれば "インスタンス : クラス" にする（なくてもOK）
       const typeNameRaw =
-        (typeof o.type === "string" && o.type) ||
-        (typeof o.className === "string" && o.className) ||
+        (typeof raw?.type === "string" && raw.type.trim()) ||
+        (typeof raw?.className === "string" && raw.className.trim()) ||
         "";
-      const labelPlain = typeNameRaw
-        ? `${instanceName} : ${typeNameRaw}`
-        : instanceName;
-      const underlinedLabel = `<u>${esc(labelPlain)}</u>`;
-      labelMap.set(instanceName, underlinedLabel);
 
-      const attrs =
-        Array.isArray(o.attrs) && o.attrs.length > 0
-          ? o.attrs
-              .map(
-                (a: { key: string; value: string }) =>
-                  `  ${esc(a.key)} = "${esc(a.value)}"`
-              )
-              .join("\n")
-          : "";
+      const labelPlain = typeNameRaw ? `${name} : ${typeNameRaw}` : name;
+      const underlined = `<u>${esc(labelPlain)}</u>`;
+      labelMap.set(name, underlined);
 
-      return `object "${underlinedLabel}" {\n${attrs}\n}`;
+      // attrs: key/value はなんでも来てよいが、
+      // key が空のものは捨て、value は toPumlLiteral で UML 的なリテラルに整形
+      const attrs = Array.isArray(raw?.attrs)
+        ? raw.attrs
+            .map((a) => {
+              const k = String(a?.key ?? "").trim();
+              if (!k) return null;
+              const lit = toPumlLiteral(a?.value);
+              return `  ${esc(k)} = ${lit}`;
+            })
+            .filter((line): line is string => !!line)
+            .join("\n")
+        : "";
+
+      return `object "${underlined}" {\n${attrs}\n}`;
     })
+    .filter((b): b is string => !!b)
     .join("\n");
 
+  // リンク定義ブロック
   const rels = links
-    .filter(
-      (e): e is { from: string; to: string; label?: string } =>
-        typeof e?.from === "string" &&
-        e.from.trim().length > 0 &&
-        typeof e?.to === "string" &&
-        e.to.trim().length > 0
-    )
-    .map((e) => {
-      const fromInstance = e.from.trim();
-      const toInstance = e.to.trim();
-      const fromLbl =
-        labelMap.get(fromInstance) ?? `<u>${esc(fromInstance)}</u>`;
-      const toLbl =
-        labelMap.get(toInstance) ?? `<u>${esc(toInstance)}</u>`;
+    .map((raw) => {
+      const from = String(raw?.from ?? "").trim();
+      const to = String(raw?.to ?? "").trim();
+      if (!from || !to) return null;
+
+      const fromLbl = labelMap.get(from) ?? `<u>${esc(from)}</u>`;
+      const toLbl = labelMap.get(to) ?? `<u>${esc(to)}</u>`;
+      const labelText = String(raw?.label ?? "").trim();
+
       return `"${fromLbl}" -- "${toLbl}"${
-        e.label ? ` : ${esc(e.label)}` : ""
+        labelText ? ` : ${esc(labelText)}` : ""
       }`;
     })
+    .filter((line): line is string => !!line)
     .join("\n");
 
+  // 有効なオブジェクトもリンクも無い場合：最低限の UML として返す
+  if (!objBlocks && !rels) {
+    return `@startuml
+skinparam objectAttributeFontSize 12
+skinparam linetype ortho
+' まだ有効なオブジェクトがありません
+@enduml`;
+  }
+
+  // 通常パターン
   return `@startuml
-${useTitle}skinparam objectAttributeFontSize 12
+skinparam objectAttributeFontSize 12
 skinparam linetype ortho
 
 ${objBlocks}
@@ -104,63 +126,27 @@ ${rels}
 @enduml`;
 }
 
-
-/** =========================
- * API エンドポイント本体 (POST)
- * ========================= */
-// 外部からのアクセスが可能な export。
-// 非同期関数 async を使い，HTTP の POST リクエストを処理する。
+// 外部からの POST リクエストを処理
 export async function POST(req: NextRequest) {
   try {
-    // リクエスト body を JSON として読み込む。
-    // JSON 解析に失敗した場合は、エラーを無視して {} を使い、処理を中断しないようにする。
-    const body: any = await req.json().catch(() => ({}));
+    const body = await req.json().catch(() => ({}));
 
-    // いろんな形で来ても取り出せるようにする（寛容設計）
-    const snapCandidate: any =
+    // いろんな形で来ても取り出せるようにする（寛容）
+    const snap =
       body?.id && body?.objects
         ? body
         : Array.isArray(body?.snapshots)
         ? body.snapshots[0]
         : body?.snapshot ?? body;
 
-    // 最低限の安全な形に整形（足りなければ空配列にする）
-    const safeSnap: SnapshotInput = {
-      id: snapCandidate?.id
-        ? String(snapCandidate.id)
-        : undefined,
-      name: snapCandidate?.name
-        ? String(snapCandidate.name)
-        : "snapshot",
-      objects: Array.isArray(snapCandidate?.objects)
-        ? snapCandidate.objects
-        : [],
-      links: Array.isArray(snapCandidate?.links)
-        ? snapCandidate.links
-        : [],
-    };
-
-    // 整形されたデータ(safeSnap)を使って PlantUML 文字列を生成
-    const puml = buildObjectDiagramPuml(safeSnap);
-
-    // PlantUML コードを encode して URL に載せられる形にする
-    const encoded = encode(puml); // HUFFMAN 圧縮 + エンコード
-
-    // 外部の PlantUML サービスから SVG を取得するための URL
+    const puml = buildObjectDiagramPuml(snap ?? {});
+    const encoded = encode(puml); // URL 用にエンコード
     const urlSvg = `https://www.plantuml.com/plantuml/svg/${encoded}`;
 
-    // クライアントには puml 本体と URL の両方を返す
-    return NextResponse.json(
-      { puml, encoded, urlSvg },
-      { status: 200 }
-    );
+    return NextResponse.json({ puml, encoded, urlSvg }, { status: 200 });
   } catch (e: any) {
-    // 何かおかしくなった場合は 400 としてエラー内容を返す
     return NextResponse.json(
-      {
-        error: e?.message ?? "bad request",
-        stack: e?.stack,
-      },
+      { error: e?.message ?? "bad request", stack: e?.stack },
       { status: 400 }
     );
   }
