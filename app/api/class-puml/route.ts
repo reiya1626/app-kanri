@@ -1,248 +1,258 @@
 // app/api/class-puml/route.ts
+//
+// B案（検証モード）:
+//  - クラス統合は「type > なければ属性名集合」で行う（リンク有無では分割しない）
+//  - 同一クラス内でリンク署名が揃っていない場合は warnings に検出結果を返す
+//  - 多重度は保守的（個体差があれば 0..1、観測的に >=2 があれば *）
+//  - 既存のサニタイズ/型推定は維持
+//
+// 返却: { puml, encoded, urlSvg, warnings?: Array<{className:string, message:string}> }
 
-// Next.js が提供するサーバー側の機能を使うために
-// リクエスト/レスポンス用の型を読み込む
 import { NextRequest, NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
-
-// PlantUML のテキストを URL 用に圧縮/エンコードするライブラリ
 import { encode } from "plantuml-encoder";
 
-// ==== 型定義 ====
-
-// スロット(属性) 1 件分
+// ====== 型 ======
 type Attr = { key: string; value: string };
-// オブジェクト 1 件分
-type Obj = { name: string; type?: string; attrs?: Attr[] };
-// リンク 1 本分
+type Obj  = { name: string; type?: string; attrs?: Attr[] };
 type Link = { from: string; to: string; label?: string };
+type Snapshot = { objects: Obj[]; links: Link[] };
 
-// ==== ユーティリティ ====
+type WarningItem = { className: string; message: string };
 
-// ダブルクォートを軽くエスケープして PUML 内で安全に使えるようにする
+// ====== ユーティリティ ======
 function esc(s: unknown): string {
   return String(s ?? "").replace(/"/g, '\\"');
 }
-
-// 値からざっくり型推定（本格的じゃなくて OK）
 function guessType(v: string): string {
   const s = String(v ?? "").trim();
-  if (/^\d+$/.test(s)) return "int";
-  if (/^\d+(\.\d+)?$/.test(s)) return "number";
+  if (/^-?\d+$/.test(s)) return "int";
+  if (/^-?\d+(\.\d+)?$/.test(s)) return "number";
+  if (/^(true|false)$/i.test(s)) return "boolean";
   return "string";
 }
+// 属性名集合 → シグネチャ（順序非依存）
+function attrSignature(attrs: Attr[] | undefined): string {
+  const keys = Array.isArray(attrs)
+    ? attrs.map(a => String(a.key ?? "").trim()).filter(Boolean)
+    : [];
+  keys.sort();
+  return keys.join("|");
+}
 
-// ==== メイン：スナップショットからクラス図用 PUML を組み立て ====
+// ====== メイン ======
+function buildClassDiagramPuml(
+  snap: Snapshot,
+  outWarnings: WarningItem[]
+): string {
+  const objs  = Array.isArray(snap.objects) ? snap.objects : [];
+  const links = Array.isArray(snap.links)   ? snap.links   : [];
 
-// 引数 snap→画面から送られてきたオブジェクト図の中身
-//objcts→インスタンス(オブジェクト)一覧，links→リンク一覧
-//戻り値→クラス図のPlantUML文字列
-//つまり，「インスタインス＋リンクの集合→クラス＋関連＋多重度→PlantUML文字列」
-function buildClassDiagramPuml(snap: { objects: Obj[]; links: Link[] }): string {
-// オブジェクトとリンクの配列を安全に取得→これにより不正なデータでクラッシュしない
-// （不正な場合は空配列にする）
-  const objs = Array.isArray(snap.objects) ? snap.objects : [];
-  const links = Array.isArray(snap.links) ? snap.links : [];
-
-  //変換に使う３つの入れ物を用意
-  
-  // 各インスタンス -> クラス名
-  const classOf = new Map<string, string>();
-  // 各クラス -> 属性 (Map で key 重複を防ぐ)
-  const classAttrs: Record<string, Map<string, string>> = {};
-  // 登場したクラス名の集合
-  const classes = new Set<string>();
-
-  // --- オブジェクトからクラス候補とクラス属性を集める ---
+  // 名前 → オブジェクト
+  const byName = new Map<string, Obj>();
   for (const o of objs) {
-    const instName = (o.name ?? "").trim();
-    if (!instName) continue; // 念のため防御
+    const nm = String(o.name ?? "").trim();
+    if (nm) byName.set(nm, o);
+  }
 
-    // 1. type が入っていればそれを優先
-    // 2. 「○号室」「○棟」などから雑に型名を抜く（あなたの元コードを活かす）
-    // 3. それも無ければ「◯◯型」とする
-    const cname =
-      (o.type && o.type.trim()) ||
-      (o.name
-        ?.replace(/.*?([一二三四五六七八九十\d]+)?(号室|棟|階|物件)$/, "$2")
-        .trim()) ||
-      `${instName}型`;
+  // 宛先“プロトタイプ”表現（type があれば type、無ければ属性名集合）
+  const destProto = (toName: string) => {
+    const o = byName.get(toName);
+    if (!o) return "∅";
+    const t = (typeof o.type === "string" && o.type.trim()) ? o.type.trim() : "";
+    return t || `SIG(${attrSignature(o.attrs)})`;
+  };
 
-    classOf.set(instName, cname);
+  // 1個体の「リンク署名」（from=name） 例: "履修する->SIG(学年),友人->TypeX"
+  function linkSignatureOf(inst: string): string {
+    const mine = links.filter(l => l.from === inst);
+    const parts = mine.map(l => {
+      const lab = (l.label?.trim() || "");
+      return `${lab}->${destProto(l.to)}`;
+    });
+    parts.sort();
+    return parts.join(",");
+  }
+
+  // 生成物
+  const classOf   = new Map<string, string>();                   // instance -> className
+  const classAttrs: Record<string, Map<string,string>> = {};     // className -> Map(attrName -> type)
+  const classes   = new Set<string>();                           // className の集合
+  const classMembers: Record<string, Set<string>> = {};          // className -> インスタンス集合
+  const linkSigPerMember: Record<string, Map<string,string>> = {};// className -> Map(inst -> linkSig)
+
+  // 未定クラス命名
+  let undetSeq = 1;
+  const sig2class = new Map<string, string>(); // 属性名シグネチャ -> className
+
+  // ---- オブジェクトをクラスへ束ねる（B案: 属性名集合のみで統合）----
+  for (const o of objs) {
+    const inst = String(o.name ?? "").trim();
+    if (!inst) continue;
+
+    let cname = (typeof o.type === "string" && o.type.trim()) ? o.type.trim() : "";
+    if (!cname) {
+      const aSig = attrSignature(o.attrs);
+      if (sig2class.has(aSig)) cname = sig2class.get(aSig)!;
+      else {
+        cname = `未定${undetSeq++}`;
+        sig2class.set(aSig, cname);
+      }
+    }
+
+    classOf.set(inst, cname);
     classes.add(cname);
+    (classMembers[cname] ??= new Set()).add(inst);
 
+    // 属性型は“最初の観測”を採用
+    const bucket = (classAttrs[cname] ??= new Map<string,string>());
     const kvs = Array.isArray(o.attrs) ? o.attrs : [];
-    if (!classAttrs[cname]) classAttrs[cname] = new Map<string, string>();
-
     for (const { key, value } of kvs) {
       const k = String(key ?? "").trim();
       if (!k) continue;
-      if (!classAttrs[cname].has(k)) {
-        classAttrs[cname].set(k, guessType(String(value ?? "")));
-      }
+      if (!bucket.has(k)) bucket.set(k, guessType(String(value ?? "")));
+    }
+
+    // 検証用に各メンバーのリンク署名を記録
+    (linkSigPerMember[cname] ??= new Map()).set(inst, linkSignatureOf(inst));
+  }
+
+  // ---- クラス内リンク署名の不一致を検出（警告）----
+  for (const cname of classes) {
+    const sigs = new Set<string>([...(linkSigPerMember[cname]?.values() ?? [])]);
+    if (sigs.size > 1) {
+      outWarnings.push({
+        className: cname,
+        message:
+          `同一クラス内で関係（ラベル/宛先型）の有無・種類が不一致です。` +
+          `（例: 一部の個体だけ「履修する->心理学」を持つ など）`
+      });
     }
   }
 
-  // --- リンクからクラス間関連 + 多重度を集計 ---
+  // ---- リンクをクラス間に集約 ----
   type EdgeKey = string;
-  const edge: Record<
-    EdgeKey,
-    {
-      fromC: string;
-      toC: string;
-      label?: string;
-      samples: Array<{ fromInst: string; toInst: string }>;
-    }
-  > = {};
+  const edge: Record<EdgeKey, {
+    fromC: string; toC: string; label?: string;
+    samples: Array<{ fromInst: string; toInst: string }>;
+  }> = {};
 
   for (const e of links) {
     const fromC = classOf.get(e.from);
-    const toC = classOf.get(e.to);
-    if (!fromC || !toC) continue; // クラスに対応づけられない場合は無視
+    const toC   = classOf.get(e.to);
+    if (!fromC || !toC) continue;
 
     const lab = e.label?.trim() || undefined;
     const key = `${fromC}|${toC}|${lab ?? ""}`;
-
-    if (!edge[key]) {
-      edge[key] = { fromC, toC, label: lab, samples: [] };
-    }
-    edge[key].samples.push({ fromInst: e.from, toInst: e.to });
+    (edge[key] ??= { fromC, toC, label: lab, samples: [] })
+      .samples.push({ fromInst: e.from, toInst: e.to });
   }
 
-  // サンプルからざっくり多重度を推定
-  function mult(samples: Array<{ fromInst: string; toInst: string }>) {
+  // ---- 多重度（保守的）----
+  function mult(
+    samples: Array<{ fromInst: string; toInst: string }>,
+    fromClassSize: number,
+    toClassSize: number
+  ) {
     const mapF: Record<string, Set<string>> = {};
     const mapT: Record<string, Set<string>> = {};
-
     for (const s of samples) {
       (mapF[s.fromInst] ??= new Set()).add(s.toInst);
-      (mapT[s.toInst] ??= new Set()).add(s.fromInst);
+      (mapT[s.toInst]   ??= new Set()).add(s.fromInst);
     }
+    const maxToPerFrom = Math.max(0, ...Object.values(mapF).map(s => s.size));
+    const maxFromPerTo = Math.max(0, ...Object.values(mapT).map(s => s.size));
 
-    const maxToPerFrom =
-      Object.values(mapF).reduce((m, set) => Math.max(m, set.size), 0) || 0;
-    const maxFromPerTo =
-      Object.values(mapT).reduce((m, set) => Math.max(m, set.size), 0) || 0;
-
-    // 左右の位置に注意:
-    // "A" "右側" -- "左側" "B"
-    return {
-      left: maxFromPerTo <= 1 ? "0..1" : "*",
-      right: maxToPerFrom <= 1 ? "0..1" : "*",
-    };
+    // “一部だけ関係がある”状況を 0..1 で表現（観測で >=2 かつ両側サイズ>=2 のときだけ *）
+    const right = (maxToPerFrom >= 2 && fromClassSize >= 2) ? "*" : "0..1";
+    const left  = (maxFromPerTo >= 2 && toClassSize   >= 2) ? "*" : "0..1";
+    return { left, right };
   }
 
-  // --- オブジェクトもリンクも何も無いときの安全策 ---
+  // ---- データ無し時の安全図 ----
   if (classes.size === 0) {
     return `@startuml
-    title クラス図（データなし）
-    class "Snapshot" {
-    note = "オブジェクト図を入力するとクラス図がここに生成されます"
-    }
-    @enduml`;
-    }
+title クラス図（データなし）
+class "Snapshot" { note = "オブジェクトを追加してください" }
+@enduml`;
+  }
 
-  // --- クラス定義ブロック ---
-  const classBlocks = [...classes]
-    .map((c) => {
-      const attrs = classAttrs[c];
-      const lines = attrs
-        ? [...attrs.entries()].map(([k, t]) => `  ${esc(k)} : ${t}`)
-        : [];
-      return `class "${esc(c)}" {\n${lines.join("\n")}\n}`;
-    })
-    .join("\n\n");
+  // ---- クラス定義 ----
+  const classBlocks = [...classes].map(c => {
+    const attrs = classAttrs[c];
+    const lines = attrs ? [...attrs.entries()].map(([k,t]) => `  ${esc(k)} : ${t}`) : [];
+    return `class "${esc(c)}" {\n${lines.join("\n")}\n}`;
+  }).join("\n\n");
 
-  // --- 関連 ---
-  const rels = Object.values(edge)
-    .map((ed) => {
-      const m = mult(ed.samples);
-      const lab = ed.label ? ` : ${esc(ed.label)}` : "";
-      // 多重度はクラス名の「外側」に書く PUML 記法
-      return `"${esc(ed.fromC)}" "${m.right}" -- "${m.left}" "${esc(
-        ed.toC
-      )}"${lab}`;
-    })
-    .join("\n");
+  // ---- 関連 ----
+  const rels = Object.values(edge).map(ed => {
+    const fromSize = classMembers[ed.fromC]?.size ?? 0;
+    const toSize   = classMembers[ed.toC]?.size   ?? 0;
+    const m = mult(ed.samples, fromSize, toSize);
+    const lab = ed.label ? ` : ${esc(ed.label)}` : "";
+    return `"${esc(ed.fromC)}" "${m.right}" -- "${m.left}" "${esc(ed.toC)}"${lab}`;
+  }).join("\n");
 
-  // --- 最終的な PlantUML コード ---
   return `@startuml
-    title クラス図（オブジェクト図からの推定）
-    skinparam linetype ortho
-    skinparam classAttributeFontSize 12
+skinparam linetype ortho
+skinparam classAttributeFontSize 12
 
-    ${classBlocks}
+${classBlocks}
 
-    ${rels}
-    @enduml`;
+${rels}
+@enduml`;
 }
 
-// ==== エンドポイント本体 ====
-
-// 外部からのアクセスが可能な export 関数（POST メソッド用）
-// レベル3などのページから fetch("/api/class-puml", { body: { snapshot }})
-// で呼び出されることを想定
+// ====== エンドポイント ======
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => ({}));
+    const body = await req.json().catch(() => ({} as unknown));
+    const raw  = (body as any)?.snapshot ?? body;
 
-    // フロント側はいま { snapshot } で送っているのでそれを優先的に読む
-    const raw = body?.snapshot ?? body;
-
-    // --- 入力途中のゴミをここで掃除してからアルゴリズムに渡す ---
-
-    const objects: Obj[] = Array.isArray(raw?.objects)
-      ? raw.objects
-          .map((o: any): Obj => {
-            const name = String(o?.name ?? "").trim();
-            const type =
-              typeof o?.type === "string" && o.type.trim()
-                ? o.type.trim()
-                : undefined;
-
-            const attrs: Attr[] = Array.isArray(o?.attrs)
-              ? o.attrs
-                  .map((a: any): Attr => ({
-                    key: String(a?.key ?? "").trim(),
-                    value: String(a?.value ?? ""),
+    // 入力サニタイズ
+    const objects: Obj[] = Array.isArray((raw as any)?.objects)
+      ? (raw as any).objects
+          .map((o: unknown): Obj => {
+            const name = String((o as any)?.name ?? "").trim();
+            const type = (typeof (o as any)?.type === "string" && (o as any).type.trim())
+              ? (o as any).type.trim()
+              : undefined;
+            const attrs: Attr[] = Array.isArray((o as any)?.attrs)
+              ? (o as any).attrs
+                  .map((a: unknown): Attr => ({
+                    key:   String((a as any)?.key   ?? "").trim(),
+                    value: String((a as any)?.value ?? ""),
                   }))
-                  .filter((a: Attr) => a.key !== "") // key が空は除外
+                  .filter((a: Attr) => a.key !== "")
               : [];
-
             return { name, type, attrs };
           })
-          .filter((o: Obj) => o.name !== "") // 名前が空のオブジェクトは除外
+          .filter((o: Obj) => o.name !== "")
       : [];
 
-    const links: Link[] = Array.isArray(raw?.links)
-      ? raw.links
-          .map((l: any): Link => {
-            const from = String(l?.from ?? "").trim();
-            const to = String(l?.to ?? "").trim();
-            const labelRaw =
-              l?.label != null ? String(l.label).trim() : "";
-
-            return {
-              from,
-              to,
-              label: labelRaw !== "" ? labelRaw : undefined,
-            };
+    const links: Link[] = Array.isArray((raw as any)?.links)
+      ? (raw as any).links
+          .map((l: unknown): Link => {
+            const from = String((l as any)?.from ?? "").trim();
+            const to   = String((l as any)?.to   ?? "").trim();
+            const labelRaw = (l as any)?.label != null ? String((l as any).label).trim() : "";
+            return { from, to, label: labelRaw !== "" ? labelRaw : undefined };
           })
-          .filter((l: Link) => l.from !== "" && l.to !== "") // from/to が空は除外
+          .filter((l: Link) => l.from !== "" && l.to !== "")
       : [];
 
-    const safe = { objects, links };
+    const safe: Snapshot = { objects, links };
 
-    // ここまで来た時点で「壊れた PUML になりにくい」ので 404 が出にくくなる
-    const puml = buildClassDiagramPuml(safe);
+    const warnings: WarningItem[] = [];
+    const puml    = buildClassDiagramPuml(safe, warnings);
     const encoded = encode(puml);
-    const urlSvg = `https://www.plantuml.com/plantuml/svg/${encoded}`;
+    const urlSvg  = `https://www.plantuml.com/plantuml/svg/${encoded}`;
 
-    return NextResponse.json({ puml, encoded, urlSvg }, { status: 200 });
-  } catch (e: any) {
-    // ここで 400 を返すのは「サーバー側で例外が起きたときだけ」
+    // 警告は UI 側で任意に表示できるよう JSON に同梱
+    return NextResponse.json({ puml, encoded, urlSvg, warnings }, { status: 200 });
+  } catch (e: unknown) {
     return NextResponse.json(
-      { error: e?.message ?? "bad request" },
+      { error: (e as any)?.message ?? "bad request" },
       { status: 400 }
     );
   }

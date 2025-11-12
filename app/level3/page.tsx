@@ -12,6 +12,9 @@ type Obj = { name: string; type?: string; attrs?: Attr[] };
 type Link = { from: string; to: string; label?: string };
 type Snapshot = { objects: Obj[]; links: Link[] };
 
+// B案：サーバー（/api/class-puml）から返してもらう警告アイテム
+type WarningItem = { className: string; message: string };
+
 export default function Level3Page() {
   //useProblemConfig でトップページで設定した問題文・正答PUMLを取得
   const {
@@ -29,6 +32,8 @@ export default function Level3Page() {
   // APIエラー内容を保持
   const [objErr, setObjErr] = useState("");
   const [clsErr, setClsErr] = useState("");
+  // B案：クラス推定時の警告（図の外に表示）
+  const [clsWarnings, setClsWarnings] = useState<WarningItem[]>([]);
 
   //まだ何も入力されていないかを調べる小さい関数
   const isEmptySnapshot = (s: Snapshot) =>
@@ -49,64 +54,40 @@ export default function Level3Page() {
       return;
     }
     const id = setTimeout(async () => {
-      //try…catch文は、予想していない異常によりエラーが発生するような場面で意図的に回避するための処理
-      //try{
-          //例外エラーが発生するかもしれない処理
-      //}catch(e){
-        //例外エラーが起きたときに実行する処理
-      //}
-
       try {
         //api/object-pumlに図のもととなるデータ(snapshot)を渡し，画像生成を要求
-        //fetch(...)：サーバーと通信するための関数
-        //method:"POST":データをサーバーに送信(作成・更新)するためのHTTPメソッドを指定してる
-        //headers~:送信するデータ(body)がJSON形式であることをサーバーに伝えている
-        //body~:図の元データであるsnapshotをJSON文字列に変換し，リクエストの本体として含めてる
         const res = await fetch("/api/object-puml", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ snapshot }),
         });
-        //サーバーからの応答(res)の本文(JSONデータ)を解析し，JSのオブジェクトjに格納する
-        //.catch(()→({}))は応答の本文が空だったり，JSONとして不正だったりして解析に失敗した場合でも，
-        //プログラムが停止しないように空のオブジェクト{}を返すための保険
         const j = await res.json().catch(() => ({}));
-        //サーバー空の応答が成功したらif,そうでなければelseを実行
-        //!res.ok→HTTPステータスコードが200でなければ(400とか)
-        //setObjErr(...):エラーメッセージを表示するための状態を更新する
-        // (応答メッセージがあればそれをなければステータスコードを返す)
-        //setObjextPluntUml(""):古い図のURLをクリアする
         if (!res.ok) {
           setObjErr(j?.error || `HTTP ${res.status}`);
           setObjPumlUrl("");
-        
-        //成功なら，set~で取得した図の画像URLを保持するための状態を更新する
         } else {
           setObjPumlUrl(j?.urlSvg || "");
+          setObjErr("");
         }
-      //tryブロック内で，ネット切断やサーバーが全く応答しなくなった時(例外)の処理
-      //catch(e:any)でtryブロック内で発生したエラーをキャッチする
       } catch (e: any) {
         setObjErr(e?.message || "fetch error");
         setObjPumlUrl("");
       }
     }, 250);
-    //snapshotが空になったとき，次のコードを実行する
     return () => clearTimeout(id);
   }, [snapshot]);
 
-  // クラス図推定
-  //useEffct(()→{:Reactのフック関数です。指定されたデータ（依存配列）が変わるたびに、中の関数を実行します。
+  // クラス図推定（B案の警告も受け取り/表示）
   useEffect(() => {
     //snapshotに含まれるobjects(オブジェクトのリスト)の数が０であれば図を生成する必要がないので，次の処理へ
     if ((snapshot.objects?.length ?? 0) === 0) {
       setClsPumlUrl("");
       setClsErr("");
+      setClsWarnings([]); // ← 警告もクリア
       return;
     }
     //デバウンス処理の開始．350ms後に，asyncで定義された非同期処理を実行するよう予約
     const id = setTimeout(async () => {
-      //tryでエラー監視を開始．このブロック内でエラーがもし発生したらcatchに処理が移る
       try {
         const res = await fetch("/api/class-puml", {
           method: "POST",
@@ -117,12 +98,17 @@ export default function Level3Page() {
         if (!res.ok) {
           setClsErr(j?.error || `HTTP ${res.status}`);
           setClsPumlUrl("");
+          setClsWarnings([]); // エラー時は警告もクリア
         } else {
           setClsPumlUrl(j?.urlSvg || "");
+          setClsErr("");
+          // サーバーから warnings が返ってきたら保持する（なければ空配列）
+          setClsWarnings(Array.isArray(j?.warnings) ? j.warnings : []);
         }
       } catch (e: any) {
         setClsErr(e?.message || "fetch error");
         setClsPumlUrl("");
+        setClsWarnings([]); // 例外時もクリア
       }
     }, 350);
     return () => clearTimeout(id);
@@ -130,19 +116,14 @@ export default function Level3Page() {
   }, [snapshot]);
 
   //reactライブラリを用いてアプリのコンポーネントの表示部分を定義する
-  //returnでreactコンポーネントが，webページに表示する内容(JSX/HTML構造)を返す
-  //className="..."→HTML要素にCSSクラスを適用するための属性
-  //クラス名を書き，その下に表示したいものを書く
   return (
-    //メインコンテナ．ページ全体のコンテンツを囲むコンテナ
-    //max-w-6xl:最大幅を設定，mx-auto:左右中央寄せ，p-6:内側の余白，space-y-6:子要素間の垂直スペース
     <div className="max-w-6xl mx-auto p-6 space-y-6">
       {/* 問題文表示（固定高さ＋スクロール） */}
       <section className="rounded-lg border bg-white p-2 space-y-2">
         <h1 className="text-xl font-semibold">
           レベル3：自力でのオブジェクト図整理をマスターしよう！
         </h1>
-        
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {/* 1. クラス図作成問題（左側） */}
           <div>
@@ -193,12 +174,13 @@ export default function Level3Page() {
                   !confirm("入力内容とプレビューをクリアします。よろしいですか？")
                 )
                   return;
-                //snapshotを空にし，プレビューとエラーメッセージもクリア  
+                //snapshotを空にし，プレビューとエラーメッセージもクリア
                 setSnapshot({ objects: [], links: [] });
                 setObjPumlUrl("");
                 setObjErr("");
                 setClsPumlUrl("");
                 setClsErr("");
+                setClsWarnings([]); // ← 警告もリセット
               }}
             >
               すべてクリア
@@ -213,7 +195,6 @@ export default function Level3Page() {
             {objPumlUrl ? (
               //objectPumlUrlに格納されたURLを使って画像を表示
               <img alt="object-uml" src={objPumlUrl} />
-            //objectPumlUrlが空の場合に以下を表示
             ) : (
               <div className="text-xs text-neutral-500">
                 オブジェクト・スロット・リンクを入力すると図が表示されるよ
@@ -236,6 +217,25 @@ export default function Level3Page() {
                 API error: {clsErr}
               </div>
             )}
+
+            {/* ここから警告表示（B案：検証モード） */}
+            {clsWarnings.length > 0 && (
+              <div className="mb-3 rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800">
+                <div className="font-semibold mb-1">⚠ クラス統合に関する注意</div>
+                <ul className="list-disc pl-4 space-y-1">
+                  {clsWarnings.map((w, i) => (
+                    <li key={i}>
+                      <span className="font-semibold">[{w.className}]</span> {w.message}
+                    </li>
+                  ))}
+                </ul>
+                <div className="mt-1 text-[10px] text-amber-700">
+                  ※ 同一クラス内で一部の個体だけ特定の関係を持っている可能性があります（B案の“検証モード”）。
+                </div>
+              </div>
+            )}
+            {/* ここまで警告表示 */}
+
             {clsPumlUrl ? (
               <img alt="class-uml" src={clsPumlUrl} />
             ) : (
@@ -275,8 +275,8 @@ function ManualObjectsForm({
       objects[idx] = { ...objects[idx], name };
       return { ...prev, objects };
     });
-  
-    //指定されたインデックスのオブジェクトに新しいスロットを追加する関数
+
+  //指定されたインデックスのオブジェクトに新しいスロットを追加する関数
   const addAttrTo = (idx: number) =>
     setSnapshot((prev) => {
       const objects = [...prev.objects];
@@ -298,6 +298,7 @@ function ManualObjectsForm({
       objects[idx] = o;
       return { ...prev, objects };
     });
+
   //指定されたスロットの削除
   const removeAttr = (idx: number, aidx: number) =>
     setSnapshot((prev) => {
@@ -310,6 +311,7 @@ function ManualObjectsForm({
       objects[idx] = o;
       return { ...prev, objects };
     });
+
   //指定されたインデックスのオブジェクトを削除する関数
   const removeObject = (idx: number) =>
     setSnapshot((prev) => {
@@ -322,7 +324,6 @@ function ManualObjectsForm({
     });
 
   //ここからは表示(JSX)に関する記述
-  //ユーザーが操作するフォームのHTML構造を定義してる
   return (
     <div className="rounded border p-3 space-y-3 text-sm max-h-80 overflow-y-auto">
       <div className="font-semibold">
@@ -346,7 +347,7 @@ function ManualObjectsForm({
               削除
             </button>
           </div>
-  
+
           <div className="space-y-1">
             {(o.attrs ?? []).map((a, aidx) => (
               <div key={aidx} className="flex items-center gap-2">
@@ -571,8 +572,6 @@ function LinkMiniAdder({
     </div>
   );
 }
-
-
 
 /** =========================
  * 共通：upsertAttr
