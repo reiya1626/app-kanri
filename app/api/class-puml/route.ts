@@ -1,258 +1,364 @@
 // app/api/class-puml/route.ts
-//
-// B案（検証モード）:
-//  - クラス統合は「type > なければ属性名集合」で行う（リンク有無では分割しない）
-//  - 同一クラス内でリンク署名が揃っていない場合は warnings に検出結果を返す
-//  - 多重度は保守的（個体差があれば 0..1、観測的に >=2 があれば *）
-//  - 既存のサニタイズ/型推定は維持
-//
-// 返却: { puml, encoded, urlSvg, warnings?: Array<{className:string, message:string}> }
 
+// Next.js が提供するサーバー側の機能を使うために
+// リクエスト/レスポンス用の型を読み込む
 import { NextRequest, NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
+
+// PlantUML のテキストを URL 用に圧縮/エンコードするライブラリ
 import { encode } from "plantuml-encoder";
 
-// ====== 型 ======
+// ==== 型定義 ====
+
+// スロット(属性) 1 件分
 type Attr = { key: string; value: string };
-type Obj  = { name: string; type?: string; attrs?: Attr[] };
+// オブジェクト 1 件分
+type Obj = { name: string; type?: string; attrs?: Attr[] };
+// リンク 1 本分
 type Link = { from: string; to: string; label?: string };
+// スナップショット
 type Snapshot = { objects: Obj[]; links: Link[] };
 
+// B案：クラス推定時の警告（図の外に出す）
 type WarningItem = { className: string; message: string };
 
-// ====== ユーティリティ ======
+// ==== ユーティリティ ====
+
+// ダブルクォートを軽くエスケープして PUML 内で安全に使えるようにする
 function esc(s: unknown): string {
   return String(s ?? "").replace(/"/g, '\\"');
 }
+
+// 値からざっくり型推定（本格的じゃなくて OK）
 function guessType(v: string): string {
   const s = String(v ?? "").trim();
-  if (/^-?\d+$/.test(s)) return "int";
-  if (/^-?\d+(\.\d+)?$/.test(s)) return "number";
-  if (/^(true|false)$/i.test(s)) return "boolean";
+  // 先に厳密な整数 → 次に実数 → それ以外は文字列
+  if (/^[+-]?\d+$/.test(s)) return "int";
+  if (/^[+-]?\d+(\.\d+)?$/.test(s)) return "number";
   return "string";
 }
-// 属性名集合 → シグネチャ（順序非依存）
-function attrSignature(attrs: Attr[] | undefined): string {
-  const keys = Array.isArray(attrs)
-    ? attrs.map(a => String(a.key ?? "").trim()).filter(Boolean)
-    : [];
-  keys.sort();
+
+// 型のマージ（複数サンプルから最も“広い”型へ）
+// int + int -> int, int + number -> number, それ以外が混ざれば string
+function mergeType(a: string | undefined, b: string | undefined): string {
+  const A = a ?? "string";
+  const B = b ?? "string";
+  if (A === B) return A;
+  const set = new Set([A, B]);
+  if (set.has("string")) return "string";
+  if (set.has("number")) return "number";
+  // ここに来るのは (int, number) 以外はほぼ無い想定
+  return "number";
+}
+
+// 属性キーの正規化（空白類の統一・前後トリムのみ）
+// ※ 同義語吸収は行わない（方針どおり）
+function normKey(key: string): string {
+  return String(key ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// オブジェクトの「属性キー集合シグネチャ」を作る（完全一致で同一クラス統合）
+function signatureOf(obj: Obj): string {
+  const keys = (obj.attrs ?? [])
+    .map((a) => normKey(a.key))
+    .filter((k) => k.length > 0)
+    .sort();
   return keys.join("|");
 }
 
-// ====== メイン ======
-function buildClassDiagramPuml(
-  snap: Snapshot,
-  outWarnings: WarningItem[]
-): string {
-  const objs  = Array.isArray(snap.objects) ? snap.objects : [];
-  const links = Array.isArray(snap.links)   ? snap.links   : [];
+// ==== メイン：スナップショットからクラス図用 PUML を組み立て ====
 
-  // 名前 → オブジェクト
-  const byName = new Map<string, Obj>();
+function buildClassDiagramPuml(
+  snap: Snapshot
+): { puml: string; warnings: WarningItem[] } {
+  const objs = Array.isArray(snap.objects) ? snap.objects : [];
+  const links = Array.isArray(snap.links) ? snap.links : [];
+
+  // 1) 同一クラス統合（属性名集合が完全一致のオブジェクトは同一クラス）
+  const buckets = new Map<
+    string,
+    { className: string; members: Obj[]; attrTypes: Map<string, string> }
+  >();
+  let classCounter = 1;
+
   for (const o of objs) {
-    const nm = String(o.name ?? "").trim();
-    if (nm) byName.set(nm, o);
+    const name = (o.name ?? "").trim();
+    if (!name) continue;
+
+    const sig = signatureOf(o);
+    if (!buckets.has(sig)) {
+      buckets.set(sig, {
+        className: `未定${classCounter++}`, // 仮名（UI から後で編集してもOK）
+        members: [],
+        attrTypes: new Map<string, string>(),
+      });
+    }
+    const bucket = buckets.get(sig)!;
+    bucket.members.push(o);
+
+    // 属性の型を集計（guessType をマージ）
+    for (const { key, value } of o.attrs ?? []) {
+      const k = normKey(key);
+      if (!k) continue;
+      const t = guessType(String(value ?? ""));
+      const prev = bucket.attrTypes.get(k);
+      bucket.attrTypes.set(k, mergeType(prev, t));
+    }
   }
 
-  // 宛先“プロトタイプ”表現（type があれば type、無ければ属性名集合）
-  const destProto = (toName: string) => {
-    const o = byName.get(toName);
-    if (!o) return "∅";
-    const t = (typeof o.type === "string" && o.type.trim()) ? o.type.trim() : "";
-    return t || `SIG(${attrSignature(o.attrs)})`;
+
+
+  // 2) インスタンス名 → クラス名の対応を作る
+  const classOf = new Map<string, string>();
+  for (const b of buckets.values()) {
+    for (const m of b.members) {
+      classOf.set((m.name ?? "").trim(), b.className);
+    }
+  }
+
+  // 3) クラス定義ブロック（属性は「型」を表示）
+  const classBlocks = Array.from(buckets.values())
+    .map((b) => {
+      const lines = Array.from(b.attrTypes.entries()).map(
+        ([k, t]) => `  ${esc(k)} : ${t}`
+      );
+      return `class "${esc(b.className)}" {\n${lines.join("\n")}\n}`;
+    })
+    .join("\n\n");
+
+  // 4) 関連（多重度とラベルを推定）
+  //    - 同一クラス間の重複リンクを統合（対称扱い：キーは辞書順の組）
+  type EdgeKey = string;
+  type Sample = { fromInst: string; toInst: string };
+  type Edge = {
+    aClass: string;
+    bClass: string;
+    label?: string;
+    samples: Sample[]; // インスタンス間リンクのサンプル
   };
 
-  // 1個体の「リンク署名」（from=name） 例: "履修する->SIG(学年),友人->TypeX"
-  function linkSignatureOf(inst: string): string {
-    const mine = links.filter(l => l.from === inst);
-    const parts = mine.map(l => {
-      const lab = (l.label?.trim() || "");
-      return `${lab}->${destProto(l.to)}`;
-    });
-    parts.sort();
-    return parts.join(",");
+  const edges: Record<EdgeKey, Edge> = {};
+
+  const normLabel = (s: unknown) => {
+    const v = String(s ?? "").trim();
+    return v === "" ? undefined : v;
+  };
+
+  for (const e of links) {
+    const fi = (e.from ?? "").trim();
+    const ti = (e.to ?? "").trim();
+    if (!fi || !ti) continue;
+
+    const fc = classOf.get(fi);
+    const tc = classOf.get(ti);
+    if (!fc || !tc) continue;
+
+    // 対称扱いでキー化（クラス名の辞書順）
+    const A = fc <= tc ? fc : tc;
+    const B = fc <= tc ? tc : fc;
+    const lab = normLabel(e.label);
+    const key = `${A}|${B}|${lab ?? ""}`;
+
+    if (!edges[key]) {
+      edges[key] = { aClass: A, bClass: B, label: lab, samples: [] };
+    }
+    edges[key].samples.push({ fromInst: fi, toInst: ti });
   }
 
-  // 生成物
-  const classOf   = new Map<string, string>();                   // instance -> className
-  const classAttrs: Record<string, Map<string,string>> = {};     // className -> Map(attrName -> type)
-  const classes   = new Set<string>();                           // className の集合
-  const classMembers: Record<string, Set<string>> = {};          // className -> インスタンス集合
-  const linkSigPerMember: Record<string, Map<string,string>> = {};// className -> Map(inst -> linkSig)
+  // 多重度の推定（サンプルから）
+  function multiplicity(
+    samples: Sample[],
+    aMembers: string[],
+    bMembers: string[],
+    aOf: Map<string, string>,
+    bOf: Map<string, string>
+  ) {
+    // a側：各 a インスタンスが何個の b と繋がったか
+    const aMap: Record<string, Set<string>> = {};
+    // b側：各 b インスタンスが何個の a と繋がったか
+    const bMap: Record<string, Set<string>> = {};
 
-  // 未定クラス命名
-  let undetSeq = 1;
-  const sig2class = new Map<string, string>(); // 属性名シグネチャ -> className
+    for (const s of samples) {
+      const f = s.fromInst;
+      const t = s.toInst;
+      // どちらが a/b かはクラス名で再判定
+      const fClass = aOf.get(f) || bOf.get(f); // どちらにもなり得る
+      const tClass = aOf.get(t) || bOf.get(t);
 
-  // ---- オブジェクトをクラスへ束ねる（B案: 属性名集合のみで統合）----
-  for (const o of objs) {
-    const inst = String(o.name ?? "").trim();
-    if (!inst) continue;
-
-    let cname = (typeof o.type === "string" && o.type.trim()) ? o.type.trim() : "";
-    if (!cname) {
-      const aSig = attrSignature(o.attrs);
-      if (sig2class.has(aSig)) cname = sig2class.get(aSig)!;
-      else {
-        cname = `未定${undetSeq++}`;
-        sig2class.set(aSig, cname);
+      // f が aClass側、t が bClass側のケース
+      if (fClass && tClass && fClass === aOf.get(f) && tClass === bOf.get(t)) {
+        (aMap[f] ??= new Set()).add(t);
+        (bMap[t] ??= new Set()).add(f);
+        continue;
+      }
+      // 逆（f が b, t が a）
+      if (fClass && tClass && fClass === bOf.get(f) && tClass === aOf.get(t)) {
+        (aMap[t] ??= new Set()).add(f);
+        (bMap[f] ??= new Set()).add(t);
       }
     }
 
-    classOf.set(inst, cname);
-    classes.add(cname);
-    (classMembers[cname] ??= new Set()).add(inst);
+    const maxBPerA =
+      Object.values(aMap).reduce((m, s) => Math.max(m, s.size), 0) || 0;
+    const maxAPerB =
+      Object.values(bMap).reduce((m, s) => Math.max(m, s.size), 0) || 0;
 
-    // 属性型は“最初の観測”を採用
-    const bucket = (classAttrs[cname] ??= new Map<string,string>());
-    const kvs = Array.isArray(o.attrs) ? o.attrs : [];
-    for (const { key, value } of kvs) {
-      const k = String(key ?? "").trim();
-      if (!k) continue;
-      if (!bucket.has(k)) bucket.set(k, guessType(String(value ?? "")));
-    }
-
-    // 検証用に各メンバーのリンク署名を記録
-    (linkSigPerMember[cname] ??= new Map()).set(inst, linkSignatureOf(inst));
+    // PUML 記法に合わせて、"A" "右側" -- "左側" "B"
+    return {
+      right: maxBPerA <= 1 ? "0..1" : "*", // A側に書く多重度（右）
+      left: maxAPerB <= 1 ? "0..1" : "*",  // B側に書く多重度（左）
+      aMap,
+      bMap,
+    };
   }
 
-  // ---- クラス内リンク署名の不一致を検出（警告）----
-  for (const cname of classes) {
-    const sigs = new Set<string>([...(linkSigPerMember[cname]?.values() ?? [])]);
-    if (sigs.size > 1) {
-      outWarnings.push({
-        className: cname,
-        message:
-          `同一クラス内で関係（ラベル/宛先型）の有無・種類が不一致です。` +
-          `（例: 一部の個体だけ「履修する->心理学」を持つ など）`
+  // クラス名 → メンバー名の配列
+  const classMembers = new Map<string, string[]>();
+  for (const b of buckets.values()) {
+    classMembers.set(
+      b.className,
+      b.members.map((m) => (m.name ?? "").trim()).filter(Boolean)
+    );
+  }
+
+  // 5) B案：警告収集
+  const warnings: WarningItem[] = [];
+
+  // 実際の関連の PUML 行を作る
+  const relLines: string[] = [];
+
+  for (const ed of Object.values(edges)) {
+    const aClass = ed.aClass;
+    const bClass = ed.bClass;
+    const label = ed.label ? ` : ${esc(ed.label)}` : "";
+
+    // クラス名 -> メンバー名の配列
+    const aMembers = classMembers.get(aClass) ?? [];
+    const bMembers = classMembers.get(bClass) ?? [];
+
+    // メンバー -> 所属クラス名の逆引き（簡易に Map を準備）
+    const aOf = new Map<string, string>();
+    const bOf = new Map<string, string>();
+    aMembers.forEach((m) => aOf.set(m, aClass));
+    bMembers.forEach((m) => bOf.set(m, bClass));
+
+    const mult = multiplicity(ed.samples, aMembers, bMembers, aOf, bOf);
+
+    // 警告：クラス内の一部インスタンスがこの関連に不参加
+    // a 側
+    const aJoined = new Set(Object.keys(mult.aMap));
+    if (aMembers.length > 0 && aJoined.size < aMembers.length) {
+      const missing = aMembers.filter((m) => !aJoined.has(m));
+      warnings.push({
+        className: aClass,
+        message: `関連${ed.label ? `「${ed.label}」` : ""}（相手: ${bClass}）に未接続のインスタンスがあります: ${missing.join(", ")}`,
       });
     }
-  }
-
-  // ---- リンクをクラス間に集約 ----
-  type EdgeKey = string;
-  const edge: Record<EdgeKey, {
-    fromC: string; toC: string; label?: string;
-    samples: Array<{ fromInst: string; toInst: string }>;
-  }> = {};
-
-  for (const e of links) {
-    const fromC = classOf.get(e.from);
-    const toC   = classOf.get(e.to);
-    if (!fromC || !toC) continue;
-
-    const lab = e.label?.trim() || undefined;
-    const key = `${fromC}|${toC}|${lab ?? ""}`;
-    (edge[key] ??= { fromC, toC, label: lab, samples: [] })
-      .samples.push({ fromInst: e.from, toInst: e.to });
-  }
-
-  // ---- 多重度（保守的）----
-  function mult(
-    samples: Array<{ fromInst: string; toInst: string }>,
-    fromClassSize: number,
-    toClassSize: number
-  ) {
-    const mapF: Record<string, Set<string>> = {};
-    const mapT: Record<string, Set<string>> = {};
-    for (const s of samples) {
-      (mapF[s.fromInst] ??= new Set()).add(s.toInst);
-      (mapT[s.toInst]   ??= new Set()).add(s.fromInst);
+    // b 側
+    const bJoined = new Set(Object.keys(mult.bMap));
+    if (bMembers.length > 0 && bJoined.size < bMembers.length) {
+      const missing = bMembers.filter((m) => !bJoined.has(m));
+      warnings.push({
+        className: bClass,
+        message: `関連${ed.label ? `「${ed.label}」` : ""}（相手: ${aClass}）に未接続のインスタンスがあります: ${missing.join(", ")}`,
+      });
     }
-    const maxToPerFrom = Math.max(0, ...Object.values(mapF).map(s => s.size));
-    const maxFromPerTo = Math.max(0, ...Object.values(mapT).map(s => s.size));
 
-    // “一部だけ関係がある”状況を 0..1 で表現（観測で >=2 かつ両側サイズ>=2 のときだけ *）
-    const right = (maxToPerFrom >= 2 && fromClassSize >= 2) ? "*" : "0..1";
-    const left  = (maxFromPerTo >= 2 && toClassSize   >= 2) ? "*" : "0..1";
-    return { left, right };
+    // PUML 行
+    // 多重度はクラス名の外側に書く
+    relLines.push(
+      `"${esc(aClass)}" "${mult.right}" -- "${mult.left}" "${esc(bClass)}"${label}`
+    );
   }
 
-  // ---- データ無し時の安全図 ----
-  if (classes.size === 0) {
-    return `@startuml
-title クラス図（データなし）
-class "Snapshot" { note = "オブジェクトを追加してください" }
-@enduml`;
-  }
-
-  // ---- クラス定義 ----
-  const classBlocks = [...classes].map(c => {
-    const attrs = classAttrs[c];
-    const lines = attrs ? [...attrs.entries()].map(([k,t]) => `  ${esc(k)} : ${t}`) : [];
-    return `class "${esc(c)}" {\n${lines.join("\n")}\n}`;
-  }).join("\n\n");
-
-  // ---- 関連 ----
-  const rels = Object.values(edge).map(ed => {
-    const fromSize = classMembers[ed.fromC]?.size ?? 0;
-    const toSize   = classMembers[ed.toC]?.size   ?? 0;
-    const m = mult(ed.samples, fromSize, toSize);
-    const lab = ed.label ? ` : ${esc(ed.label)}` : "";
-    return `"${esc(ed.fromC)}" "${m.right}" -- "${m.left}" "${esc(ed.toC)}"${lab}`;
-  }).join("\n");
-
-  return `@startuml
+  // クラス図全体 PUML
+  const puml = `@startuml
 skinparam linetype ortho
 skinparam classAttributeFontSize 12
 
 ${classBlocks}
 
-${rels}
+${relLines.join("\n")}
+
 @enduml`;
+
+  return { puml, warnings };
 }
 
-// ====== エンドポイント ======
+// ==== エンドポイント本体 ====
+
+// 外部からのアクセスが可能な export 関数（POST メソッド用）
+// レベル3などのページから fetch("/api/class-puml", { body: { snapshot }})
+// で呼び出されることを想定
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => ({} as unknown));
-    const raw  = (body as any)?.snapshot ?? body;
+    const body = await req.json().catch(() => ({}));
 
-    // 入力サニタイズ
-    const objects: Obj[] = Array.isArray((raw as any)?.objects)
-      ? (raw as any).objects
-          .map((o: unknown): Obj => {
-            const name = String((o as any)?.name ?? "").trim();
-            const type = (typeof (o as any)?.type === "string" && (o as any).type.trim())
-              ? (o as any).type.trim()
-              : undefined;
-            const attrs: Attr[] = Array.isArray((o as any)?.attrs)
-              ? (o as any).attrs
-                  .map((a: unknown): Attr => ({
-                    key:   String((a as any)?.key   ?? "").trim(),
-                    value: String((a as any)?.value ?? ""),
+    // フロント側はいま { snapshot } で送っているのでそれを優先的に読む
+    const raw = body?.snapshot ?? body;
+
+    // --- 入力途中のゴミをここで掃除してからアルゴリズムに渡す ---
+    const objects: Obj[] = Array.isArray(raw?.objects)
+      ? raw.objects
+          .map((o: any): Obj => {
+            const name = String(o?.name ?? "").trim();
+            const type =
+              typeof o?.type === "string" && o.type.trim()
+                ? o.type.trim()
+                : undefined;
+
+            const attrs: Attr[] = Array.isArray(o?.attrs)
+              ? o.attrs
+                  .map((a: any): Attr => ({
+                    key: String(a?.key ?? "").trim(),
+                    value: String(a?.value ?? ""),
                   }))
-                  .filter((a: Attr) => a.key !== "")
+                  .filter((a: Attr) => a.key !== "") // key が空は除外
               : [];
+
             return { name, type, attrs };
           })
-          .filter((o: Obj) => o.name !== "")
+          .filter((o: Obj) => o.name !== "") // 名前が空のオブジェクトは除外
       : [];
 
-    const links: Link[] = Array.isArray((raw as any)?.links)
-      ? (raw as any).links
-          .map((l: unknown): Link => {
-            const from = String((l as any)?.from ?? "").trim();
-            const to   = String((l as any)?.to   ?? "").trim();
-            const labelRaw = (l as any)?.label != null ? String((l as any).label).trim() : "";
-            return { from, to, label: labelRaw !== "" ? labelRaw : undefined };
+    // from/to 空は除外。label は空文字なら undefined に。
+    const links: Link[] = Array.isArray(raw?.links)
+      ? raw.links
+          .map((l: any): Link => {
+            const from = String(l?.from ?? "").trim();
+            const to = String(l?.to ?? "").trim();
+            const labelRaw =
+              l?.label != null ? String(l.label).trim() : "";
+            return {
+              from,
+              to,
+              label: labelRaw !== "" ? labelRaw : undefined,
+            };
           })
           .filter((l: Link) => l.from !== "" && l.to !== "")
       : [];
 
     const safe: Snapshot = { objects, links };
 
-    const warnings: WarningItem[] = [];
-    const puml    = buildClassDiagramPuml(safe, warnings);
+    // ここまで来た時点で「壊れた PUML になりにくい」ので 404/500 が出にくくなる
+    const { puml, warnings } = buildClassDiagramPuml(safe);
+    if (!/^@startuml[\s\S]*@enduml\s*$/.test(puml)) {
+      return NextResponse.json(
+        { error: "生成されたPUMLが不正です。", puml },
+        { status: 400 }
+      );
+    }
     const encoded = encode(puml);
-    const urlSvg  = `https://www.plantuml.com/plantuml/svg/${encoded}`;
+    const urlSvg = `https://www.plantuml.com/plantuml/svg/${encoded}`;
 
-    // 警告は UI 側で任意に表示できるよう JSON に同梱
+    // 警告も一緒に返す（B案）
     return NextResponse.json({ puml, encoded, urlSvg, warnings }, { status: 200 });
-  } catch (e: unknown) {
+  } catch (e: any) {
+    // ここで 400 を返すのは「サーバー側で例外が起きたときだけ」
     return NextResponse.json(
-      { error: (e as any)?.message ?? "bad request" },
+      { error: e?.message ?? "bad request" },
       { status: 400 }
     );
   }
