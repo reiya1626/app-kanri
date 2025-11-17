@@ -544,7 +544,7 @@ function LinkMiniAdder({
             {/* label */}
             <input
               className="border rounded px-2 py-1 w-28"
-              placeholder="ラベル（任意）"
+              placeholder="ラベル"
               value={l.label ?? ""}
               onChange={(e) => updateLink(i, { label: e.target.value })}
             />
