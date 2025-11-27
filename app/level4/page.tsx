@@ -574,21 +574,29 @@ export default function Level4Page() {
     <div className="max-w-6xl mx-auto p-6 space-y-6">
       {/* 上部：問題文表示 */}
       <section className="rounded-lg border bg-white p-4 space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-4">
           <h1 className="text-xl font-semibold">
             レベル4：オブジェクト図からクラス図へ（プレビュー＋確定版）
           </h1>
-          <div className="flex gap-2">
+          {/* ★ グローバル操作ボタン（色付きで横並び） */}
+          <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              className="text-xs px-3 py-1 rounded border"
+              className="text-xs px-3 py-1 rounded border bg-red-50 border-red-300 text-red-700 hover:bg-red-100"
+              onClick={handleClearAll}
+            >
+              すべてクリア
+            </button>
+            <button
+              type="button"
+              className="text-xs px-3 py-1 rounded border bg-blue-50 border-blue-300 text-blue-700 hover:bg-blue-100"
               onClick={handleSaveState}
             >
               状態を保存
             </button>
             <button
               type="button"
-              className="text-xs px-3 py-1 rounded border"
+              className="text-xs px-3 py-1 rounded border bg-emerald-50 border-emerald-300 text-emerald-700 hover:bg-emerald-100"
               onClick={handleLoadState}
             >
               保存状態を読み込み
@@ -636,13 +644,7 @@ export default function Level4Page() {
             <h2 className="font-semibold text-sm">
               ステップ1：問題文からオブジェクト・リンクを入力しよう
             </h2>
-            <button
-              type="button"
-              className="text-xs px-3 py-1 rounded border"
-              onClick={handleClearAll}
-            >
-              すべてクリア
-            </button>
+            {/* ここにはもう「すべてクリア」ボタンは置かない */}
           </div>
 
           <div className="space-y-3">
@@ -786,9 +788,13 @@ export default function Level4Page() {
               <div className="border-t pt-2 text-[11px] text-neutral-700 space-y-1">
                 <div className="font-semibold">推定ルール（全体のイメージ）</div>
                 <ul className="list-disc pl-4 space-y-0.5">
-                  <li>同じような名前のオブジェクトが複数あると、クラス候補として推定されます。</li>
+                  <li>
+                    同じような名前のオブジェクトが複数あると、クラス候補として推定されます。
+                  </li>
                   <li>オブジェクト間のリンクから、クラス間の関連が推定されます。</li>
-                  <li>スロット（属性）の値のパターンから、クラスの属性候補が推定されます。</li>
+                  <li>
+                    スロット（属性）の値のパターンから、クラスの属性候補が推定されます。
+                  </li>
                 </ul>
               </div>
 
