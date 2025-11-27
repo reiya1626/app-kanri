@@ -1,192 +1,199 @@
+// components/LinkMiniAdder.tsx
 "use client";
 
-import { Link as LinkType, Obj } from "@/types";
-import { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import type { Obj, Link } from "@/types";
 
-export function LinkMiniAdder({
-  objects,
-  links,
-  setLinks,
-}: {
+type Props = {
   objects: Obj[];
-  links: LinkType[];
-  setLinks: (next: LinkType[]) => void;
-}) {
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
-  const [label, setLabel] = useState("");
-  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  links: Link[];
+  setLinks: (links: Link[]) => void;
+};
 
-  const objectNames = objects.map((o) => o.name).filter((n) => n && n.length > 0);
+export function LinkMiniAdder({ objects, links, setLinks }: Props) {
+  const objectNames = useMemo(
+    () => objects.map((o) => o.name).filter((n) => n),
+    [objects]
+  );
 
-  const resetForm = () => {
-    setFrom("");
-    setTo("");
-    setLabel("");
-    setEditingIndex(null);
-  };
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(
+    links.length ? 0 : null
+  );
 
-  const handleAddOrUpdate = () => {
-    if (!from || !to) {
-      alert("「～は」「～を」の両方にオブジェクトを選んでください。");
-      return;
+  // links の増減に応じて選択インデックスを調整
+  useEffect(() => {
+    if (links.length === 0) {
+      setSelectedIndex(null);
+    } else if (selectedIndex === null || selectedIndex >= links.length) {
+      setSelectedIndex(0);
     }
-    const trimmedLabel = label.trim();
+  }, [links.length, selectedIndex]);
 
-    if (editingIndex === null) {
-      // 追加
-      setLinks([
-        ...links,
-        {
-          from,
-          to,
-          label: trimmedLabel || undefined,
-        },
-      ]);
-    } else {
-      // 更新
-      const next = [...links];
-      next[editingIndex] = {
-        ...next[editingIndex],
-        from,
-        to,
-        label: trimmedLabel || undefined,
-      };
-      setLinks(next);
-    }
-    resetForm();
+  const addLink = () => {
+    const next = [...links, { from: "", to: "", label: "" }];
+    setLinks(next);
+    setSelectedIndex(next.length - 1);
   };
 
-  const handleEdit = (idx: number) => {
-    const l = links[idx];
-    setFrom(l.from);
-    setTo(l.to);
-    setLabel(l.label ?? "");
-    setEditingIndex(idx);
-  };
-
-  const handleDelete = (idx: number) => {
-    if (!confirm("この関係を削除してよいですか？")) return;
+  const removeLink = (idx: number) => {
     const next = [...links];
     next.splice(idx, 1);
     setLinks(next);
-    // 編集中のものを消した場合はフォームもリセット
-    if (editingIndex === idx) {
-      resetForm();
-    }
+
+    setSelectedIndex((prev) => {
+      if (next.length === 0) return null;
+      if (prev === null) return 0;
+      if (idx === prev) return Math.min(prev, next.length - 1);
+      if (idx < prev) return prev - 1;
+      return prev;
+    });
   };
 
-  const previewSentence = () => {
-    const f = from || "□";
-    const t = to || "△";
-    const lbl = label.trim() || "〜する";
-    return `${f} は、${t} を ${lbl}`;
+  const updateSelected = (patch: Partial<Link>) => {
+    if (selectedIndex === null) return;
+    const next = [...links];
+    const current = next[selectedIndex] ?? { from: "", to: "", label: "" };
+    next[selectedIndex] = { ...current, ...patch };
+    setLinks(next);
   };
+
+  const selectedLink =
+    selectedIndex !== null ? links[selectedIndex] ?? null : null;
+
+  const previewSentence =
+    selectedLink && (selectedLink.from || selectedLink.to)
+      ? `${selectedLink.from || "（未選択）"} は、${
+          selectedLink.to || "（未選択）"
+        } を ${selectedLink.label?.trim() || "〜する"}`
+      : "オブジェクトを選ぶと、ここに「□ は △ を ～する」の文が表示されます。";
 
   return (
-    <div className="space-y-2">
-      {/* 入力フォーム */}
-      <div className="flex flex-col gap-2 text-xs">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="whitespace-nowrap">□ は</span>
-          <select
-            className="border rounded px-2 py-1"
-            value={from}
-            onChange={(e) => setFrom(e.target.value)}
-          >
-            <option value="">（オブジェクトを選択）</option>
-            {objectNames.map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
-          </select>
-
-          <span className="whitespace-nowrap">、 △ を</span>
-          <select
-            className="border rounded px-2 py-1"
-            value={to}
-            onChange={(e) => setTo(e.target.value)}
-          >
-            <option value="">（オブジェクトを選択）</option>
-            {objectNames.map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
-          </select>
-
-          <span className="whitespace-nowrap">〜する（関係ラベル）:</span>
-          <input
-            className="border rounded px-2 py-1 flex-1 min-w-[120px]"
-            placeholder="例: 注文する / 所属する など（空なら「〜する」）"
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-          />
-        </div>
-
-        {/* プレビュー文 */}
-        <div className="text-[11px] text-neutral-600">
-          プレビュー：<span className="font-mono">{previewSentence()}</span>
-        </div>
-
-        <div className="flex gap-2">
-          <button
-            type="button"
-            className="px-3 py-1 rounded border text-xs"
-            onClick={handleAddOrUpdate}
-          >
-            {editingIndex === null ? "関係を追加" : "関係を更新"}
-          </button>
-          {editingIndex !== null && (
-            <button
-              type="button"
-              className="px-3 py-1 rounded border text-xs"
-              onClick={resetForm}
-            >
-              編集キャンセル
-            </button>
-          )}
-        </div>
+    <div className="space-y-3 text-xs">
+      {/* 上：リンク一覧 */}
+      <div className="flex items-center justify-between mb-1">
+        <div className="text-xs font-semibold">登録済みリンク一覧</div>
+        <button
+          type="button"
+          className="text-xs px-3 py-1 rounded border bg-neutral-50 hover:bg-neutral-100"
+          onClick={addLink}
+        >
+          ＋ リンクを追加
+        </button>
       </div>
 
-      {/* 追加済みリンクの一覧（編集・削除付き） */}
-      <ul className="text-xs mt-2 space-y-1">
-        {links.map((l, i) => {
-          const sentence = `${l.from} は、${l.to} を ${
-            l.label?.trim() || "〜する"
-          }`;
-          return (
-            <li
-              key={i}
-              className="flex items-center justify-between gap-2 border rounded px-2 py-1 bg-neutral-50"
-            >
-              <span className="flex-1">{sentence}</span>
-              <div className="flex gap-1">
-                <button
-                  type="button"
-                  className="px-2 py-0.5 rounded border text-[10px]"
-                  onClick={() => handleEdit(i)}
+      <div className="border rounded bg-neutral-50 max-h-40 overflow-y-auto">
+        {links.length === 0 ? (
+          <div className="px-2 py-2 text-[11px] text-neutral-500">
+            まだリンクがありません。「＋ リンクを追加」から作成してください。
+          </div>
+        ) : (
+          <ul className="divide-y">
+            {links.map((l, idx) => {
+              const isSelected = idx === selectedIndex;
+              const labelText = l.label?.trim() || "〜する";
+              return (
+                <li
+                  key={idx}
+                  className={
+                    "flex items-center justify-between px-2 py-1 cursor-pointer transition-colors " +
+                    (isSelected ? "bg-emerald-50" : "hover:bg-neutral-100")
+                  }
+                  onClick={() => setSelectedIndex(idx)}
                 >
-                  編集
-                </button>
-                <button
-                  type="button"
-                  className="px-2 py-0.5 rounded border text-[10px]"
-                  onClick={() => handleDelete(i)}
-                >
-                  削除
-                </button>
-              </div>
-            </li>
-          );
-        })}
-        {links.length === 0 && (
-          <li className="text-[11px] text-neutral-400 list-none">
-            まだ関係は追加されていません。
-          </li>
+                  <div className="flex items-center gap-2">
+                    <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-white border text-[10px] text-neutral-600">
+                      {idx + 1}
+                    </span>
+                    <span className="font-mono text-[11px]">
+                      {l.from || "（未選択）"} は、{l.to || "（未選択）"} を{" "}
+                      {labelText}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    {isSelected && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
+                        選択中
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      className="px-2 py-0.5 rounded border text-[10px] bg-white hover:bg-red-50"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeLink(idx);
+                      }}
+                    >
+                      削除
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
         )}
-      </ul>
+      </div>
+
+      {/* 下：編集パネル（選択中 or 新規） */}
+      {selectedLink ? (
+        <div className="border rounded p-3 space-y-2 bg-emerald-50/40">
+          <div className="flex items-center justify-between">
+            <div className="text-[11px] font-semibold">
+              編集中のリンク：{selectedIndex! + 1} 行目
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2 items-center">
+            <select
+              className="border rounded px-2 py-1 text-xs bg-white"
+              value={selectedLink.from}
+              onChange={(e) => updateSelected({ from: e.target.value })}
+            >
+              <option value="">（□ は …）</option>
+              {objectNames.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+
+            <span className="text-xs">は、</span>
+
+            <select
+              className="border rounded px-2 py-1 text-xs bg-white"
+              value={selectedLink.to}
+              onChange={(e) => updateSelected({ to: e.target.value })}
+            >
+              <option value="">（△ を …）</option>
+              {objectNames.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+
+            <span className="text-xs">を</span>
+
+            <input
+              className="border rounded px-2 py-1 text-xs bg-white flex-1 min-w-[120px]"
+              placeholder="例: 履修する, 所属する（空なら「〜する」）"
+              value={selectedLink.label ?? ""}
+              onChange={(e) => updateSelected({ label: e.target.value })}
+            />
+          </div>
+
+          <div className="text-[11px] text-neutral-600">
+            プレビュー：<span className="font-mono">{previewSentence}</span>
+          </div>
+
+          <div className="text-[10px] text-neutral-500">
+            ※ 「□ は △ を ～する」の形でオブジェクト間の関係を表します。
+          </div>
+        </div>
+      ) : (
+        <div className="text-[10px] text-neutral-500">
+          ※ 編集したいリンクを一覧から選択するか、「＋ リンクを追加」で新しく作成してください。
+        </div>
+      )}
     </div>
   );
 }

@@ -6,6 +6,8 @@ import { useProblemConfig } from "../../components/problem-config";
 import { LinkMiniAdder } from "../../components/LinkMiniAdder";
 import type { Obj, Link, Attr } from "@/types";
 import { generatePlantUMLUrl } from "@/utils/plantuml";
+import { useRouter } from "next/navigation";
+
 
 type Snapshot = { objects: Obj[]; links: Link[] };
 
@@ -38,19 +40,16 @@ const LEVEL4_STORAGE_KEY = "level4-state-v1";
 
 /* ================= ユーティリティ関数 ================= */
 
-// 末尾の数字を落として「語幹」を作る（例: 商品1 → 商品）
 function stemObjectName(name: string): string {
   return name.replace(/[\d０-９]+$/u, "").trim();
 }
 
-// オブジェクト名からクラス名候補を作る（語幹が空なら元の名前）
 function baseClassNameFromObjectName(name: string): string {
   const trimmed = name.trim();
   const stem = stemObjectName(trimmed);
   return stem || trimmed;
 }
 
-// キーワードをハイライトして問題文を表示
 function renderHighlightedText(
   text: string,
   keywords: string[]
@@ -81,7 +80,6 @@ function renderHighlightedText(
   });
 }
 
-// PlantUML からクラス名一覧を抜き出す
 function parseClassNames(puml: string): string[] {
   const lines = puml.split(/\r?\n/);
   const names: string[] = [];
@@ -92,13 +90,12 @@ function parseClassNames(puml: string): string[] {
   return Array.from(new Set(names));
 }
 
-// PlantUML から「関連 A -- B」を抽出して正規化キーにする
 function parseRelations(puml: string): string[] {
   const lines = puml.split(/\r?\n/);
   const rels: string[] = [];
   for (const line of lines) {
     if (!line.includes("--")) continue;
-    if (line.trim().startsWith("@")) continue; // @startuml などは無視
+    if (line.trim().startsWith("@")) continue;
     const m = line.match(
       /^\s*([^\s"]+)\s+["0-9.* ]*..?-["0-9.* ]*\s+([^\s"]+)/
     );
@@ -112,7 +109,6 @@ function parseRelations(puml: string): string[] {
   return Array.from(new Set(rels));
 }
 
-// クラス図の簡易整合性チェック
 function checkClassDiagram(puml: string): string[] {
   const messages: string[] = [];
   if (!puml.trim()) {
@@ -165,7 +161,6 @@ function checkClassDiagram(puml: string): string[] {
   return messages;
 }
 
-// 推定ルールの「ちょっとだけ見せる」ためのメッセージ生成
 function buildInferenceHints(
   objects: Obj[],
   links: Link[],
@@ -176,7 +171,6 @@ function buildInferenceHints(
   const relationHints: string[] = [];
   const attrHints: string[] = [];
 
-  // クラス生成の理由
   if (objects.length > 0) {
     const classToObjs = new Map<string, string[]>();
     for (const o of objects) {
@@ -202,7 +196,6 @@ function buildInferenceHints(
     }
   }
 
-  // 関連生成の理由（リンクから）
   if (links.length > 0 && objects.length > 0) {
     type RelKey = string;
     const relMap = new Map<
@@ -236,7 +229,6 @@ function buildInferenceHints(
     }
   }
 
-  // 属性の incomplete / contradictory に関する説明
   if (issues && issues.classes && issues.classes.length > 0) {
     for (const c of issues.classes) {
       if (c.incomplete && c.incomplete.length > 0) {
@@ -257,13 +249,47 @@ function buildInferenceHints(
   return { classHints, relationHints, attrHints };
 }
 
+/* ================= モーダルコンポーネント ================= */
+
+type ProblemModalProps = {
+  title: string;
+  children: React.ReactNode;
+  onClose: () => void;
+};
+
+function ProblemModal({ title, children, onClose }: ProblemModalProps) {
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center">
+      <div className="bg-white rounded-lg shadow-xl w-[90%] max-w-4xl max-h-[80vh] flex flex-col">
+        <div className="flex items-center justify-between px-4 py-2 border-b">
+          <div className="text-sm font-semibold">{title}</div>
+          <button
+            type="button"
+            className="text-xs px-2 py-1 rounded border bg-neutral-50 hover:bg-neutral-100"
+            onClick={onClose}
+          >
+            閉じる
+          </button>
+        </div>
+        <div className="px-4 py-3 overflow-y-auto text-sm whitespace-pre-wrap">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ================= メインページコンポーネント ================= */
 
 export default function Level4Page() {
   const { classProblemText, objectProblemText, classAnswerPuml } =
     useProblemConfig();
+  const router = useRouter();   // ★追加
 
-  // オブジェクト図状態
+  // 問題文モーダル
+  const [isClassModalOpen, setIsClassModalOpen] = useState(false);
+  const [isObjectModalOpen, setIsObjectModalOpen] = useState(false);
+
   const [objects, setObjects] = useState<Obj[]>([]);
   const [links, setLinks] = useState<Link[]>([]);
   const snapshot = useMemo<Snapshot>(() => ({ objects, links }), [objects, links]);
@@ -272,7 +298,6 @@ export default function Level4Page() {
     (!s.objects || s.objects.length === 0) &&
     (!s.links || s.links.length === 0);
 
-  // オブジェクト図プレビュー
   const [objPumlUrl, setObjPumlUrl] = useState("");
   const [objErr, setObjErr] = useState("");
 
@@ -307,7 +332,6 @@ export default function Level4Page() {
     return () => clearTimeout(id);
   }, [snapshot]);
 
-  // クラス図プレビュー（推定結果）
   const [clsPreviewPuml, setClsPreviewPuml] = useState<string | null>(null);
   const [clsPreviewUrl, setClsPreviewUrl] = useState("");
   const [clsIssues, setClsIssues] = useState<ConvertResponse["issues"]>();
@@ -358,7 +382,6 @@ export default function Level4Page() {
     return () => clearTimeout(id);
   }, [snapshot]);
 
-  // 学習者が編集する確定クラス図
   const [finalClassPuml, setFinalClassPuml] = useState("");
   const [finalClassUrl, setFinalClassUrl] = useState("");
   const hasFinal = finalClassPuml.trim().length > 0;
@@ -371,20 +394,15 @@ export default function Level4Page() {
     setFinalClassUrl(generatePlantUMLUrl(finalClassPuml));
   }, [finalClassPuml, hasFinal]);
 
-  // クラス図整合性チェック結果
   const [checkMessages, setCheckMessages] = useState<string[]>([]);
-
-  // 採点結果
   const [score, setScore] = useState<ScoreBreakdown | null>(null);
   const [gradeErr, setGradeErr] = useState<string | null>(null);
 
-  // 推定理由メッセージ
   const inferenceHints = useMemo(
     () => buildInferenceHints(objects, links, clsPreviewPuml, clsIssues),
     [objects, links, clsPreviewPuml, clsIssues]
   );
 
-  // セーブ・ロード
   const handleSaveState = () => {
     if (typeof window === "undefined") return;
     const data = {
@@ -411,7 +429,7 @@ export default function Level4Page() {
       setCheckMessages([]);
       setScore(null);
       alert("保存された状態を読み込みました。");
-    } catch (e) {
+    } catch {
       alert("保存データの読み込みに失敗しました。");
     }
   };
@@ -426,11 +444,10 @@ export default function Level4Page() {
       setLinks(data.links ?? []);
       setFinalClassPuml(data.finalClassPuml ?? "");
     } catch {
-      // 読み込み失敗時は何もしない
+      // ignore
     }
   }, []);
 
-  // プレビュー → 確定クラス図へコピー
   const handleConvertToEditable = () => {
     if (!clsPreviewPuml) {
       alert(
@@ -473,7 +490,6 @@ export default function Level4Page() {
     setScore(null);
   };
 
-  // キーワードハイライト用：オブジェクト名の語幹一覧
   const objectStems = useMemo(
     () =>
       Array.from(
@@ -486,7 +502,6 @@ export default function Level4Page() {
     [objects]
   );
 
-  // 差分強調用：クラス名セット
   const previewClassNames =
     clsPreviewPuml && clsPreviewPuml.trim()
       ? parseClassNames(clsPreviewPuml)
@@ -498,13 +513,11 @@ export default function Level4Page() {
   const onlyObj = objectStems.filter((s) => !previewClassSet.has(s));
   const onlyClass = previewClassNames.filter((c) => !objectStemSet.has(c));
 
-  // クラス図整合性チェック
   const handleCheckDiagram = () => {
     const msgs = checkClassDiagram(finalClassPuml);
     setCheckMessages(msgs);
   };
 
-  // 採点
   const handleGrade = () => {
     setGradeErr(null);
     setScore(null);
@@ -571,127 +584,139 @@ export default function Level4Page() {
   };
 
   return (
-    <div className="max-w-6xl mx-auto p-6 space-y-6">
-      {/* 上部：問題文表示 */}
-      <section className="rounded-lg border bg-white p-4 space-y-3">
-        <div className="flex items-center justify-between gap-4">
+    <div className="max-w-7xl mx-auto p-6 space-y-4">
+      {/* ヘッダ：タイトル＋グローバルボタン */}
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-col gap-1">
           <h1 className="text-xl font-semibold">
             レベル4：オブジェクト図からクラス図へ（プレビュー＋確定版）
           </h1>
-          {/* ★ グローバル操作ボタン（色付きで横並び） */}
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              className="text-xs px-3 py-1 rounded border bg-red-50 border-red-300 text-red-700 hover:bg-red-100"
-              onClick={handleClearAll}
-            >
-              すべてクリア
-            </button>
-            <button
-              type="button"
-              className="text-xs px-3 py-1 rounded border bg-blue-50 border-blue-300 text-blue-700 hover:bg-blue-100"
-              onClick={handleSaveState}
-            >
-              状態を保存
-            </button>
-            <button
-              type="button"
-              className="text-xs px-3 py-1 rounded border bg-emerald-50 border-emerald-300 text-emerald-700 hover:bg-emerald-100"
-              onClick={handleLoadState}
-            >
-              保存状態を読み込み
-            </button>
-          </div>
         </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <div className="text-sm font-semibold mb-1">
-              クラス図作成問題（本文）
-            </div>
-            <div className="text-sm bg-neutral-50 border rounded p-2 whitespace-pre-wrap max-h-40 overflow-y-auto">
-              {classProblemText
-                ? renderHighlightedText(classProblemText, objectStems)
-                : "（トップページでクラス図問題文を設定してください）"}
-            </div>
-            <div className="text-[10px] text-neutral-500 mt-1">
-              ※ 現在入力されているオブジェクト名に似た語を自動でハイライトしています（オブジェクト候補／クラス候補）。
-            </div>
-          </div>
-
-          <div>
-            <div className="text-sm font-semibold mb-1">
-              オブジェクト図作成問題（本文）
-            </div>
-            <div className="text-sm bg-neutral-50 border rounded p-2 whitespace-pre-wrap max-h-40 overflow-y-auto">
-              {objectProblemText
-                ? renderHighlightedText(objectProblemText, objectStems)
-                : "（トップページでオブジェクト図問題文を設定してください）"}
-            </div>
-          </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="text-xs px-3 py-1 rounded border bg-red-50 border-red-300 text-red-700 hover:bg-red-100"
+            onClick={handleClearAll}
+          >
+            すべてクリア
+          </button>
+          <button
+            type="button"
+            className="text-xs px-3 py-1 rounded border bg-blue-50 border-blue-300 text-blue-700 hover:bg-blue-100"
+            onClick={handleSaveState}
+          >
+            状態を保存
+          </button>
+          <button
+            type="button"
+            className="text-xs px-3 py-1 rounded border bg-emerald-50 border-emerald-300 text-emerald-700 hover:bg-emerald-100"
+            onClick={handleLoadState}
+          >
+            保存状態を読み込み
+          </button>
         </div>
+      </div>
 
-        <div className="text-xs text-neutral-500">
-          ※ 問題文のアップロード・設定処理はトップページのまま利用しています。
-        </div>
-      </section>
-
-      {/* 下部：左＝入力 / 右＝プレビュー＆クラス図 */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* 左：オブジェクトとリンクの入力 */}
-        <section className="rounded-lg border bg-white p-4 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="font-semibold text-sm">
-              ステップ1：問題文からオブジェクト・リンクを入力しよう
-            </h2>
-            {/* ここにはもう「すべてクリア」ボタンは置かない */}
-          </div>
-
-          <div className="space-y-3">
-            <div>
-              <div className="text-xs font-semibold mb-1">オブジェクト入力</div>
-              <ManualObjectsForm objects={objects} setObjects={setObjects} />
+      {/* メイン 3 カラムレイアウト */}
+      <div className="grid grid-cols-1 lg:grid-cols-[0.9fr_1.1fr_1.1fr] gap-4 items-start">
+        {/* 左：問題文カラム（スクロール＋全文モーダル） */}
+        <section className="rounded-lg border bg-white p-3 space-y-3">
+          <div className="space-y-2">
+            {/* クラス図作成問題 */}
+            <div className="border rounded bg-neutral-50/60">
+              <div className="flex items-center justify-between px-3 py-1.5 border-b bg-white rounded-t">
+                <div className="text-sm font-semibold">
+                  クラス図作成問題（本文）
+                </div>
+                <button
+                  type="button"
+                  className="text-[10px] px-2 py-0.5 rounded border bg-neutral-50 hover:bg-neutral-100"
+                  onClick={() => setIsClassModalOpen(true)}
+                >
+                  全文を表示
+                </button>
+              </div>
+              {/* ★ ここ：カード内スクロールで全文読めるようにする */}
+              <div className="text-sm whitespace-pre-wrap max-h-40 overflow-y-auto px-3 py-2">
+                {classProblemText
+                  ? renderHighlightedText(classProblemText, objectStems)
+                  : "（トップページでクラス図問題文を設定してください）"}
+              </div>
             </div>
 
-            <div>
-              <div className="text-xs font-semibold mb-1">リンク入力</div>
-              <LinkMiniAdder objects={objects} links={links} setLinks={setLinks} />
-            </div>
-
-            <div className="text-xs text-neutral-500">
-              ※ オブジェクトやリンクを編集すると、右側のプレビューが自動更新されます。
+            {/* オブジェクト図作成問題 */}
+            <div className="border rounded bg-neutral-50/60">
+              <div className="flex items-center justify-between px-3 py-1.5 border-b bg-white rounded-t">
+                <div className="text-sm font-semibold">
+                  オブジェクト図作成問題（本文）
+                </div>
+                <button
+                  type="button"
+                  className="text-[10px] px-2 py-0.5 rounded border bg-neutral-50 hover:bg-neutral-100"
+                  onClick={() => setIsObjectModalOpen(true)}
+                >
+                  全文を表示
+                </button>
+              </div>
+              {/* ★ ここも同じくスクロール */}
+              <div className="text-sm whitespace-pre-wrap max-h-40 overflow-y-auto px-3 py-2">
+                {objectProblemText
+                  ? renderHighlightedText(objectProblemText, objectStems)
+                  : "（トップページでオブジェクト図問題文を設定してください）"}
+              </div>
             </div>
           </div>
         </section>
 
-        {/* 右：プレビュー＋クラス図 */}
+        {/* 中央：オブジェクト編集＋オブジェクト図プレビュー */}
         <div className="space-y-4">
-          {/* オブジェクト図プレビュー */}
+          <section className="rounded-lg border bg-white p-3">
+            <h2 className="font-semibold text-sm mb-1">
+              ステップ1-A：オブジェクトを入力する
+            </h2>
+            <ManualObjectsForm objects={objects} setObjects={setObjects} />
+          </section>
+
           <section className="rounded-lg border bg-white">
-            <div className="p-4 border-b flex items-center justify-between">
+            <div className="p-3 border-b flex items-center justify-between">
               <div className="font-semibold text-sm">
                 （入力中のプレビュー）オブジェクト図
               </div>
             </div>
-            <div className="p-4">
+            <div className="p-3">
               {objErr && (
                 <div className="text-xs text-red-600 mb-2">
                   API error: {objErr}
                 </div>
               )}
-              {objPumlUrl ? (
-                <img alt="object-uml" src={objPumlUrl} />
-              ) : (
-                <div className="text-xs text-neutral-500">
-                  オブジェクトやリンクを追加すると、ここにオブジェクト図が表示されます。
-                </div>
-              )}
+              <div className="flex items-center justify-center max-h-[360px] min-h-[220px] overflow-auto">
+                {objPumlUrl ? (
+                  <img
+                    alt="object-uml"
+                    src={objPumlUrl}
+                    className="w-full h-auto"
+                  />
+                ) : (
+                  <div className="text-xs text-neutral-500">
+                    オブジェクトやリンクを追加すると、ここにオブジェクト図が表示されます。
+                  </div>
+                )}
+              </div>
             </div>
           </section>
+        </div>
 
-          {/* 推定クラス図プレビュー（編集不可）＋ 差分強調＋推定ルール説明＋推定理由 */}
+        {/* 右：リンク編集＋クラス図プレビュー */}
+        <div className="space-y-4">
+          <section className="rounded-lg border bg-white p-3">
+            <h2 className="font-semibold text-sm mb-1">
+              ステップ1-B：リンクを入力する
+            </h2>
+            <LinkMiniAdder objects={objects} links={links} setLinks={setLinks} />
+          </section>
+
           <section className="rounded-lg border bg-white">
-            <div className="p-4 border-b flex items-center justify-between">
+            <div className="p-3 border-b flex items-center justify-between">
               <div className="font-semibold text-sm">クラス図（推定プレビュー）</div>
               <button
                 type="button"
@@ -702,21 +727,26 @@ export default function Level4Page() {
                 この推定結果をもとにクラス図を作る
               </button>
             </div>
-            <div className="p-4 space-y-3">
+            <div className="p-3 space-y-3">
               {clsErr && (
                 <div className="text-xs text-red-600 mb-2">
                   API error: {clsErr}
                 </div>
               )}
-              {clsPreviewUrl ? (
-                <img alt="class-uml-preview" src={clsPreviewUrl} />
-              ) : (
-                <div className="text-xs text-neutral-500">
-                  オブジェクト図ができると、ここにクラス図の推定結果が表示されます。
-                </div>
-              )}
 
-              {/* 差分強調（オブジェクト名とクラス名） */}
+              <div className="flex items-center justify-center max-h-[360px] min-h-[220px] overflow-auto">
+                {clsPreviewUrl ? (
+                  <img
+                    alt="class-uml-preview"
+                    src={clsPreviewUrl}
+                    className="w-full h-auto"
+                  />
+                ) : (
+                  <div className="text-xs text-neutral-500">
+                    オブジェクト図ができると、ここにクラス図の推定結果が表示されます。
+                  </div>
+                )}
+              </div>
               {(objToClass.length > 0 ||
                 onlyObj.length > 0 ||
                 onlyClass.length > 0) && (
@@ -724,9 +754,9 @@ export default function Level4Page() {
                   <div className="text-xs font-semibold mb-1">
                     オブジェクト名とクラス名の対応（ざっくり）
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-[11px]">
+                  <div className="grid grid-cols-1 gap-1 text-[11px]">
                     <div>
-                      <div className="font-semibold mb-1">クラスになった候補</div>
+                      <div className="font-semibold mb-0.5">クラスになった候補</div>
                       <div className="flex flex-wrap gap-1">
                         {objToClass.length > 0 ? (
                           objToClass.map((s) => (
@@ -743,7 +773,7 @@ export default function Level4Page() {
                       </div>
                     </div>
                     <div>
-                      <div className="font-semibold mb-1">
+                      <div className="font-semibold mb-0.5">
                         オブジェクトにしかない名前
                       </div>
                       <div className="flex flex-wrap gap-1">
@@ -762,7 +792,7 @@ export default function Level4Page() {
                       </div>
                     </div>
                     <div>
-                      <div className="font-semibold mb-1">
+                      <div className="font-semibold mb-0.5">
                         クラスにしかない名前
                       </div>
                       <div className="flex flex-wrap gap-1">
@@ -784,7 +814,6 @@ export default function Level4Page() {
                 </div>
               )}
 
-              {/* 推定ルールの簡易説明（固定テキスト） */}
               <div className="border-t pt-2 text-[11px] text-neutral-700 space-y-1">
                 <div className="font-semibold">推定ルール（全体のイメージ）</div>
                 <ul className="list-disc pl-4 space-y-0.5">
@@ -798,7 +827,6 @@ export default function Level4Page() {
                 </ul>
               </div>
 
-              {/* 推定の理由（例） */}
               {(inferenceHints.classHints.length > 0 ||
                 inferenceHints.relationHints.length > 0 ||
                 inferenceHints.attrHints.length > 0) && (
@@ -841,134 +869,140 @@ export default function Level4Page() {
                       </ul>
                     </div>
                   )}
-
-                  <div className="text-[10px] text-neutral-500 mt-1">
-                    ※ すべてのルールを完全に説明しているわけではなく、「だいたいこういう考え方で推定しています」という目安です。
-                  </div>
                 </div>
               )}
             </div>
           </section>
-
-          {/* 学習者が編集するクラス図（確定版）＋ 見比べ＋チェック＋採点 */}
-          {hasFinal && (
-            <section className="rounded-lg border bg-white">
-              <div className="p-4 border-b flex items-center justify-between">
-                <div className="font-semibold text-sm">あなたのクラス図（編集用）</div>
-                <div className="text-xs text-neutral-500">
-                  ※ ここはオブジェクト図を変えても自動更新されません。
-                </div>
-              </div>
-              <div className="p-4 space-y-3">
-                <div className="text-xs">
-                  推定結果をもとに、クラス名・属性名・多重度などを自分なりに修正してみてください。
-                </div>
-
-                <textarea
-                  className="w-full border rounded p-2 text-xs font-mono h-40"
-                  value={finalClassPuml}
-                  onChange={(e) => {
-                    setFinalClassPuml(e.target.value);
-                    setCheckMessages([]);
-                    setScore(null);
-                  }}
-                />
-
-                {/* 推定図との見比べ（左右２分割） */}
-                <div className="border rounded p-2 bg-neutral-50 space-y-2">
-                  <div className="text-xs font-semibold mb-1">
-                    推定クラス図とあなたのクラス図の見比べ
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2 items-start">
-                    <div className="border rounded p-1 bg-white">
-                      <div className="text-[11px] text-center text-neutral-600">
-                        推定クラス図
-                      </div>
-                      {clsPreviewUrl ? (
-                        <img alt="preview-class-uml" src={clsPreviewUrl} />
-                      ) : (
-                        <div className="text-[11px] text-neutral-400 p-2 text-center">
-                          推定クラス図がありません。
-                        </div>
-                      )}
-                    </div>
-                    <div className="border rounded p-1 bg-white">
-                      <div className="text-[11px] text-center text-neutral-600">
-                        あなたのクラス図
-                      </div>
-                      {finalClassUrl ? (
-                        <img alt="final-class-uml" src={finalClassUrl} />
-                      ) : (
-                        <div className="text-[11px] text-neutral-400 p-2 text-center">
-                          クラス図テキストを編集すると、ここに図が表示されます。
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* チェック＆採点ボタン */}
-                <div className="flex flex-wrap gap-2 text-xs">
-                  <button
-                    type="button"
-                    className="px-3 py-1 rounded border"
-                    onClick={handleCheckDiagram}
-                  >
-                    クラス図の整合性チェック
-                  </button>
-                  <button
-                    type="button"
-                    className="px-3 py-1 rounded border"
-                    onClick={handleGrade}
-                  >
-                    模範クラス図と比較して採点
-                  </button>
-                </div>
-
-                {/* 整合性チェック結果 */}
-                {checkMessages.length > 0 && (
-                  <div className="border rounded p-2 bg-neutral-50 text-[11px] space-y-1">
-                    <div className="font-semibold mb-1">
-                      クラス図の整合性チェック結果
-                    </div>
-                    <ul className="list-disc pl-4 space-y-0.5">
-                      {checkMessages.map((m, i) => (
-                        <li key={i}>{m}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {/* 採点結果 */}
-                {gradeErr && (
-                  <div className="text-xs text-red-600">{gradeErr}</div>
-                )}
-                {score && (
-                  <div className="border rounded p-2 bg-neutral-50 text-[11px] space-y-1">
-                    <div className="font-semibold">
-                      採点結果：総合 {score.total} 点
-                    </div>
-                    <div>・クラス抽出：{score.classes} 点</div>
-                    <div>・関連抽出：{score.relations} 点</div>
-                    <ul className="list-disc pl-4 mt-1 space-y-0.5">
-                      {score.comments.map((c, i) => (
-                        <li key={i}>{c}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            </section>
-          )}
         </div>
       </div>
+
+      {/* 下部：学習者のクラス図編集（フル幅） */}
+      {hasFinal && (
+        <section className="rounded-lg border bg-white mt-2">
+          <div className="p-4 border-b flex items-center justify-between">
+            <div className="font-semibold text-sm">あなたのクラス図（編集用）</div>
+          </div>
+          <div className="p-4 space-y-3">
+            <textarea
+              className="w-full border rounded p-2 text-xs font-mono h-40"
+              value={finalClassPuml}
+              onChange={(e) => {
+                setFinalClassPuml(e.target.value);
+                setCheckMessages([]);
+                setScore(null);
+              }}
+            />
+
+            <div className="border rounded p-2 bg-neutral-50 space-y-2">
+              <div className="text-xs font-semibold mb-1">
+                推定クラス図とあなたのクラス図の見比べ
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 items-start">
+                <div className="border rounded p-1 bg-white">
+                  <div className="text-[11px] text-center text-neutral-600">
+                    推定クラス図
+                  </div>
+                  {clsPreviewUrl ? (
+                    <img alt="preview-class-uml" src={clsPreviewUrl} />
+                  ) : (
+                    <div className="text-[11px] text-neutral-400 p-2 text-center">
+                      推定クラス図がありません。
+                    </div>
+                  )}
+                </div>
+                <div className="border rounded p-1 bg-white">
+                  <div className="text-[11px] text-center text-neutral-600">
+                    あなたのクラス図
+                  </div>
+                  {finalClassUrl ? (
+                    <img alt="final-class-uml" src={finalClassUrl} />
+                  ) : (
+                    <div className="text-[11px] text-neutral-400 p-2 text-center">
+                      クラス図テキストを編集すると、ここに図が表示されます。
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2 text-xs">
+              <button
+                type="button"
+                className="px-3 py-1 rounded border"
+                onClick={handleCheckDiagram}
+              >
+                クラス図の整合性チェック
+              </button>
+              <button
+                type="button"
+                className="px-3 py-1 rounded border"
+                onClick={handleGrade}
+              >
+                模範クラス図と比較して採点
+              </button>
+            </div>
+
+            {checkMessages.length > 0 && (
+              <div className="border rounded p-2 bg-neutral-50 text-[11px] space-y-1">
+                <div className="font-semibold mb-1">
+                  クラス図の整合性チェック結果
+                </div>
+                <ul className="list-disc pl-4 space-y-0.5">
+                  {checkMessages.map((m, i) => (
+                    <li key={i}>{m}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {gradeErr && (
+              <div className="text-xs text-red-600">{gradeErr}</div>
+            )}
+            {score && (
+              <div className="border rounded p-2 bg-neutral-50 text-[11px] space-y-1">
+                <div className="font-semibold">
+                  採点結果：総合 {score.total} 点
+                </div>
+                <div>・クラス抽出：{score.classes} 点</div>
+                <div>・関連抽出：{score.relations} 点</div>
+                <ul className="list-disc pl-4 mt-1 space-y-0.5">
+                  {score.comments.map((c, i) => (
+                    <li key={i}>{c}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* 問題文の全文モーダル */}
+      {isClassModalOpen && (
+        <ProblemModal
+          title="クラス図作成問題（本文）"
+          onClose={() => setIsClassModalOpen(false)}
+        >
+          {classProblemText
+            ? renderHighlightedText(classProblemText, objectStems)
+            : "（トップページでクラス図問題文を設定してください）"}
+        </ProblemModal>
+      )}
+
+      {isObjectModalOpen && (
+        <ProblemModal
+          title="オブジェクト図作成問題（本文）"
+          onClose={() => setIsObjectModalOpen(false)}
+        >
+          {objectProblemText
+            ? renderHighlightedText(objectProblemText, objectStems)
+            : "（トップページでオブジェクト図問題文を設定してください）"}
+        </ProblemModal>
+      )}
     </div>
   );
 }
 
-/* =============== オブジェクト入力フォーム =============== */
-/* 型（クラス名）は入力しない。
-   オブジェクトごとに「スロット名」「スロット値」を複数追加できる。 */
+/* =============== オブジェクト入力フォーム（一覧＋詳細） =============== */
 
 type ManualObjectsFormProps = {
   objects: Obj[];
@@ -976,131 +1010,209 @@ type ManualObjectsFormProps = {
 };
 
 function ManualObjectsForm({ objects, setObjects }: ManualObjectsFormProps) {
-  const addObject = () =>
-    setObjects([
-      ...objects,
-      { name: "", attrs: [] as Attr[] },
-    ]);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(
+    objects.length ? 0 : null
+  );
 
-  const updateName = (idx: number, name: string) => {
-    const next = [...objects];
-    next[idx] = { ...next[idx], name };
+  useEffect(() => {
+    if (objects.length === 0) {
+      setSelectedIndex(null);
+    } else if (selectedIndex === null || selectedIndex >= objects.length) {
+      setSelectedIndex(0);
+    }
+  }, [objects.length, selectedIndex]);
+
+  const addObject = () => {
+    const next = [...objects, { name: "", attrs: [] as Attr[] }];
     setObjects(next);
+    setSelectedIndex(next.length - 1);
   };
 
   const removeObject = (idx: number) => {
     const next = [...objects];
     next.splice(idx, 1);
     setObjects(next);
+
+    setSelectedIndex((prev) => {
+      if (next.length === 0) return null;
+      if (prev === null) return 0;
+      if (idx === prev) return Math.min(prev, next.length - 1);
+      if (idx < prev) return prev - 1;
+      return prev;
+    });
   };
 
-  const updateAttr = (
-    objIdx: number,
-    attrIdx: number,
-    patch: { key?: string; value?: string }
-  ) => {
+  const updateSelectedName = (name: string) => {
+    if (selectedIndex === null) return;
     const next = [...objects];
-    const obj = next[objIdx];
+    next[selectedIndex] = { ...next[selectedIndex], name };
+    setObjects(next);
+  };
+
+  const updateAttr = (attrIdx: number, patch: { key?: string; value?: string }) => {
+    if (selectedIndex === null) return;
+    const next = [...objects];
+    const obj = next[selectedIndex];
     const attrs = [...(obj.attrs ?? [])];
     const current = attrs[attrIdx] || { key: "", value: "" };
     attrs[attrIdx] = { ...current, ...patch };
-    next[objIdx] = { ...obj, attrs };
+    next[selectedIndex] = { ...obj, attrs };
     setObjects(next);
   };
 
-  const addAttr = (objIdx: number) => {
+  const addAttr = () => {
+    if (selectedIndex === null) return;
     const next = [...objects];
-    const obj = next[objIdx];
+    const obj = next[selectedIndex];
     const attrs = [...(obj.attrs ?? [])];
     attrs.push({ key: "", value: "" });
-    next[objIdx] = { ...obj, attrs };
+    next[selectedIndex] = { ...obj, attrs };
     setObjects(next);
   };
 
-  const removeAttr = (objIdx: number, attrIdx: number) => {
+  const removeAttr = (attrIdx: number) => {
+    if (selectedIndex === null) return;
     const next = [...objects];
-    const obj = next[objIdx];
+    const obj = next[selectedIndex];
     const attrs = [...(obj.attrs ?? [])];
     attrs.splice(attrIdx, 1);
-    next[objIdx] = { ...obj, attrs };
+    next[selectedIndex] = { ...obj, attrs };
     setObjects(next);
   };
 
+  const selectedObj =
+    selectedIndex !== null ? objects[selectedIndex] ?? null : null;
+
   return (
-    <div className="space-y-2">
-      <button
-        type="button"
-        className="text-xs px-3 py-1 rounded border"
-        onClick={addObject}
-      >
-        ＋ オブジェクトを追加
-      </button>
+    <div className="space-y-3">
+      {/* 一覧 */}
+      <div className="flex items-center justify-between mb-1">
+        <div className="text-xs font-semibold">オブジェクト一覧</div>
+        <button
+          type="button"
+          className="text-xs px-3 py-1 rounded border bg-neutral-50 hover:bg-neutral-100"
+          onClick={addObject}
+        >
+          ＋ オブジェクトを追加
+        </button>
+      </div>
 
-      <div className="space-y-2">
-        {objects.map((o, idx) => (
-          <div key={idx} className="rounded border p-3 space-y-2">
-            <div className="flex items-center gap-2">
-              <div className="text-xs text-neutral-500">オブジェクト名</div>
-              <input
-                className="border rounded px-2 py-1 w-full text-xs"
-                placeholder="例: 会員1, 商品A など"
-                value={o.name}
-                onChange={(e) => updateName(idx, e.target.value)}
-              />
-              <button
-                type="button"
-                className="text-[10px] px-2 py-1 rounded border"
-                onClick={() => removeObject(idx)}
-              >
-                削除
-              </button>
-            </div>
+      <div className="border rounded bg-neutral-50 text-xs max-h-40 overflow-y-auto">
+        {objects.length === 0 ? (
+          <div className="px-2 py-2 text-[11px] text-neutral-500">
+            まだオブジェクトがありません。「＋ オブジェクトを追加」から作成してください。
+          </div>
+        ) : (
+          <ul className="divide-y">
+            {objects.map((o, idx) => {
+              const isSelected = idx === selectedIndex;
+              const slotCount = o.attrs?.length ?? 0;
+              return (
+                <li
+                  key={idx}
+                  className={
+                    "flex items-center justify-between px-2 py-1 cursor-pointer transition-colors " +
+                    (isSelected ? "bg-emerald-50" : "hover:bg-neutral-100")
+                  }
+                  onClick={() => setSelectedIndex(idx)}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-white border text-[10px] text-neutral-600">
+                      {idx + 1}
+                    </span>
+                    <span className="text-xs">
+                      {o.name || `（名前未設定のオブジェクト${idx + 1}）`}
+                    </span>
+                    <span className="text-[10px] text-neutral-500">
+                      スロット数: {slotCount}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    {isSelected && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
+                        選択中
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      className="px-2 py-0.5 rounded border text-[10px] bg-white hover:bg-red-50"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeObject(idx);
+                      }}
+                    >
+                      削除
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
 
-            <div className="space-y-1">
-              <div className="text-[10px] text-neutral-500">スロット一覧</div>
-              {(o.attrs ?? []).map((a, aidx) => (
-                <div key={aidx} className="flex items-center gap-2">
-                  <input
-                    className="border rounded px-2 py-1 w-32 text-[10px]"
-                    placeholder="スロット名（例：価格）"
-                    value={a.key}
-                    onChange={(e) =>
-                      updateAttr(idx, aidx, { key: e.target.value })
-                    }
-                  />
-                  <input
-                    className="border rounded px-2 py-1 flex-1 text-[10px]"
-                    placeholder='値（例："2980" や "商品A"）'
-                    value={a.value}
-                    onChange={(e) =>
-                      updateAttr(idx, aidx, { value: e.target.value })
-                    }
-                  />
-                  <button
-                    type="button"
-                    className="text-[10px] px-2 py-1 rounded border"
-                    onClick={() => removeAttr(idx, aidx)}
-                  >
-                    削除
-                  </button>
-                </div>
-              ))}
-              <button
-                type="button"
-                className="text-[10px] px-2 py-1 rounded border"
-                onClick={() => addAttr(idx)}
-              >
-                ＋ スロットを追加
-              </button>
+      {/* 詳細編集 */}
+      {selectedObj ? (
+        <div className="border rounded p-3 space-y-2 bg-emerald-50/40">
+          <div className="flex items-center justify-between">
+            <div className="text-[11px] font-semibold">
+              編集中のオブジェクト：
+              {selectedObj.name || `オブジェクト${(selectedIndex ?? 0) + 1}`}
             </div>
           </div>
-        ))}
-      </div>
 
-      <div className="text-[10px] text-neutral-500">
-        ※ 型（クラス名）はここでは入力しなくて構いません。<br />
-        ※ スロット名と値を、できるだけ問題文に合わせて入力してみましょう。
-      </div>
+          <div className="flex items-center gap-2">
+            <div className="text-xs text-neutral-500">オブジェクト名</div>
+            <input
+              className="border rounded px-2 py-1 w-full text-xs bg-white"
+              placeholder="例: 会員1, 商品A など"
+              value={selectedObj.name}
+              onChange={(e) => updateSelectedName(e.target.value)}
+            />
+          </div>
+
+          <div className="space-y-1">
+            {(selectedObj.attrs ?? []).map((a, aidx) => (
+              <div key={aidx} className="flex items-center gap-2">
+                <input
+                  className="border rounded px-2 py-1 w-32 text-[10px] bg-white"
+                  placeholder="スロット名"
+                  value={a.key}
+                  onChange={(e) =>
+                    updateAttr(aidx, { key: e.target.value })
+                  }
+                />
+                <input
+                  className="border rounded px-2 py-1 flex-1 text-[10px] bg-white"
+                  placeholder='値（例："19" や "太郎"）'
+                  value={a.value}
+                  onChange={(e) =>
+                    updateAttr(aidx, { value: e.target.value })
+                  }
+                />
+                <button
+                  type="button"
+                  className="text-[10px] px-2 py-1 rounded border bg-white hover:bg-red-50"
+                  onClick={() => removeAttr(aidx)}
+                >
+                  削除
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              className="text-[10px] px-2 py-1 rounded border bg-white hover:bg-neutral-100"
+              onClick={addAttr}
+            >
+              ＋ スロットを追加
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="text-[10px] text-neutral-500">
+          ※ 編集したいオブジェクトを一覧から選択すると、ここに詳細が表示されます。
+        </div>
+      )}
     </div>
   );
 }
