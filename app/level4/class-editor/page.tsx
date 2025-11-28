@@ -1,11 +1,12 @@
-// app/level4/class-editor/page.tsx
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useProblemConfig } from "@/components/problem-config";
 import { generatePlantUMLUrl } from "@/utils/plantuml";
 import type { Obj, Link } from "@/types";
+
+/* ========= 型 ========= */
 
 type EditorPayload = {
   initialClassPuml?: string;
@@ -22,7 +23,173 @@ type ScoreBreakdown = {
   comments: string[];
 };
 
-/* ==== ここは level4/page.tsx から持ってきたユーティリティの一部 ==== */
+type AttrStatus = "none" | "incomplete" | "contradictory";
+
+type ClassInfo = {
+  id: string; // 内部ID（初期クラス名から作る）
+  name: string;
+  isAutoNamed: boolean; // 「クラス名未定*」かどうか
+  attrs: {
+    id: string;
+    name: string;
+    type: string;
+    status: AttrStatus;
+  }[];
+};
+
+type RelationInfo = {
+  id: string;
+  fromId: string; // ClassInfo.id
+  toId: string;
+  label: string;
+  multFrom: string; // "", "1", "0..1", "0..*", "1..*"
+  multTo: string;
+  style: "solid" | "dotted";
+};
+
+/* ========= ユーティリティ ========= */
+
+const makeId = () => Math.random().toString(36).slice(2, 10);
+
+/** PlantUML からクラスと関連のモデルをざっくり抽出 */
+function parsePumlToModel(puml: string): { classes: ClassInfo[]; relations: RelationInfo[] } {
+  const lines = puml.split(/\r?\n/);
+
+  const classes: ClassInfo[] = [];
+  const relations: RelationInfo[] = [];
+
+  let currentClass: ClassInfo | null = null;
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+
+    // class 行
+    const classMatch = line.match(/^\s*class\s+([^\s{]+)(?:\s+<<([^>]+)>>)?\s*{/);
+    if (classMatch) {
+      const name = classMatch[1].trim();
+      const isAutoNamed = name.startsWith("クラス名未定");
+      currentClass = {
+        id: name, // 初期は名前をIDにする
+        name,
+        isAutoNamed,
+        attrs: [],
+      };
+      classes.push(currentClass);
+      continue;
+    }
+
+    if (currentClass) {
+      // クラス定義の終わり
+      if (/^\s*}\s*$/.test(line)) {
+        currentClass = null;
+        continue;
+      }
+      // 属性行:  key: type <!> / <?>
+      const attrMatch = line.match(/^\s*([^:]+):\s*([^\s]+)\s*(<!>|<\?>)?\s*$/);
+      if (attrMatch) {
+        const name = attrMatch[1].trim();
+        const type = attrMatch[2].trim();
+        const mark = attrMatch[3]?.trim();
+        let status: AttrStatus = "none";
+        if (mark === "<!>") status = "contradictory";
+        else if (mark === "<?>") status = "incomplete";
+        currentClass.attrs.push({
+          id: makeId(),
+          name,
+          type,
+          status,
+        });
+      }
+      continue;
+    }
+
+    // 関連行:  A "1" -- "0..1" B   or   A "1" .. "0..1" B
+    const relMatch = line.match(
+      /^\s*([^\s"]+)\s+"([^"]*)"\s*(--|\.\.)\s+"([^"]*)"\s+([^\s"]+)/
+    );
+    if (relMatch) {
+      const fromName = relMatch[1].trim();
+      const multFrom = relMatch[2].trim();
+      const style = relMatch[3] === ".." ? "dotted" : "solid";
+      const multTo = relMatch[4].trim();
+      const toName = relMatch[5].trim();
+
+      relations.push({
+        id: makeId(),
+        fromId: fromName, // ひとまずクラス名＝ID としておく
+        toId: toName,
+        label: "",
+        multFrom,
+        multTo,
+        style,
+      });
+    }
+  }
+
+  // 名前→id のマッピング（今は id = 初期名だが、将来拡張用）
+  const idMap = new Map<string, string>();
+  for (const c of classes) idMap.set(c.id, c.id);
+
+  // 関連の from/to を、存在しない名前だった場合は最初のクラスに寄せる
+  const fallbackId = classes[0]?.id ?? "";
+  for (const r of relations) {
+    if (!idMap.has(r.fromId)) r.fromId = fallbackId;
+    if (!idMap.has(r.toId)) r.toId = fallbackId;
+  }
+
+  return { classes, relations };
+}
+
+/** クラスモデル＋関連モデルから PlantUML を生成 */
+function buildPuml(classes: ClassInfo[], relations: RelationInfo[]): string {
+  let puml = "@startuml\n";
+  puml += "hide empty members\n";
+  puml += "skinparam classAttributeIconSize 0\n";
+  puml += "skinparam class {\n";
+  puml += "  BackgroundColor<<incomplete>> #fffbe6\n";
+  puml += "  BackgroundColor<<contradictory>> #ffecec\n";
+  puml += "  BorderColor<<contradictory>> #ff6666\n";
+  puml += "}\n";
+
+  const esc = (s: string) => s.replace(/"/g, '\\"');
+
+  // クラス定義
+  for (const c of classes) {
+    const hasContradiction = c.attrs.some((a) => a.status === "contradictory");
+    const hasIncomplete = c.attrs.some((a) => a.status === "incomplete");
+    const stereo = hasContradiction
+      ? " <<contradictory>>"
+      : hasIncomplete
+      ? " <<incomplete>>"
+      : "";
+
+    puml += `class ${esc(c.name)}${stereo} {\n`;
+    for (const a of c.attrs) {
+      const mark =
+        a.status === "contradictory" ? " <!>" : a.status === "incomplete" ? " <?>" : "";
+      puml += `  ${esc(a.name)}: ${a.type} ${mark}\n`;
+    }
+    puml += "}\n";
+  }
+
+  const normMult = (m: string) => m || "";
+
+  // 関連
+  for (const r of relations) {
+    const from = classes.find((c) => c.id === r.fromId);
+    const to = classes.find((c) => c.id === r.toId);
+    if (!from || !to) continue;
+    const style = r.style === "dotted" ? ".." : "--";
+    puml += `${esc(from.name)} "${normMult(r.multFrom)}" ${style} "${normMult(
+      r.multTo
+    )}" ${esc(to.name)}\n`;
+  }
+
+  puml += "@enduml";
+  return puml;
+}
+
+/* ==== チェック・採点用 ==== */
 
 function parseClassNames(puml: string): string[] {
   const lines = puml.split(/\r?\n/);
@@ -34,14 +201,14 @@ function parseClassNames(puml: string): string[] {
   return Array.from(new Set(names));
 }
 
-function parseRelations(puml: string): string[] {
+function parseRelationsForScore(puml: string): string[] {
   const lines = puml.split(/\r?\n/);
   const rels: string[] = [];
   for (const line of lines) {
-    if (!line.includes("--")) continue;
+    if (!line.includes("--") && !line.includes("..")) continue;
     if (line.trim().startsWith("@")) continue;
     const m = line.match(
-      /^\s*([^\s"]+)\s+["0-9.* ]*..?-["0-9.* ]*\s+([^\s"]+)/
+      /^\s*([^\s"]+)\s+["0-9.* ]*..?["0-9.* ]*\s+([^\s"]+)/
     );
     if (!m) continue;
     const a = m[1].trim();
@@ -73,11 +240,11 @@ function checkClassDiagram(puml: string): string[] {
 
   const lines = puml.split(/\r?\n/);
   for (const line of lines) {
-    if (!line.includes("--")) continue;
+    if (!line.includes("--") && !line.includes("..")) continue;
     if (line.trim().startsWith("@")) continue;
 
     const m = line.match(
-      /^\s*([^\s"]+)\s+([^-\n"]*)..?-([^"\n]*)\s+([^\s"]+)/
+      /^\s*([^\s"]+)\s+([^-\n"]*)..?([^"\n]*)\s+([^\s"]+)/
     );
     if (m) {
       const left = m[1].trim();
@@ -109,18 +276,20 @@ function checkClassDiagram(puml: string): string[] {
 
 export default function Level4ClassEditorPage() {
   const router = useRouter();
-  const { classAnswerPuml } = useProblemConfig();
+  const { classAnswerPuml, classProblemText } = useProblemConfig();
 
   const [initialClassPuml, setInitialClassPuml] = useState("");
+  const [classes, setClasses] = useState<ClassInfo[]>([]);
+  const [relations, setRelations] = useState<RelationInfo[]>([]);
   const [classPuml, setClassPuml] = useState("");
-  const [initialUrl, setInitialUrl] = useState("");
   const [currentUrl, setCurrentUrl] = useState("");
+
   const [checkMessages, setCheckMessages] = useState<string[]>([]);
   const [score, setScore] = useState<ScoreBreakdown | null>(null);
   const [gradeErr, setGradeErr] = useState<string | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
 
-  // レベル4ページから渡された初期値を読み込む
+  // 初期データ読み込み
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
@@ -134,28 +303,31 @@ export default function Level4ClassEditorPage() {
       const payload: EditorPayload = JSON.parse(raw);
       const base = payload.initialClassPuml ?? "";
       setInitialClassPuml(base);
-      setClassPuml(base);
+
+      const { classes, relations } = parsePumlToModel(base);
+      setClasses(classes);
+      setRelations(relations);
     } catch (e) {
       setLoadErr("保存された推定クラス図の読み込みに失敗しました。");
     }
   }, []);
 
-  // プレビューURLを更新
+  // モデルから PlantUML を再生成 → プレビュー更新
   useEffect(() => {
-    if (!initialClassPuml.trim()) {
-      setInitialUrl("");
-      return;
-    }
-    setInitialUrl(generatePlantUMLUrl(initialClassPuml));
-  }, [initialClassPuml]);
-
-  useEffect(() => {
-    if (!classPuml.trim()) {
+    if (classes.length === 0) {
+      setClassPuml("");
       setCurrentUrl("");
       return;
     }
-    setCurrentUrl(generatePlantUMLUrl(classPuml));
-  }, [classPuml]);
+    const puml = buildPuml(classes, relations);
+    setClassPuml(puml);
+    setCurrentUrl(generatePlantUMLUrl(puml));
+  }, [classes, relations]);
+
+  const unnamedClassIds = useMemo(
+    () => classes.filter((c) => c.name.startsWith("クラス名未定")).map((c) => c.id),
+    [classes]
+  );
 
   const handleCheckDiagram = () => {
     const msgs = checkClassDiagram(classPuml);
@@ -167,7 +339,7 @@ export default function Level4ClassEditorPage() {
     setScore(null);
     if (!classPuml.trim()) {
       setGradeErr(
-        "クラス図がまだ作成されていません。先にクラス図を編集してください。"
+        "クラス図がまだ作成されていません。先にクラスや関連を編集してください。"
       );
       return;
     }
@@ -180,8 +352,8 @@ export default function Level4ClassEditorPage() {
 
     const ansClasses = new Set(parseClassNames(classAnswerPuml));
     const userClasses = new Set(parseClassNames(classPuml));
-    const ansRels = new Set(parseRelations(classAnswerPuml));
-    const userRels = new Set(parseRelations(classPuml));
+    const ansRels = new Set(parseRelationsForScore(classAnswerPuml));
+    const userRels = new Set(parseRelationsForScore(classPuml));
 
     const classInter = [...ansClasses].filter((c) => userClasses.has(c));
     const relInter = [...ansRels].filter((r) => userRels.has(r));
@@ -227,19 +399,76 @@ export default function Level4ClassEditorPage() {
     setScore({ total, classes: classScore, relations: relScore, comments });
   };
 
+  /* ===== 編集ハンドラ ===== */
+
+  const updateClass = (id: string, updater: (c: ClassInfo) => ClassInfo) => {
+    setClasses((prev) => prev.map((c) => (c.id === id ? updater(c) : c)));
+  };
+
+  const updateRelation = (id: string, updater: (r: RelationInfo) => RelationInfo) => {
+    setRelations((prev) => prev.map((r) => (r.id === id ? updater(r) : r)));
+  };
+
+  const handleAddClass = () => {
+    const newName = `新しいクラス${classes.length + 1}`;
+    const id = makeId();
+    setClasses((prev) => [
+      ...prev,
+      {
+        id,
+        name: newName,
+        isAutoNamed: false,
+        attrs: [],
+      },
+    ]);
+  };
+
+  const handleDeleteClass = (id: string) => {
+    setClasses((prev) => prev.filter((c) => c.id !== id));
+    setRelations((prev) => prev.filter((r) => r.fromId !== id && r.toId !== id));
+  };
+
+  const handleAddRelation = () => {
+    const firstId = classes[0]?.id;
+    if (!firstId) return;
+    setRelations((prev) => [
+      ...prev,
+      {
+        id: makeId(),
+        fromId: firstId,
+        toId: firstId,
+        label: "",
+        multFrom: "",
+        multTo: "",
+        style: "solid",
+      },
+    ]);
+  };
+
+  const handleDeleteRelation = (id: string) => {
+    setRelations((prev) => prev.filter((r) => r.id !== id));
+  };
+
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-4">
-      {/* ヘッダ */}
+      {/* ヘッダ＋クラス図作成問題文 */}
       <div className="flex items-start justify-between gap-4">
-        <div>
+        <div className="flex-1 space-y-2">
           <h1 className="text-xl font-semibold">
             レベル4：あなたのクラス図を編集する
           </h1>
-          <p className="text-xs text-neutral-600 mt-1">
-            オブジェクト図から推定されたクラス図をもとに、自分の考えるクラス図を仕上げましょう。
-          </p>
+          <div className="border rounded bg-white">
+            <div className="flex items-center justify-between px-3 py-1.5 border-b bg-neutral-50 rounded-t">
+              <div className="text-sm font-semibold">クラス図作成問題（本文）</div>
+            </div>
+            <div className="px-3 py-2 text-sm whitespace-pre-wrap max-h-40 overflow-y-auto">
+              {classProblemText
+                ? classProblemText
+                : "（トップページでクラス図作成問題文を設定してください）"}
+            </div>
+          </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex-shrink-0">
           <button
             type="button"
             className="text-xs px-3 py-1 rounded border bg-neutral-50 hover:bg-neutral-100"
@@ -256,112 +485,405 @@ export default function Level4ClassEditorPage() {
         </div>
       )}
 
-      {/* 上：テキストエディタ */}
-      <section className="rounded-lg border bg-white p-4 space-y-2">
-        <div className="flex items-center justify-between">
-          <div className="font-semibold text-sm">あなたのクラス図（PlantUML）</div>
-        </div>
-        <textarea
-          className="w-full border rounded p-2 text-xs font-mono h-48"
-          value={classPuml}
-          onChange={(e) => {
-            setClassPuml(e.target.value);
-            setCheckMessages([]);
-            setScore(null);
-          }}
-        />
-        <div className="text-[11px] text-neutral-500">
-          ※ 推定クラス図を初期値として読み込んでいます。自由に修正して構いません。
-        </div>
-      </section>
-
-      {/* 中央：推定クラス図 vs あなたのクラス図 */}
-      <section className="rounded-lg border bg-white p-4 space-y-3">
-        <div className="text-xs font-semibold mb-1">
-          推定クラス図とあなたのクラス図の見比べ
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
-          <div className="border rounded p-2 bg-neutral-50">
-            <div className="text-[11px] text-center text-neutral-600 mb-1">
-              推定クラス図
+      {/* メイン：左 = 編集 / 右 = プレビュー */}
+      <section className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+        {/* 左側：クラス・関連・チェック */}
+        <div className="lg:col-span-2 space-y-4">
+          {/* クラス編集ゾーン */}
+          <section className="rounded-lg border bg-white p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-semibold">クラスの編集</div>
+              <button
+                type="button"
+                className="text-[11px] px-3 py-1 rounded border bg-emerald-50 hover:bg-emerald-100"
+                onClick={handleAddClass}
+              >
+                クラスを追加
+              </button>
             </div>
-            {initialUrl ? (
-              <div className="flex items-center justify-center max-h-[360px] overflow-auto bg-white rounded">
-                <img alt="initial-class-uml" src={initialUrl} className="w-full h-auto" />
-              </div>
-            ) : (
-              <div className="text-[11px] text-neutral-400 p-2 text-center">
-                推定クラス図が読み込めませんでした。
+            <p className="text-[11px] text-neutral-600">
+              クラス名・属性名・型を編集すると、右のクラス図プレビューに自動で反映されます。
+              「クラス名未定」から始まるクラスは、自分で名前を考えてみましょう。
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {classes.map((c) => {
+                const hasAuto = c.name.startsWith("クラス名未定");
+                return (
+                  <div
+                    key={c.id}
+                    className={`border rounded p-2 text-[11px] space-y-2 ${
+                      hasAuto ? "bg-amber-50 border-amber-300" : "bg-neutral-50"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex-1">
+                        <div className="text-[11px] text-neutral-600 mb-0.5">
+                          クラス名
+                        </div>
+                        <input
+                          className="w-full border rounded px-2 py-1 bg-white"
+                          value={c.name}
+                          onChange={(e) => {
+                            const newName = e.target.value;
+                            updateClass(c.id, (prev) => ({
+                              ...prev,
+                              name: newName,
+                              isAutoNamed: newName.startsWith("クラス名未定"),
+                            }));
+                          }}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        className="text-[11px] px-2 py-1 rounded border border-red-300 text-red-600 bg-white hover:bg-red-50"
+                        onClick={() => handleDeleteClass(c.id)}
+                      >
+                        削除
+                      </button>
+                    </div>
+                    {hasAuto && (
+                      <div className="text-[10px] text-amber-800">
+                        ※ 自動推定されたクラスです。問題文やオブジェクト図を見ながら、適切なクラス名を考えてみましょう。
+                      </div>
+                    )}
+
+                    <div className="border rounded bg-white p-1">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[10px] font-semibold">
+                          属性一覧
+                        </span>
+                        <button
+                          type="button"
+                          className="text-[10px] px-2 py-0.5 rounded border bg-neutral-50 hover:bg-neutral-100"
+                          onClick={() =>
+                            updateClass(c.id, (prev) => ({
+                              ...prev,
+                              attrs: [
+                                ...prev.attrs,
+                                {
+                                  id: makeId(),
+                                  name: "新しい属性",
+                                  type: "string",
+                                  status: "none",
+                                },
+                              ],
+                            }))
+                          }
+                        >
+                          属性を追加
+                        </button>
+                      </div>
+                      {c.attrs.length === 0 && (
+                        <div className="text-[10px] text-neutral-400 px-1 pb-1">
+                          属性はまだありません。必要に応じて追加してみましょう。
+                        </div>
+                      )}
+                      <div className="space-y-1">
+                        {c.attrs.map((a) => (
+                          <div
+                            key={a.id}
+                            className="flex items-center gap-1 text-[10px]"
+                          >
+                            <input
+                              className="flex-1 border rounded px-1 py-0.5"
+                              value={a.name}
+                              onChange={(e) =>
+                                updateClass(c.id, (prev) => ({
+                                  ...prev,
+                                  attrs: prev.attrs.map((x) =>
+                                    x.id === a.id
+                                      ? { ...x, name: e.target.value }
+                                      : x
+                                  ),
+                                }))
+                              }
+                            />
+                            <span className="text-neutral-600">:</span>
+                            <select
+                              className="w-20 border rounded px-1 py-0.5"
+                              value={a.type}
+                              onChange={(e) =>
+                                updateClass(c.id, (prev) => ({
+                                  ...prev,
+                                  attrs: prev.attrs.map((x) =>
+                                    x.id === a.id
+                                      ? { ...x, type: e.target.value }
+                                      : x
+                                  ),
+                                }))
+                              }
+                            >
+                              <option value="string">string</option>
+                              <option value="int">int</option>
+                              <option value="real">real</option>
+                              <option value="boolean">boolean</option>
+                              <option value="other">other</option>
+                            </select>
+                            {a.status !== "none" && (
+                              <button
+                                type="button"
+                                className={`px-1.5 py-0.5 rounded ${
+                                  a.status === "incomplete"
+                                    ? "bg-amber-100 text-amber-800"
+                                    : "bg-red-100 text-red-700"
+                                }`}
+                                onClick={() =>
+                                  updateClass(c.id, (prev) => ({
+                                    ...prev,
+                                    attrs: prev.attrs.map((x) =>
+                                      x.id === a.id
+                                        ? { ...x, status: "none" }
+                                        : x
+                                    ),
+                                  }))
+                                }
+                              >
+                                {a.status === "incomplete"
+                                  ? "要確認 (修正済みにする)"
+                                  : "型の矛盾 (修正済みにする)"}
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="px-1 py-0.5 rounded border bg-neutral-50 hover:bg-neutral-100"
+                              onClick={() =>
+                                updateClass(c.id, (prev) => ({
+                                  ...prev,
+                                  attrs: prev.attrs.filter((x) => x.id !== a.id),
+                                }))
+                              }
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {unnamedClassIds.length > 0 && (
+              <div className="text-[11px] text-amber-800">
+                ※ 「クラス名未定」で始まるクラスがまだ残っています。可能であれば、それぞれに意味のある名前を付けてみましょう。
               </div>
             )}
-          </div>
-          <div className="border rounded p-2 bg-neutral-50">
-            <div className="text-[11px] text-center text-neutral-600 mb-1">
-              あなたのクラス図
+          </section>
+
+          {/* 関連編集ゾーン */}
+          <section className="rounded-lg border bg-white p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-semibold">関連と多重度の編集</div>
+              <button
+                type="button"
+                className="text-[11px] px-3 py-1 rounded border bg-emerald-50 hover:bg-emerald-100"
+                onClick={handleAddRelation}
+                disabled={classes.length === 0}
+              >
+                関連を追加
+              </button>
             </div>
+            <p className="text-[11px] text-neutral-600">
+              どのクラス同士が関係しているか、多重度がどうなっているかを確認・修正します。
+              不要な関連は「削除」ボタンで消すことができます。
+            </p>
+
+            {relations.length === 0 && (
+              <div className="text-[11px] text-neutral-400">
+                現在、関連はありません。必要に応じて「関連を追加」ボタンから追加できます。
+              </div>
+            )}
+
+            <div className="space-y-2">
+              {relations.map((r) => (
+                <div
+                  key={r.id}
+                  className={`border rounded p-2 text-[11px] flex flex-wrap items-center gap-2 ${
+                    r.style === "dotted"
+                      ? "bg-neutral-50 border-dashed"
+                      : "bg-neutral-50"
+                  }`}
+                >
+                  <select
+                    className="border rounded px-1 py-0.5"
+                    value={r.fromId}
+                    onChange={(e) =>
+                      updateRelation(r.id, (prev) => ({
+                        ...prev,
+                        fromId: e.target.value,
+                      }))
+                    }
+                  >
+                    {classes.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    className="w-20 border rounded px-1 py-0.5"
+                    value={r.multFrom}
+                    onChange={(e) =>
+                      updateRelation(r.id, (prev) => ({
+                        ...prev,
+                        multFrom: e.target.value,
+                      }))
+                    }
+                  >
+                    <option value="">(なし)</option>
+                    <option value="1">1</option>
+                    <option value="0..1">0..1</option>
+                    <option value="1..*">1..*</option>
+                    <option value="0..*">0..*</option>
+                  </select>
+                  <span>—</span>
+                  <input
+                    className="flex-1 border rounded px-1 py-0.5"
+                    placeholder="関連の名前（任意）"
+                    value={r.label}
+                    onChange={(e) =>
+                      updateRelation(r.id, (prev) => ({
+                        ...prev,
+                        label: e.target.value,
+                      }))
+                    }
+                  />
+                  <span>→</span>
+                  <select
+                    className="border rounded px-1 py-0.5"
+                    value={r.toId}
+                    onChange={(e) =>
+                      updateRelation(r.id, (prev) => ({
+                        ...prev,
+                        toId: e.target.value,
+                      }))
+                    }
+                  >
+                    {classes.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    className="w-20 border rounded px-1 py-0.5"
+                    value={r.multTo}
+                    onChange={(e) =>
+                      updateRelation(r.id, (prev) => ({
+                        ...prev,
+                        multTo: e.target.value,
+                      }))
+                    }
+                  >
+                    <option value="">(なし)</option>
+                    <option value="1">1</option>
+                    <option value="0..1">0..1</option>
+                    <option value="1..*">1..*</option>
+                    <option value="0..*">0..*</option>
+                  </select>
+                  <label className="inline-flex items-center gap-1 ml-2">
+                    <input
+                      type="checkbox"
+                      className="border rounded"
+                      checked={r.style === "dotted"}
+                      onChange={(e) =>
+                        updateRelation(r.id, (prev) => ({
+                          ...prev,
+                          style: e.target.checked ? "dotted" : "solid",
+                        }))
+                      }
+                    />
+                    <span>不確かな関連（点線）</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="ml-auto px-2 py-0.5 rounded border border-red-300 text-red-600 bg-white hover:bg-red-50"
+                    onClick={() => handleDeleteRelation(r.id)}
+                  >
+                    削除
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* チェック＆採点 */}
+          <section className="rounded-lg border bg-white p-4 space-y-3">
+            <div className="flex flex-wrap gap-2 text-xs">
+              <button
+                type="button"
+                className="px-3 py-1 rounded border"
+                onClick={handleCheckDiagram}
+              >
+                クラス図の整合性チェック
+              </button>
+              <button
+                type="button"
+                className="px-3 py-1 rounded border"
+                onClick={handleGrade}
+              >
+                模範クラス図と比較して採点
+              </button>
+            </div>
+
+            {checkMessages.length > 0 && (
+              <div className="border rounded p-2 bg-neutral-50 text-[11px] space-y-1">
+                <div className="font-semibold mb-1">
+                  クラス図の整合性チェック結果
+                </div>
+                <ul className="list-disc pl-4 space-y-0.5">
+                  {checkMessages.map((m, i) => (
+                    <li key={i}>{m}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {gradeErr && (
+              <div className="text-xs text-red-600">{gradeErr}</div>
+            )}
+
+            {score && (
+              <div className="border rounded p-2 bg-neutral-50 text-[11px] space-y-1">
+                <div className="font-semibold">
+                  採点結果：総合 {score.total} 点
+                </div>
+                <div>・クラス抽出：{score.classes} 点</div>
+                <div>・関連抽出：{score.relations} 点</div>
+                <ul className="list-disc pl-4 mt-1 space-y-0.5">
+                  {score.comments.map((c, i) => (
+                    <li key={i}>{c}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </section>
+        </div>
+
+        {/* 右側：あなたのクラス図プレビュー（スクロールに追従） */}
+        <div className="lg:col-span-1">
+          <section className="rounded-lg border bg-white p-4 space-y-2 lg:sticky lg:top-4">
+            <div className="text-xs font-semibold">あなたのクラス図（プレビュー）</div>
+            <p className="text-[11px] text-neutral-600">
+              左側でクラスや関連を編集すると、このクラス図が自動で更新されます。
+            </p>
             {currentUrl ? (
-              <div className="flex items-center justify-center max-h-[360px] overflow-auto bg-white rounded">
-                <img alt="current-class-uml" src={currentUrl} className="w-full h-auto" />
+              <div className="flex items-center justify-center max-h-[520px] overflow-auto bg-neutral-50 rounded">
+                <img
+                  alt="current-class-uml"
+                  src={currentUrl}
+                  className="w-full h-auto"
+                />
               </div>
             ) : (
               <div className="text-[11px] text-neutral-400 p-2 text-center">
-                クラス図テキストを編集すると、ここに図が表示されます。
+                クラスや関連を編集すると、ここにクラス図が表示されます。
               </div>
             )}
-          </div>
+          </section>
         </div>
-      </section>
-
-      {/* 下：チェック＆採点 */}
-      <section className="rounded-lg border bg-white p-4 space-y-3">
-        <div className="flex flex-wrap gap-2 text-xs">
-          <button
-            type="button"
-            className="px-3 py-1 rounded border"
-            onClick={handleCheckDiagram}
-          >
-            クラス図の整合性チェック
-          </button>
-          <button
-            type="button"
-            className="px-3 py-1 rounded border"
-            onClick={handleGrade}
-          >
-            模範クラス図と比較して採点
-          </button>
-        </div>
-
-        {checkMessages.length > 0 && (
-          <div className="border rounded p-2 bg-neutral-50 text-[11px] space-y-1">
-            <div className="font-semibold mb-1">
-              クラス図の整合性チェック結果
-            </div>
-            <ul className="list-disc pl-4 space-y-0.5">
-              {checkMessages.map((m, i) => (
-                <li key={i}>{m}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {gradeErr && (
-          <div className="text-xs text-red-600">{gradeErr}</div>
-        )}
-
-        {score && (
-          <div className="border rounded p-2 bg-neutral-50 text-[11px] space-y-1">
-            <div className="font-semibold">
-              採点結果：総合 {score.total} 点
-            </div>
-            <div>・クラス抽出：{score.classes} 点</div>
-            <div>・関連抽出：{score.relations} 点</div>
-            <ul className="list-disc pl-4 mt-1 space-y-0.5">
-              {score.comments.map((c, i) => (
-                <li key={i}>{c}</li>
-              ))}
-            </ul>
-          </div>
-        )}
       </section>
     </div>
   );
