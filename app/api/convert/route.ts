@@ -14,6 +14,7 @@ import plantumlEncoder from "plantuml-encoder";
  * - 関連は“弱い観測/曖昧”を点線（..）で出力
  * - 多重度は簡易（0..1 / 0..*）を右側に表示
  * - 明示リンクに label があれば、それを関連名として採用（多数決で1つに絞る）
+ * - さらに、クラス対ごとのラベル候補一覧 relationHints も返す
  */
 
 type PrimType = "int" | "real" | "boolean" | "string";
@@ -26,6 +27,12 @@ type LinkIn = { from: string; to: string; label?: string };
 type InputPayload = {
   objects: ObjIn[];
   links?: LinkIn[];
+};
+
+type RelationHint = {
+  fromClass: string;
+  toClass: string;
+  candidates: { label: string; count: number }[];
 };
 
 // ===== ユーティリティ =====
@@ -233,6 +240,18 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ===== relationHints を作成（クラス対ごとのラベル候補一覧） =====
+  const relationHints: RelationHint[] = [];
+  for (const [key, labelMap] of assocLabelCount.entries()) {
+    const [fromClass, toClass] = key.split("::");
+    const candidates = Array.from(labelMap.entries())
+      .map(([label, count]) => ({ label, count }))
+      .sort((a, b) => b.count - a.count); // 出現回数の多い順
+    if (candidates.length > 0) {
+      relationHints.push({ fromClass, toClass, candidates });
+    }
+  }
+
   // ===== PlantUML 出力 =====
   let puml = "@startuml\n";
   puml += "hide empty members\n";
@@ -288,7 +307,7 @@ export async function POST(req: NextRequest) {
     const style = dotted ? ".." : "--";
     const multRight = maxPerA > 1 ? "0..*" : "0..1";
 
-    // label の多数決
+    // label の多数決（上で relationHints も作っているが、ここでも同じロジックで1つ選ぶ）
     const labelMap = assocLabelCount.get(key);
     let labelPart = "";
     if (labelMap && labelMap.size > 0) {
@@ -318,6 +337,7 @@ export async function POST(req: NextRequest) {
     classPuml: puml,
     encodedPuml: encoded,
     issues,
+    relationHints, // ★ クラス対ごとのラベル候補一覧（class-editor で使う）
   });
 }
 
