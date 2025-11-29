@@ -80,7 +80,7 @@ const formatSlotValue = (raw: string): string => {
   const ty = detectType(t);
   if (ty === "int" || ty === "real") return t;
   if (ty === "boolean") return t.toLowerCase();
-  // string のときだけ "..."
+  // string のときだけ "...":
   return `"${escLabel(t)}"`;
 };
 
@@ -132,22 +132,35 @@ const Level4Page: React.FC = () => {
       return;
     }
 
+    // どのオブジェクトをハイライトするか決定
+    const objectHighlightIds = new Set<string>(); // オブジェクト選択による強調（黄色）
+    const linkHighlightIds = new Set<string>();   // リンク選択による強調（ピンク）
+
+    if (selectedObjectId) objectHighlightIds.add(selectedObjectId);
+    const currentLink = links.find((l) => l.id === selectedLinkId) ?? null;
+    if (currentLink) {
+      linkHighlightIds.add(currentLink.from);
+      linkHighlightIds.add(currentLink.to);
+    }
+
     const lines: string[] = [];
     lines.push("@startuml");
-
-    // 選択中オブジェクト用スタイル
-    lines.push("skinparam object {");
-    lines.push("  BackgroundColor<<selected>> #fffbcc"); // 薄い黄色
-    lines.push("  BorderColor<<selected>> #ff9900");     // オレンジ枠
-    lines.push("}");
 
     // オブジェクト
     for (const o of objects) {
       const safeName = o.name || "(無名)";
       const underlined = `<u>${escLabel(safeName)}</u>`;
-      const isSelected = selectedObjectId === o.id;
-      const stereo = isSelected ? " <<selected>>" : "";
-      lines.push(`object "${underlined}" as ${o.id}${stereo} {`);
+
+      let fill = "";
+      if (objectHighlightIds.has(o.id)) {
+        // オブジェクトを選択中 → 黄色
+        fill = " #FFF6BF";
+      } else if (linkHighlightIds.has(o.id)) {
+        // リンクを選択中 → ピンク
+        fill = " #FFD6E0";
+      }
+
+      lines.push(`object "${underlined}" as ${o.id}${fill} {`);
       for (const s of o.slots) {
         if (!s.key && !s.value) continue;
         const val = formatSlotValue(s.value);
@@ -157,15 +170,15 @@ const Level4Page: React.FC = () => {
       lines.push("}");
     }
 
-    // リンク（矢印なしの実線／選択中は赤く太線）
+    // リンク（選択されているものだけ赤線）
     for (const l of links) {
       const from = objects.find((o) => o.id === l.from);
       const to = objects.find((o) => o.id === l.to);
       if (!from || !to) continue;
       const labelPart = l.label ? ` : ${escLabel(l.label)}` : "";
-      const isSelected = selectedLinkId === l.id;
-      const style = isSelected ? "-[#red,thickness=3]-" : "--";
-      lines.push(`${from.id} ${style} ${to.id}${labelPart}`);
+      const isHighlighted = l.id === selectedLinkId;
+      const linePattern = isHighlighted ? "-[#red]-" : "--";
+      lines.push(`${from.id} ${linePattern} ${to.id}${labelPart}`);
     }
 
     lines.push("@enduml");
@@ -223,7 +236,7 @@ const Level4Page: React.FC = () => {
         if (e?.name === "AbortError") return;
         console.error("convert preview error", e);
       }
-    }, 500); // 0.5秒デバウンス
+    }, 500);
 
     return () => {
       clearTimeout(id);
@@ -247,7 +260,6 @@ const Level4Page: React.FC = () => {
 
   const handleDeleteObject = (id: string) => {
     setObjects((prev) => prev.filter((o) => o.id !== id));
-    // 関連しているリンクも削除
     setLinks((prev) => prev.filter((l) => l.from !== id && l.to !== id));
     if (selectedObjectId === id) setSelectedObjectId(null);
   };
@@ -356,7 +368,6 @@ const Level4Page: React.FC = () => {
     let result: ConvertResponse | null = null;
 
     if (classPuml) {
-      // すでにリアルタイム変換済み
       result = {
         classPuml,
         encodedPuml: encodedClassPuml,
@@ -364,7 +375,6 @@ const Level4Page: React.FC = () => {
         relationHints,
       };
     } else {
-      // 念のため再変換
       try {
         const res = await fetch("/api/convert", {
           method: "POST",
@@ -424,6 +434,34 @@ const Level4Page: React.FC = () => {
     router.push("/level4/class-editor");
   };
 
+  // ===== オブジェクト図問題文のハイライト（選択オブジェクト名） =====
+  const highlightedObjectProblem = useMemo<React.ReactNode>(() => {
+    const text = objectProblemText || "";
+    const target = selectedObject?.name?.trim();
+    if (!target) return text;
+
+    const parts = text.split(target);
+    const nodes: React.ReactNode[] = [];
+
+    parts.forEach((part, idx) => {
+      if (idx > 0) {
+        nodes.push(
+          <span
+            key={`hl-${idx}`}
+            className="bg-amber-100 rounded px-0.5 font-semibold"
+          >
+            {target}
+          </span>
+        );
+      }
+      nodes.push(
+        <React.Fragment key={`part-${idx}`}>{part}</React.Fragment>
+      );
+    });
+
+    return nodes;
+  }, [objectProblemText, selectedObject?.name]);
+
   // ===== PlantUML サーバURL =====
   const objectPreviewUrl = useMemo(() => {
     if (!encodedObjectPuml) return "";
@@ -470,7 +508,7 @@ const Level4Page: React.FC = () => {
 
       {/* メイン 3カラムレイアウト */}
       <div className="flex flex-1 overflow-hidden">
-        {/* 左：問題文（縦スクロール可） */}
+        {/* 左：問題文 */}
         <div className="w-1/4 min-w-[260px] border-r bg-white flex flex-col overflow-y-auto">
           <div className="p-2 border-b font-semibold text-sm">要求文</div>
 
@@ -512,14 +550,14 @@ const Level4Page: React.FC = () => {
                 (showObjectProblemFull ? "" : "max-h-[80px] overflow-hidden")
               }
             >
-              {objectProblemText}
+              {highlightedObjectProblem}
             </div>
           </div>
         </div>
 
-        {/* 中央：上＝オブジェクト編集／下＝オブジェクト図プレビュー */}
+        {/* 中央：オブジェクト編集＋オブジェクト図プレビュー */}
         <div className="w-1/3 border-r flex flex-col">
-          {/* 上：オブジェクト編集 */}
+          {/* オブジェクト編集 */}
           <div className="h-1/2 border-b flex flex-col">
             <div className="p-2 border-b flex items-center justify-between bg-white">
               <span className="font-semibold text-sm">オブジェクト編集</span>
@@ -539,23 +577,30 @@ const Level4Page: React.FC = () => {
                     まだオブジェクトがありません。「オブジェクト追加」から作成してください。
                   </div>
                 )}
-                {objects.map((o) => (
-                  <button
-                    key={o.id}
-                    className={
-                      "w-full text-left px-2 py-1 border-b flex items-center justify-between hover:bg-slate-100 " +
-                      (selectedObjectId === o.id ? "bg-sky-100" : "")
-                    }
-                    onClick={() => setSelectedObjectId(o.id)}
-                  >
-                    <span className="truncate">
-                      {o.name || "(無名オブジェクト)"}
-                    </span>
-                    <span className="text-[10px] text-slate-500 ml-2">
-                      {o.slots.length} スロット
-                    </span>
-                  </button>
-                ))}
+                {objects.map((o) => {
+                  const isSelected = selectedObjectId === o.id;
+                  return (
+                    <button
+                      key={o.id}
+                      className={
+                        "w-full text-left px-2 py-1 border-b flex items-center justify-between " +
+                        (isSelected
+                          ? "bg-amber-100 ring-1 ring-amber-400"
+                          : "hover:bg-slate-100")
+                      }
+                      onClick={() =>
+                        setSelectedObjectId((prev) => (prev === o.id ? null : o.id))
+                      }
+                    >
+                      <span className="truncate">
+                        {o.name || "(無名オブジェクト)"}
+                      </span>
+                      <span className="text-[10px] text-slate-500 ml-2">
+                        {o.slots.length} スロット
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
 
               {/* オブジェクト詳細編集 */}
@@ -645,7 +690,7 @@ const Level4Page: React.FC = () => {
                       </div>
                     </div>
 
-                    {/* 削除（危険エリア） */}
+                    {/* 削除 */}
                     <div className="mt-3 pt-2 border-t border-dashed border-red-200 flex justify-end">
                       <button
                         type="button"
@@ -661,7 +706,7 @@ const Level4Page: React.FC = () => {
             </div>
           </div>
 
-          {/* 下：オブジェクト図プレビュー */}
+          {/* オブジェクト図プレビュー */}
           <div className="flex-1 flex flex-col">
             <div className="p-2 border-b bg-white flex items-center justify-between">
               <span className="font-semibold text-sm">
@@ -688,9 +733,9 @@ const Level4Page: React.FC = () => {
           </div>
         </div>
 
-        {/* 右：上＝リンク編集／下＝推定クラス図プレビュー */}
+        {/* 右：リンク編集＋推定クラス図プレビュー */}
         <div className="flex-1 flex flex-col">
-          {/* 上：リンク編集 */}
+          {/* リンク編集 */}
           <div className="h-1/2 border-b flex flex-col">
             <div className="p-2 border-b flex items-center justify-between bg-white">
               <span className="font-semibold text-sm">リンク編集</span>
@@ -712,14 +757,19 @@ const Level4Page: React.FC = () => {
                 {links.map((l) => {
                   const from = objects.find((o) => o.id === l.from);
                   const to = objects.find((o) => o.id === l.to);
+                  const isSelected = selectedLinkId === l.id;
                   return (
                     <button
                       key={l.id}
                       className={
-                        "w-full text-left px-2 py-1 border-b flex flex-col hover:bg-slate-100 " +
-                        (selectedLinkId === l.id ? "bg-sky-100" : "")
+                        "w-full text-left px-2 py-1 border-b flex flex-col " +
+                        (isSelected
+                          ? "bg-rose-100 ring-1 ring-rose-400"
+                          : "hover:bg-slate-100")
                       }
-                      onClick={() => setSelectedLinkId(l.id)}
+                      onClick={() =>
+                        setSelectedLinkId((prev) => (prev === l.id ? null : l.id))
+                      }
                     >
                       <div className="flex justify-between">
                         <span className="truncate">
@@ -806,7 +856,7 @@ const Level4Page: React.FC = () => {
                       />
                     </div>
 
-                    {/* 削除（危険エリア） */}
+                    {/* 削除 */}
                     <div className="mt-3 pt-2 border-t border-dashed border-red-200 flex justify-end">
                       <button
                         className="px-3 py-1 text-[11px] rounded bg-red-100 text-red-700 hover:bg-red-200 font-semibold"
@@ -821,7 +871,7 @@ const Level4Page: React.FC = () => {
             </div>
           </div>
 
-          {/* 下：推定クラス図プレビュー */}
+          {/* 推定クラス図プレビュー */}
           <div className="flex-1 flex flex-col">
             <div className="p-2 border-b bg-white flex items-center justify-between">
               <span className="font-semibold text-sm">
