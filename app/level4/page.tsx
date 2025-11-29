@@ -28,6 +28,15 @@ type InferenceHints = {
   attrHints: string[];
 };
 
+type EditorInitialPayload = {
+  initialClassPuml?: string;
+  relationHints?: {
+    fromClass: string;
+    toClass: string;
+    candidates: { label: string; count: number }[];
+  }[];
+};
+
 const LEVEL4_STORAGE_KEY = "level4-state-v1";
 
 /* ================= ユーティリティ関数 ================= */

@@ -6,6 +6,10 @@ import { useProblemConfig } from "@/components/problem-config";
 import { generatePlantUMLUrl } from "@/utils/plantuml";
 import type { Obj, Link } from "@/types";
 
+/* ========= 定数 ========= */
+
+const SNAPSHOT_KEY = "LEVEL4_CLASS_EDITOR_SNAPSHOT";
+
 /* ========= 型 ========= */
 
 type EditorPayload = {
@@ -47,12 +51,16 @@ type RelationInfo = {
   style: "solid" | "dotted";
 };
 
+
+
 /* ========= ユーティリティ ========= */
 
 const makeId = () => Math.random().toString(36).slice(2, 10);
 
 /** PlantUML からクラスと関連のモデルをざっくり抽出 */
-function parsePumlToModel(puml: string): { classes: ClassInfo[]; relations: RelationInfo[] } {
+function parsePumlToModel(
+  puml: string
+): { classes: ClassInfo[]; relations: RelationInfo[] } {
   const lines = puml.split(/\r?\n/);
 
   const classes: ClassInfo[] = [];
@@ -64,7 +72,9 @@ function parsePumlToModel(puml: string): { classes: ClassInfo[]; relations: Rela
     const line = raw.trimEnd();
 
     // class 行
-    const classMatch = line.match(/^\s*class\s+([^\s{]+)(?:\s+<<([^>]+)>>)?\s*{/);
+    const classMatch = line.match(
+      /^\s*class\s+([^\s{]+)(?:\s+<<([^>]+)>>)?\s*{/
+    );
     if (classMatch) {
       const name = classMatch[1].trim();
       const isAutoNamed = name.startsWith("クラス名未定");
@@ -85,7 +95,9 @@ function parsePumlToModel(puml: string): { classes: ClassInfo[]; relations: Rela
         continue;
       }
       // 属性行:  key: type <!> / <?>
-      const attrMatch = line.match(/^\s*([^:]+):\s*([^\s]+)\s*(<!>|<\?>)?\s*$/);
+      const attrMatch = line.match(
+        /^\s*([^:]+):\s*([^\s]+)\s*(<!>|<\?>)?\s*$/
+      );
       if (attrMatch) {
         const name = attrMatch[1].trim();
         const type = attrMatch[2].trim();
@@ -103,9 +115,9 @@ function parsePumlToModel(puml: string): { classes: ClassInfo[]; relations: Rela
       continue;
     }
 
-    // 関連行:  A "1" -- "0..1" B   or   A "1" .. "0..1" B
+    // 関連行:  A "1" -- "0..1" B : label   or   A "1" .. "0..1" B : label
     const relMatch = line.match(
-      /^\s*([^\s"]+)\s+"([^"]*)"\s*(--|\.\.)\s+"([^"]*)"\s+([^\s"]+)/
+      /^\s*([^\s"]+)\s+"([^"]*)"\s*(--|\.\.)\s+"([^"]*)"\s+([^\s":]+)(?:\s*:\s*(.+))?$/
     );
     if (relMatch) {
       const fromName = relMatch[1].trim();
@@ -113,12 +125,13 @@ function parsePumlToModel(puml: string): { classes: ClassInfo[]; relations: Rela
       const style = relMatch[3] === ".." ? "dotted" : "solid";
       const multTo = relMatch[4].trim();
       const toName = relMatch[5].trim();
+      const label = (relMatch[6] ?? "").trim();
 
       relations.push({
         id: makeId(),
         fromId: fromName, // ひとまずクラス名＝ID としておく
         toId: toName,
-        label: "",
+        label,
         multFrom,
         multTo,
         style,
@@ -155,7 +168,9 @@ function buildPuml(classes: ClassInfo[], relations: RelationInfo[]): string {
 
   // クラス定義
   for (const c of classes) {
-    const hasContradiction = c.attrs.some((a) => a.status === "contradictory");
+    const hasContradiction = c.attrs.some(
+      (a) => a.status === "contradictory"
+    );
     const hasIncomplete = c.attrs.some((a) => a.status === "incomplete");
     const stereo = hasContradiction
       ? " <<contradictory>>"
@@ -166,7 +181,11 @@ function buildPuml(classes: ClassInfo[], relations: RelationInfo[]): string {
     puml += `class ${esc(c.name)}${stereo} {\n`;
     for (const a of c.attrs) {
       const mark =
-        a.status === "contradictory" ? " <!>" : a.status === "incomplete" ? " <?>" : "";
+        a.status === "contradictory"
+          ? " <!>"
+          : a.status === "incomplete"
+          ? " <?>"
+          : "";
       puml += `  ${esc(a.name)}: ${a.type} ${mark}\n`;
     }
     puml += "}\n";
@@ -179,10 +198,16 @@ function buildPuml(classes: ClassInfo[], relations: RelationInfo[]): string {
     const from = classes.find((c) => c.id === r.fromId);
     const to = classes.find((c) => c.id === r.toId);
     if (!from || !to) continue;
+
     const style = r.style === "dotted" ? ".." : "--";
+    const labelPart =
+      r.label && r.label.trim().length > 0
+        ? ` : ${esc(r.label.trim())}`
+        : "";
+
     puml += `${esc(from.name)} "${normMult(r.multFrom)}" ${style} "${normMult(
       r.multTo
-    )}" ${esc(to.name)}\n`;
+    )}" ${esc(to.name)}${labelPart}\n`;
   }
 
   puml += "@enduml";
@@ -289,10 +314,33 @@ export default function Level4ClassEditorPage() {
   const [gradeErr, setGradeErr] = useState<string | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
 
-  // 初期データ読み込み
+  const [snapshotMessage, setSnapshotMessage] = useState<string | null>(null);
+
+  // 初期データ読み込み（スナップショットがあれば優先）
   useEffect(() => {
     if (typeof window === "undefined") return;
+
     try {
+      // ① スナップショット優先
+      const snapRaw = localStorage.getItem(SNAPSHOT_KEY);
+      if (snapRaw) {
+        const snap = JSON.parse(snapRaw);
+        if (snap.classes && snap.relations) {
+          setClasses(snap.classes as ClassInfo[]);
+          setRelations(snap.relations as RelationInfo[]);
+
+          const rawInitial = localStorage.getItem(
+            "LEVEL4_CLASS_EDITOR_INITIAL"
+          );
+          if (rawInitial) {
+            const payload: EditorPayload = JSON.parse(rawInitial);
+            setInitialClassPuml(payload.initialClassPuml ?? "");
+          }
+          return;
+        }
+      }
+
+      // ② なければ初回推定から
       const raw = localStorage.getItem("LEVEL4_CLASS_EDITOR_INITIAL");
       if (!raw) {
         setLoadErr(
@@ -328,6 +376,48 @@ export default function Level4ClassEditorPage() {
     () => classes.filter((c) => c.name.startsWith("クラス名未定")).map((c) => c.id),
     [classes]
   );
+
+  /* ===== 保存 / 復元 ===== */
+
+  const handleSaveSnapshot = () => {
+    try {
+      const snapshot = {
+        classes,
+        relations,
+        savedAt: new Date().toISOString(),
+      };
+      localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
+      setSnapshotMessage("現在のクラス図の状態を保存しました。");
+    } catch (e) {
+      setSnapshotMessage(
+        "状態の保存に失敗しました。ブラウザの制限などが原因の可能性があります。"
+      );
+    }
+  };
+
+  const handleRestoreSnapshot = () => {
+    try {
+      const raw = localStorage.getItem(SNAPSHOT_KEY);
+      if (!raw) {
+        setSnapshotMessage("保存された状態が見つかりませんでした。");
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      if (!parsed.classes || !parsed.relations) {
+        setSnapshotMessage("保存データの形式が不正です。");
+        return;
+      }
+      setClasses(parsed.classes as ClassInfo[]);
+      setRelations(parsed.relations as RelationInfo[]);
+      setSnapshotMessage("最後に保存した状態を復元しました。");
+      setCheckMessages([]);
+      setScore(null);
+    } catch (e) {
+      setSnapshotMessage("状態の復元に失敗しました。");
+    }
+  };
+
+  /* ===== チェック・採点 ===== */
 
   const handleCheckDiagram = () => {
     const msgs = checkClassDiagram(classPuml);
@@ -405,7 +495,10 @@ export default function Level4ClassEditorPage() {
     setClasses((prev) => prev.map((c) => (c.id === id ? updater(c) : c)));
   };
 
-  const updateRelation = (id: string, updater: (r: RelationInfo) => RelationInfo) => {
+  const updateRelation = (
+    id: string,
+    updater: (r: RelationInfo) => RelationInfo
+  ) => {
     setRelations((prev) => prev.map((r) => (r.id === id ? updater(r) : r)));
   };
 
@@ -448,6 +541,8 @@ export default function Level4ClassEditorPage() {
   const handleDeleteRelation = (id: string) => {
     setRelations((prev) => prev.filter((r) => r.id !== id));
   };
+
+  /* ===== JSX ===== */
 
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-4">
@@ -650,7 +745,9 @@ export default function Level4ClassEditorPage() {
                               onClick={() =>
                                 updateClass(c.id, (prev) => ({
                                   ...prev,
-                                  attrs: prev.attrs.filter((x) => x.id !== a.id),
+                                  attrs: prev.attrs.filter(
+                                    (x) => x.id !== a.id
+                                  ),
                                 }))
                               }
                             >
@@ -809,7 +906,7 @@ export default function Level4ClassEditorPage() {
             </div>
           </section>
 
-          {/* チェック＆採点 */}
+          {/* チェック＆採点＋保存/復元 */}
           <section className="rounded-lg border bg-white p-4 space-y-3">
             <div className="flex flex-wrap gap-2 text-xs">
               <button
@@ -826,7 +923,27 @@ export default function Level4ClassEditorPage() {
               >
                 模範クラス図と比較して採点
               </button>
+              <button
+                type="button"
+                className="px-3 py-1 rounded border bg-blue-50 hover:bg-blue-100"
+                onClick={handleSaveSnapshot}
+              >
+                状態を保存
+              </button>
+              <button
+                type="button"
+                className="px-3 py-1 rounded border bg-purple-50 hover:bg-purple-100"
+                onClick={handleRestoreSnapshot}
+              >
+                最後の保存状態に戻る
+              </button>
             </div>
+
+            {snapshotMessage && (
+              <div className="text-[11px] text-neutral-700">
+                {snapshotMessage}
+              </div>
+            )}
 
             {checkMessages.length > 0 && (
               <div className="border rounded p-2 bg-neutral-50 text-[11px] space-y-1">
@@ -865,7 +982,9 @@ export default function Level4ClassEditorPage() {
         {/* 右側：あなたのクラス図プレビュー（スクロールに追従） */}
         <div className="lg:col-span-1">
           <section className="rounded-lg border bg-white p-4 space-y-2 lg:sticky lg:top-4">
-            <div className="text-xs font-semibold">あなたのクラス図（プレビュー）</div>
+            <div className="text-xs font-semibold">
+              あなたのクラス図（プレビュー）
+            </div>
             <p className="text-[11px] text-neutral-600">
               左側でクラスや関連を編集すると、このクラス図が自動で更新されます。
             </p>
