@@ -2,1008 +2,827 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useProblemConfig } from "@/components/problem-config";
-import { generatePlantUMLUrl } from "@/utils/plantuml";
-import type { Obj, Link } from "@/types";
+import plantumlEncoder from "plantuml-encoder";
+import { useProblemConfig } from "../../../components/problem-config";
 
-/* ========= 定数 ========= */
+// ===== 型定義 =====
+type RelationHint = {
+  fromClass: string;
+  toClass: string;
+  candidates: { label: string; count: number }[];
+};
 
-const SNAPSHOT_KEY = "LEVEL4_CLASS_EDITOR_SNAPSHOT";
-
-/* ========= 型 ========= */
-
-type EditorPayload = {
+type EditorInitialPayload = {
   initialClassPuml?: string;
-  snapshot?: {
-    objects: Obj[];
-    links: Link[];
-  };
+  relationHints?: RelationHint[];
+  snapshot?: unknown;
 };
 
-type ScoreBreakdown = {
-  total: number;
-  classes: number;
-  relations: number;
-  comments: string[];
-};
-
-type AttrStatus = "none" | "incomplete" | "contradictory";
-
-type ClassInfo = {
-  id: string; // 内部ID（初期クラス名から作る）
-  name: string;
-  isAutoNamed: boolean; // 「クラス名未定*」かどうか
-  attrs: {
-    id: string;
-    name: string;
-    type: string;
-    status: AttrStatus;
-  }[];
-};
-
-type RelationInfo = {
+type ClassAttr = {
   id: string;
-  fromId: string; // ClassInfo.id
-  toId: string;
-  label: string;
-  multFrom: string; // "", "1", "0..1", "0..*", "1..*"
-  multTo: string;
-  style: "solid" | "dotted";
+  name: string;
+  type: string;
 };
 
+type ClassState = {
+  id: string;
+  name: string;
+  attrs: ClassAttr[];
+};
 
+type RelationState = {
+  id: string;
+  fromClassId: string;
+  toClassId: string;
+  label: string;
+  leftMultiplicity: string;
+  rightMultiplicity: string;
+  dotted: boolean;
+};
 
-/* ========= ユーティリティ ========= */
+const STORAGE_KEY_EDITOR_INITIAL = "LEVEL4_CLASS_EDITOR_INITIAL";
+const STORAGE_KEY_EDITOR_SAVED = "LEVEL4_CLASS_EDITOR_SAVED";
 
-const makeId = () => Math.random().toString(36).slice(2, 10);
+const MULTIPLICITY_OPTIONS = ["", "0..1", "1", "0..*", "1..*"];
 
-/** PlantUML からクラスと関連のモデルをざっくり抽出 */
-function parsePumlToModel(
-  puml: string
-): { classes: ClassInfo[]; relations: RelationInfo[] } {
-  const lines = puml.split(/\r?\n/);
+// 簡易ID生成
+const makeId = () => Math.random().toString(36).slice(2);
 
-  const classes: ClassInfo[] = [];
-  const relations: RelationInfo[] = [];
+// ===== PlantUML → モデル への簡易パーサ =====
+function parseInitialModel(
+  puml: string | undefined,
+  hints: RelationHint[] | undefined
+): { classes: ClassState[]; relations: RelationState[] } {
+  if (!puml) return { classes: [], relations: [] };
 
-  let currentClass: ClassInfo | null = null;
+  const lines = puml.split("\n").map((l) => l.trim());
 
-  for (const raw of lines) {
-    const line = raw.trimEnd();
+  type ParsedClass = { name: string; attrs: { name: string; type: string }[] };
+  type ParsedRelation = {
+    fromClass: string;
+    toClass: string;
+    leftMultiplicity: string;
+    rightMultiplicity: string;
+    dotted: boolean;
+  };
 
-    // class 行
-    const classMatch = line.match(
-      /^\s*class\s+([^\s{]+)(?:\s+<<([^>]+)>>)?\s*{/
-    );
-    if (classMatch) {
-      const name = classMatch[1].trim();
-      const isAutoNamed = name.startsWith("クラス名未定");
-      currentClass = {
-        id: name, // 初期は名前をIDにする
-        name,
-        isAutoNamed,
-        attrs: [],
-      };
-      classes.push(currentClass);
+  const parsedClasses: ParsedClass[] = [];
+  const parsedRelations: ParsedRelation[] = [];
+
+  let currentClass: ParsedClass | null = null;
+
+  for (const line of lines) {
+    if (!line || line.startsWith("@") || line.startsWith("hide ") || line.startsWith("skinparam")) {
       continue;
     }
 
+    // class 行
+    if (line.startsWith("class ")) {
+      const m = line.match(/^class\s+(.+?)(?:\s+<<[^>]+>>)?\s*\{$/);
+      if (m) {
+        currentClass = { name: m[1].trim(), attrs: [] };
+        parsedClasses.push(currentClass);
+      }
+      continue;
+    }
+
+    // クラス本体中
     if (currentClass) {
-      // クラス定義の終わり
-      if (/^\s*}\s*$/.test(line)) {
+      if (line.startsWith("}")) {
         currentClass = null;
         continue;
       }
-      // 属性行:  key: type <!> / <?>
-      const attrMatch = line.match(
-        /^\s*([^:]+):\s*([^\s]+)\s*(<!>|<\?>)?\s*$/
-      );
-      if (attrMatch) {
-        const name = attrMatch[1].trim();
-        const type = attrMatch[2].trim();
-        const mark = attrMatch[3]?.trim();
-        let status: AttrStatus = "none";
-        if (mark === "<!>") status = "contradictory";
-        else if (mark === "<?>") status = "incomplete";
+      const mAttr = line.match(/^(.+?):\s+(\w+)/);
+      if (mAttr) {
         currentClass.attrs.push({
-          id: makeId(),
-          name,
-          type,
-          status,
+          name: mAttr[1].trim(),
+          type: mAttr[2].trim(),
         });
       }
       continue;
     }
 
-    // 関連行:  A "1" -- "0..1" B : label   or   A "1" .. "0..1" B : label
-    const relMatch = line.match(
-      /^\s*([^\s"]+)\s+"([^"]*)"\s*(--|\.\.)\s+"([^"]*)"\s+([^\s":]+)(?:\s*:\s*(.+))?$/
+    // 関連行 例: 学生 "1" -- "0..1" 授業
+    const mRel = line.match(
+      /^(.+?)\s+"([^"]+)"\s+([.\-]{2})\s+"([^"]+)"\s+(.+?)$/
     );
-    if (relMatch) {
-      const fromName = relMatch[1].trim();
-      const multFrom = relMatch[2].trim();
-      const style = relMatch[3] === ".." ? "dotted" : "solid";
-      const multTo = relMatch[4].trim();
-      const toName = relMatch[5].trim();
-      const label = (relMatch[6] ?? "").trim();
-
-      relations.push({
-        id: makeId(),
-        fromId: fromName, // ひとまずクラス名＝ID としておく
-        toId: toName,
-        label,
-        multFrom,
-        multTo,
-        style,
+    if (mRel) {
+      const fromClass = mRel[1].trim();
+      const leftMul = mRel[2].trim();
+      const style = mRel[3];
+      const rightMul = mRel[4].trim();
+      const toClass = mRel[5].trim();
+      parsedRelations.push({
+        fromClass,
+        toClass,
+        leftMultiplicity: leftMul,
+        rightMultiplicity: rightMul,
+        dotted: style.includes("."),
       });
     }
   }
 
-  // 名前→id のマッピング（今は id = 初期名だが、将来拡張用）
-  const idMap = new Map<string, string>();
-  for (const c of classes) idMap.set(c.id, c.id);
+  // ClassState へ変換
+  const classes: ClassState[] = parsedClasses.map((pc) => ({
+    id: makeId(),
+    name: pc.name,
+    attrs: pc.attrs.map((a) => ({
+      id: makeId(),
+      name: a.name,
+      type: a.type || "string",
+    })),
+  }));
 
-  // 関連の from/to を、存在しない名前だった場合は最初のクラスに寄せる
-  const fallbackId = classes[0]?.id ?? "";
-  for (const r of relations) {
-    if (!idMap.has(r.fromId)) r.fromId = fallbackId;
-    if (!idMap.has(r.toId)) r.toId = fallbackId;
-  }
+  const nameToId = new Map<string, string>();
+  classes.forEach((c) => nameToId.set(c.name, c.id));
+
+  // RelationState へ変換（label はヒントから決める）
+  const relations: RelationState[] = parsedRelations.map((pr) => {
+    const fromId = nameToId.get(pr.fromClass) ?? "";
+    const toId = nameToId.get(pr.toClass) ?? "";
+
+    const hint = hints?.find(
+      (h) => h.fromClass === pr.fromClass && h.toClass === pr.toClass
+    );
+    let label = "";
+    if (hint && hint.candidates.length > 0) {
+      const best = [...hint.candidates].sort((a, b) => b.count - a.count)[0];
+      label = best.label;
+    }
+
+    return {
+      id: makeId(),
+      fromClassId: fromId,
+      toClassId: toId,
+      label,
+      leftMultiplicity: pr.leftMultiplicity || "",
+      rightMultiplicity: pr.rightMultiplicity || "",
+      dotted: pr.dotted,
+    };
+  });
 
   return { classes, relations };
 }
 
-/** クラスモデル＋関連モデルから PlantUML を生成 */
-function buildPuml(classes: ClassInfo[], relations: RelationInfo[]): string {
+// ===== モデル → PlantUML =====
+function buildClassDiagramPuml(
+  classes: ClassState[],
+  relations: RelationState[]
+): string {
   let puml = "@startuml\n";
   puml += "hide empty members\n";
   puml += "skinparam classAttributeIconSize 0\n";
-  puml += "skinparam class {\n";
-  puml += "  BackgroundColor<<incomplete>> #fffbe6\n";
-  puml += "  BackgroundColor<<contradictory>> #ffecec\n";
-  puml += "  BorderColor<<contradictory>> #ff6666\n";
-  puml += "}\n";
 
-  const esc = (s: string) => s.replace(/"/g, '\\"');
-
-  // クラス定義
   for (const c of classes) {
-    const hasContradiction = c.attrs.some(
-      (a) => a.status === "contradictory"
-    );
-    const hasIncomplete = c.attrs.some((a) => a.status === "incomplete");
-    const stereo = hasContradiction
-      ? " <<contradictory>>"
-      : hasIncomplete
-      ? " <<incomplete>>"
-      : "";
-
-    puml += `class ${esc(c.name)}${stereo} {\n`;
+    puml += `class ${c.name || "(無名クラス)"} {\n`;
     for (const a of c.attrs) {
-      const mark =
-        a.status === "contradictory"
-          ? " <!>"
-          : a.status === "incomplete"
-          ? " <?>"
-          : "";
-      puml += `  ${esc(a.name)}: ${a.type} ${mark}\n`;
+      if (!a.name) continue;
+      const t = a.type || "string";
+      puml += `  ${a.name}: ${t}\n`;
     }
     puml += "}\n";
   }
 
-  const normMult = (m: string) => m || "";
-
-  // 関連
   for (const r of relations) {
-    const from = classes.find((c) => c.id === r.fromId);
-    const to = classes.find((c) => c.id === r.toId);
-    if (!from || !to) continue;
-
-    const style = r.style === "dotted" ? ".." : "--";
-    const labelPart =
-      r.label && r.label.trim().length > 0
-        ? ` : ${esc(r.label.trim())}`
-        : "";
-
-    puml += `${esc(from.name)} "${normMult(r.multFrom)}" ${style} "${normMult(
-      r.multTo
-    )}" ${esc(to.name)}${labelPart}\n`;
+    const a = classes.find((c) => c.id === r.fromClassId);
+    const b = classes.find((c) => c.id === r.toClassId);
+    if (!a || !b) continue;
+    const style = r.dotted ? ".." : "--";
+    const leftMul = r.leftMultiplicity || "";
+    const rightMul = r.rightMultiplicity || "";
+    const labelPart = r.label ? ` : ${r.label}` : "";
+    puml += `${a.name || "(無名)"} "${leftMul}" ${style} "${rightMul}" ${
+      b.name || "(無名)"
+    }${labelPart}\n`;
   }
 
   puml += "@enduml";
   return puml;
 }
 
-/* ==== チェック・採点用 ==== */
-
-function parseClassNames(puml: string): string[] {
-  const lines = puml.split(/\r?\n/);
-  const names: string[] = [];
-  for (const line of lines) {
-    const m = line.match(/^\s*class\s+([^\s{]+)/);
-    if (m) names.push(m[1].trim());
-  }
-  return Array.from(new Set(names));
-}
-
-function parseRelationsForScore(puml: string): string[] {
-  const lines = puml.split(/\r?\n/);
-  const rels: string[] = [];
-  for (const line of lines) {
-    if (!line.includes("--") && !line.includes("..")) continue;
-    if (line.trim().startsWith("@")) continue;
-    const m = line.match(
-      /^\s*([^\s"]+)\s+["0-9.* ]*..?["0-9.* ]*\s+([^\s"]+)/
-    );
-    if (!m) continue;
-    const a = m[1].trim();
-    const b = m[2].trim();
-    if (!a || !b) continue;
-    const key = a < b ? `${a}--${b}` : `${b}--${a}`;
-    rels.push(key);
-  }
-  return Array.from(new Set(rels));
-}
-
-function checkClassDiagram(puml: string): string[] {
-  const messages: string[] = [];
-  if (!puml.trim()) {
-    messages.push("クラス図が空です。少なくとも1つはクラスを定義してみましょう。");
-    return messages;
-  }
-
-  const classes = parseClassNames(puml);
-  const seen = new Set<string>();
-  const dups: string[] = [];
-  for (const c of classes) {
-    if (seen.has(c)) dups.push(c);
-    else seen.add(c);
-  }
-  if (dups.length > 0) {
-    messages.push(`クラス名が重複しています: ${dups.join(", ")}`);
-  }
-
-  const lines = puml.split(/\r?\n/);
-  for (const line of lines) {
-    if (!line.includes("--") && !line.includes("..")) continue;
-    if (line.trim().startsWith("@")) continue;
-
-    const m = line.match(
-      /^\s*([^\s"]+)\s+([^-\n"]*)..?([^"\n]*)\s+([^\s"]+)/
-    );
-    if (m) {
-      const left = m[1].trim();
-      const right = m[4].trim();
-      if (left && right && left === right) {
-        messages.push(
-          `クラス「${left}」が自分自身と関連づけられています（自己関連）。意図したものでなければ修正しましょう。`
-        );
-      }
-      const hasMultiplicity = /"/.test(line);
-      if (!hasMultiplicity) {
-        messages.push(
-          `関連「${left} -- ${right}」に多重度が指定されていません（"1", "0..*" など）。`
-        );
-      }
-    }
-  }
-
-  if (messages.length === 0) {
-    messages.push(
-      "大きな形式的な問題は見つかりませんでした（内容の妥当性は別途確認してください）。"
-    );
-  }
-
-  return messages;
-}
-
-/* ================= メインコンポーネント ================= */
-
-export default function Level4ClassEditorPage() {
+// ===== メインコンポーネント =====
+const ClassEditorPage: React.FC = () => {
   const router = useRouter();
-  const { classAnswerPuml, classProblemText } = useProblemConfig();
+  const { classProblemText } = useProblemConfig();
 
-  const [initialClassPuml, setInitialClassPuml] = useState("");
-  const [classes, setClasses] = useState<ClassInfo[]>([]);
-  const [relations, setRelations] = useState<RelationInfo[]>([]);
-  const [classPuml, setClassPuml] = useState("");
-  const [currentUrl, setCurrentUrl] = useState("");
+  const [classes, setClasses] = useState<ClassState[]>([]);
+  const [relations, setRelations] = useState<RelationState[]>([]);
+  const [relationHints, setRelationHints] = useState<RelationHint[]>([]);
+  const [encodedPreview, setEncodedPreview] = useState<string>("");
 
-  const [checkMessages, setCheckMessages] = useState<string[]>([]);
-  const [score, setScore] = useState<ScoreBreakdown | null>(null);
-  const [gradeErr, setGradeErr] = useState<string | null>(null);
-  const [loadErr, setLoadErr] = useState<string | null>(null);
-
-  const [snapshotMessage, setSnapshotMessage] = useState<string | null>(null);
-
-  // 初期データ読み込み（スナップショットがあれば優先）
+  // 初期状態の読み込み（保存済みがあればそれを優先）
   useEffect(() => {
-    if (typeof window === "undefined") return;
-
     try {
-      // ① スナップショット優先
-      const snapRaw = localStorage.getItem(SNAPSHOT_KEY);
-      if (snapRaw) {
-        const snap = JSON.parse(snapRaw);
-        if (snap.classes && snap.relations) {
-          setClasses(snap.classes as ClassInfo[]);
-          setRelations(snap.relations as RelationInfo[]);
-
-          const rawInitial = localStorage.getItem(
-            "LEVEL4_CLASS_EDITOR_INITIAL"
-          );
-          if (rawInitial) {
-            const payload: EditorPayload = JSON.parse(rawInitial);
-            setInitialClassPuml(payload.initialClassPuml ?? "");
-          }
-          return;
-        }
-      }
-
-      // ② なければ初回推定から
-      const raw = localStorage.getItem("LEVEL4_CLASS_EDITOR_INITIAL");
-      if (!raw) {
-        setLoadErr(
-          "レベル4のページから推定クラス図が渡されていません。「オブジェクト図からクラス図」ページから入り直してください。"
-        );
+      const savedRaw = localStorage.getItem(STORAGE_KEY_EDITOR_SAVED);
+      if (savedRaw) {
+        const saved = JSON.parse(savedRaw) as {
+          classes: ClassState[];
+          relations: RelationState[];
+        };
+        setClasses(saved.classes ?? []);
+        setRelations(saved.relations ?? []);
         return;
       }
-      const payload: EditorPayload = JSON.parse(raw);
-      const base = payload.initialClassPuml ?? "";
-      setInitialClassPuml(base);
+    } catch {
+      // 無視
+    }
 
-      const { classes, relations } = parsePumlToModel(base);
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY_EDITOR_INITIAL);
+      if (!raw) return;
+      const payload = JSON.parse(raw) as EditorInitialPayload;
+      const { classes, relations } = parseInitialModel(
+        payload.initialClassPuml,
+        payload.relationHints
+      );
       setClasses(classes);
       setRelations(relations);
-    } catch (e) {
-      setLoadErr("保存された推定クラス図の読み込みに失敗しました。");
+      setRelationHints(payload.relationHints ?? []);
+    } catch {
+      // 無視
     }
   }, []);
 
-  // モデルから PlantUML を再生成 → プレビュー更新
+  // PlantUML プレビューの更新
   useEffect(() => {
     if (classes.length === 0) {
-      setClassPuml("");
-      setCurrentUrl("");
+      setEncodedPreview("");
       return;
     }
-    const puml = buildPuml(classes, relations);
-    setClassPuml(puml);
-    setCurrentUrl(generatePlantUMLUrl(puml));
+    const puml = buildClassDiagramPuml(classes, relations);
+    try {
+      const encoded = plantumlEncoder.encode(puml);
+      setEncodedPreview(encoded);
+    } catch {
+      setEncodedPreview("");
+    }
   }, [classes, relations]);
 
-  const unnamedClassIds = useMemo(
-    () => classes.filter((c) => c.name.startsWith("クラス名未定")).map((c) => c.id),
-    [classes]
-  );
+  const previewUrl = useMemo(() => {
+    if (!encodedPreview) return "";
+    return `https://www.plantuml.com/plantuml/svg/${encodedPreview}`;
+  }, [encodedPreview]);
 
-  /* ===== 保存 / 復元 ===== */
+  // ===== シンプルフィードバック =====
+  const feedbackMessages = useMemo(() => {
+    const msgs: string[] = [];
 
-  const handleSaveSnapshot = () => {
-    try {
-      const snapshot = {
-        classes,
-        relations,
-        savedAt: new Date().toISOString(),
-      };
-      localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
-      setSnapshotMessage("現在のクラス図の状態を保存しました。");
-    } catch (e) {
-      setSnapshotMessage(
-        "状態の保存に失敗しました。ブラウザの制限などが原因の可能性があります。"
+    if (classes.length === 0) {
+      msgs.push("クラスが1つもありません。まずはクラスを追加してみましょう。");
+      return msgs;
+    }
+
+    const unnamed = classes.filter((c) => !c.name.trim());
+    if (unnamed.length > 0) {
+      msgs.push("名前が未入力のクラスがあります。クラス名を決めてみましょう。");
+    }
+
+    const noAttrs = classes.filter((c) => c.attrs.length === 0);
+    if (noAttrs.length > 0) {
+      msgs.push(
+        "属性が1つもないクラスがあります。必要に応じて属性（年齢、名称など）を追加してみましょう。"
       );
     }
-  };
 
-  const handleRestoreSnapshot = () => {
-    try {
-      const raw = localStorage.getItem(SNAPSHOT_KEY);
-      if (!raw) {
-        setSnapshotMessage("保存された状態が見つかりませんでした。");
-        return;
-      }
-      const parsed = JSON.parse(raw);
-      if (!parsed.classes || !parsed.relations) {
-        setSnapshotMessage("保存データの形式が不正です。");
-        return;
-      }
-      setClasses(parsed.classes as ClassInfo[]);
-      setRelations(parsed.relations as RelationInfo[]);
-      setSnapshotMessage("最後に保存した状態を復元しました。");
-      setCheckMessages([]);
-      setScore(null);
-    } catch (e) {
-      setSnapshotMessage("状態の復元に失敗しました。");
-    }
-  };
-
-  /* ===== チェック・採点 ===== */
-
-  const handleCheckDiagram = () => {
-    const msgs = checkClassDiagram(classPuml);
-    setCheckMessages(msgs);
-  };
-
-  const handleGrade = () => {
-    setGradeErr(null);
-    setScore(null);
-    if (!classPuml.trim()) {
-      setGradeErr(
-        "クラス図がまだ作成されていません。先にクラスや関連を編集してください。"
-      );
-      return;
-    }
-    if (!classAnswerPuml || !classAnswerPuml.trim()) {
-      setGradeErr(
-        "この問題には模範クラス図が設定されていません（トップページで classAnswerPuml を設定してください）。"
-      );
-      return;
-    }
-
-    const ansClasses = new Set(parseClassNames(classAnswerPuml));
-    const userClasses = new Set(parseClassNames(classPuml));
-    const ansRels = new Set(parseRelationsForScore(classAnswerPuml));
-    const userRels = new Set(parseRelationsForScore(classPuml));
-
-    const classInter = [...ansClasses].filter((c) => userClasses.has(c));
-    const relInter = [...ansRels].filter((r) => userRels.has(r));
-
-    const classScore =
-      ansClasses.size === 0
-        ? 0
-        : Math.round((classInter.length / ansClasses.size) * 100);
-    const relScore =
-      ansRels.size === 0
-        ? 0
-        : Math.round((relInter.length / ansRels.size) * 100);
-
-    const total = Math.round(classScore * 0.6 + relScore * 0.4);
-
-    const comments: string[] = [];
-    if (classScore >= 80) {
-      comments.push("クラス候補はかなりよく拾えています。");
-    } else if (classScore >= 50) {
-      comments.push(
-        "主要なクラスはある程度拾えていますが、まだ足りないクラスがありそうです。問題文を見直してみましょう。"
+    if (relations.length === 0) {
+      msgs.push(
+        "関連が1つもありません。クラス同士の関係（例：学生と授業の関係）を追加してみましょう。"
       );
     } else {
-      comments.push(
-        "クラスの抽出が十分ではありません。問題文の登場人物やモノに着目して、クラス候補を増やしてみましょう。"
+      const noLabel = relations.filter((r) => !r.label.trim());
+      if (noLabel.length > 0) {
+        msgs.push(
+          "関連名が未入力の関連があります。矢印の意味がわかるように名前を付けてみましょう（例：履修する）。"
+        );
+      }
+
+      const noMul = relations.filter(
+        (r) => !r.leftMultiplicity && !r.rightMultiplicity
       );
+      if (noMul.length > 0) {
+        msgs.push(
+          "多重度が未設定の関連があります。右下の多重度を使って「1対多」「0..1」などを考えてみましょう。"
+        );
+      }
     }
 
-    if (relScore >= 80) {
-      comments.push(
-        "クラス間の関連もほぼ模範解答に近いです。多重度の精度をさらに上げられると理想的です。"
-      );
-    } else if (relScore >= 50) {
-      comments.push(
-        "関連はだいたい合っていますが、抜けや誤りがいくつかあります。オブジェクト図のリンクと見比べてみましょう。"
-      );
-    } else {
-      comments.push(
-        "関連がかなり異なっています。オブジェクト図のリンクをもう一度確認し、どのクラス同士が関係しているか整理してみましょう。"
-      );
+    if (msgs.length === 0) {
+      msgs.push("大きな問題は見つかりません。図が読みやすいか、最後に見直してみましょう。");
     }
 
-    setScore({ total, classes: classScore, relations: relScore, comments });
-  };
+    return msgs;
+  }, [classes, relations]);
 
-  /* ===== 編集ハンドラ ===== */
-
-  const updateClass = (id: string, updater: (c: ClassInfo) => ClassInfo) => {
-    setClasses((prev) => prev.map((c) => (c.id === id ? updater(c) : c)));
-  };
-
-  const updateRelation = (
-    id: string,
-    updater: (r: RelationInfo) => RelationInfo
-  ) => {
-    setRelations((prev) => prev.map((r) => (r.id === id ? updater(r) : r)));
-  };
-
+  // ===== クラス操作 =====
   const handleAddClass = () => {
-    const newName = `新しいクラス${classes.length + 1}`;
-    const id = makeId();
     setClasses((prev) => [
       ...prev,
-      {
-        id,
-        name: newName,
-        isAutoNamed: false,
-        attrs: [],
-      },
+      { id: makeId(), name: "", attrs: [] },
     ]);
   };
 
-  const handleDeleteClass = (id: string) => {
-    setClasses((prev) => prev.filter((c) => c.id !== id));
-    setRelations((prev) => prev.filter((r) => r.fromId !== id && r.toId !== id));
+  const handleUpdateClassName = (id: string, name: string) => {
+    setClasses((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, name } : c))
+    );
   };
 
+  const handleDeleteClass = (id: string) => {
+    if (!window.confirm("このクラスと関連する関連も削除します。よろしいですか？")) {
+      return;
+    }
+    setClasses((prev) => prev.filter((c) => c.id !== id));
+    setRelations((prev) =>
+      prev.filter((r) => r.fromClassId !== id && r.toClassId !== id)
+    );
+  };
+
+  const handleAddAttr = (classId: string) => {
+    setClasses((prev) =>
+      prev.map((c) =>
+        c.id === classId
+          ? {
+              ...c,
+              attrs: [
+                ...c.attrs,
+                { id: makeId(), name: "", type: "string" },
+              ],
+            }
+          : c
+      )
+    );
+  };
+
+  const handleUpdateAttr = (
+    classId: string,
+    attrId: string,
+    partial: Partial<ClassAttr>
+  ) => {
+    setClasses((prev) =>
+      prev.map((c) =>
+        c.id === classId
+          ? {
+              ...c,
+              attrs: c.attrs.map((a) =>
+                a.id === attrId ? { ...a, ...partial } : a
+              ),
+            }
+          : c
+      )
+    );
+  };
+
+  const handleDeleteAttr = (classId: string, attrId: string) => {
+    setClasses((prev) =>
+      prev.map((c) =>
+        c.id === classId
+          ? { ...c, attrs: c.attrs.filter((a) => a.id !== attrId) }
+          : c
+      )
+    );
+  };
+
+  // ===== 関連操作 =====
   const handleAddRelation = () => {
-    const firstId = classes[0]?.id;
-    if (!firstId) return;
+    if (classes.length < 2) {
+      alert("関連を追加するには、少なくとも 2 つのクラスが必要です。");
+      return;
+    }
+    const fromId = classes[0].id;
+    const toId = classes[1].id;
     setRelations((prev) => [
       ...prev,
       {
         id: makeId(),
-        fromId: firstId,
-        toId: firstId,
+        fromClassId: fromId,
+        toClassId: toId,
         label: "",
-        multFrom: "",
-        multTo: "",
-        style: "solid",
+        leftMultiplicity: "1",
+        rightMultiplicity: "0..1",
+        dotted: false,
       },
     ]);
+  };
+
+  const handleUpdateRelation = (
+    id: string,
+    partial: Partial<RelationState>
+  ) => {
+    setRelations((prev) =>
+      prev.map((r) => (r.id === id ? { ...r, ...partial } : r))
+    );
   };
 
   const handleDeleteRelation = (id: string) => {
     setRelations((prev) => prev.filter((r) => r.id !== id));
   };
 
-  /* ===== JSX ===== */
+  const getRelationHintCandidates = (r: RelationState) => {
+    const from = classes.find((c) => c.id === r.fromClassId);
+    const to = classes.find((c) => c.id === r.toClassId);
+    if (!from || !to) return [];
+    const h = relationHints.find(
+      (hh) => hh.fromClass === from.name && hh.toClass === to.name
+    );
+    if (!h) return [];
+    return [...h.candidates].sort((a, b) => b.count - a.count);
+  };
 
+  // ===== 状態保存／復元 =====
+  const handleSave = () => {
+    const payload = { classes, relations };
+    localStorage.setItem(STORAGE_KEY_EDITOR_SAVED, JSON.stringify(payload));
+    alert("現在のクラス図の状態を保存しました。");
+  };
+
+  const handleRestore = () => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY_EDITOR_SAVED);
+      if (!raw) {
+        alert("保存されているクラス図の状態がありません。");
+        return;
+      }
+      const parsed = JSON.parse(raw) as {
+        classes: ClassState[];
+        relations: RelationState[];
+      };
+      setClasses(parsed.classes ?? []);
+      setRelations(parsed.relations ?? []);
+      alert("保存されていたクラス図の状態を復元しました。");
+    } catch {
+      alert("クラス図の状態の読み込み中にエラーが発生しました。");
+    }
+  };
+
+  const handleReset = () => {
+    if (!window.confirm("クラス図をすべてリセットします。よろしいですか？")) return;
+    setClasses([]);
+    setRelations([]);
+  };
+
+  // ===== レイアウト =====
   return (
-    <div className="max-w-6xl mx-auto p-6 space-y-4">
-      {/* ヘッダ＋クラス図作成問題文 */}
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex-1 space-y-2">
-          <h1 className="text-xl font-semibold">
-            レベル4：あなたのクラス図を編集する
-          </h1>
-          <div className="border rounded bg-white">
-            <div className="flex items-center justify-between px-3 py-1.5 border-b bg-neutral-50 rounded-t">
-              <div className="text-sm font-semibold">クラス図作成問題（本文）</div>
+    <div className="flex flex-col h-screen bg-slate-50">
+      {/* 上部バー */}
+      <div className="flex items-center gap-2 p-2 border-b bg-white">
+        <button
+          className="px-3 py-1 rounded bg-slate-100 text-slate-700 text-sm font-semibold hover:bg-slate-200"
+          onClick={() => router.push("/level4")}
+        >
+          ← オブジェクト図へ戻る
+        </button>
+
+        <div className="flex-1" />
+
+        <button
+          className="px-3 py-1 rounded bg-red-100 text-red-700 text-sm font-semibold hover:bg-red-200"
+          onClick={handleReset}
+        >
+          すべてリセット
+        </button>
+        <button
+          className="px-3 py-1 rounded bg-emerald-100 text-emerald-700 text-sm font-semibold hover:bg-emerald-200"
+          onClick={handleSave}
+        >
+          状態を保存
+        </button>
+        <button
+          className="px-3 py-1 rounded bg-sky-100 text-sky-700 text-sm font-semibold hover:bg-sky-200"
+          onClick={handleRestore}
+        >
+          保存状態を復元
+        </button>
+      </div>
+
+      {/* メイン：左右 6 : 4 */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* 左 6：上＝問題文 / 下＝クラス編集＋関連編集 */}
+        <div className="w-3/5 border-r flex flex-col overflow-hidden">
+          {/* 左上：クラス図作成問題文 */}
+          <div className="p-3 border-b bg-white h-1/3 min-h-[140px]">
+            <div className="text-xs font-semibold mb-1">
+              クラス図作成問題（本文）
             </div>
-            <div className="px-3 py-2 text-sm whitespace-pre-wrap max-h-40 overflow-y-auto">
-              {classProblemText
-                ? classProblemText
-                : "（トップページでクラス図作成問題文を設定してください）"}
+            <div className="mt-1 h-full overflow-auto whitespace-pre-wrap text-[11px] leading-relaxed border rounded bg-slate-50 px-2 py-1">
+              {classProblemText}
+            </div>
+          </div>
+
+          {/* 左下：クラス編集（左）＋関連編集（右） */}
+          <div className="flex flex-1 border-t bg-slate-50 overflow-hidden">
+            {/* クラス編集（左下左） */}
+            <div className="w-1/2 border-r flex flex-col overflow-hidden">
+              <div className="px-3 py-2 border-b bg-white flex items-center justify-between">
+                <span className="font-semibold text-sm">クラスの編集</span>
+                <button
+                  className="px-2 py-0.5 text-xs rounded bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                  onClick={handleAddClass}
+                >
+                  ＋ クラスを追加
+                </button>
+              </div>
+              <div className="flex-1 overflow-auto px-3 pb-3 pt-2">
+                <div className="text-[11px] text-slate-600 mb-2">
+                  クラス名と属性名・型を編集すると、右上のクラス図に自動で反映されます。
+                </div>
+                {classes.length === 0 && (
+                  <div className="text-[11px] text-slate-500">
+                    まずは「クラスを追加」からクラスを作成してみましょう。
+                  </div>
+                )}
+                <div className="flex flex-col gap-3 mt-1">
+                  {classes.map((c) => (
+                    <div
+                      key={c.id}
+                      className="border rounded bg-slate-50 p-2 flex flex-col gap-2"
+                    >
+                      <div className="flex items-center gap-2">
+                        <label className="text-[11px] font-semibold">
+                          クラス名
+                        </label>
+                        <input
+                          className="flex-1 border rounded px-2 py-1 text-xs"
+                          value={c.name}
+                          onChange={(e) =>
+                            handleUpdateClassName(c.id, e.target.value)
+                          }
+                          placeholder="例）学生、授業 など"
+                        />
+                        <button
+                          className="px-2 py-0.5 text-[11px] rounded bg-red-100 text-red-700 hover:bg-red-200"
+                          onClick={() => handleDeleteClass(c.id)}
+                        >
+                          🗑
+                        </button>
+                      </div>
+
+                      {/* 属性一覧 */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[11px] font-semibold">
+                            属性一覧
+                          </span>
+                          <button
+                            className="px-2 py-0.5 text-[11px] rounded bg-slate-100 hover:bg-slate-200"
+                            onClick={() => handleAddAttr(c.id)}
+                          >
+                            ＋ 属性を追加
+                          </button>
+                        </div>
+                        {c.attrs.length === 0 && (
+                          <div className="text-[11px] text-slate-500 mb-1">
+                            例）属性名：年齢、型：string
+                          </div>
+                        )}
+                        <div className="flex flex-col gap-1">
+                          {c.attrs.map((a) => (
+                            <div
+                              key={a.id}
+                              className="flex items-center gap-2 bg-white border rounded px-2 py-1"
+                            >
+                              <input
+                                className="flex-1 border rounded px-1 py-0.5 text-[11px]"
+                                value={a.name}
+                                onChange={(e) =>
+                                  handleUpdateAttr(c.id, a.id, {
+                                    name: e.target.value,
+                                  })
+                                }
+                                placeholder="属性名（例：年齢）"
+                              />
+                              <span className="text-[11px] text-slate-400">
+                                :
+                              </span>
+                              <select
+                                className="border rounded px-1 py-0.5 text-[11px]"
+                                value={a.type}
+                                onChange={(e) =>
+                                  handleUpdateAttr(c.id, a.id, {
+                                    type: e.target.value,
+                                  })
+                                }
+                              >
+                                <option value="string">string</option>
+                                <option value="int">int</option>
+                                <option value="real">real</option>
+                                <option value="boolean">boolean</option>
+                              </select>
+                              <button
+                                className="px-2 py-0.5 text-[11px] rounded border border-red-300 text-red-600 hover:bg-red-50"
+                                onClick={() => handleDeleteAttr(c.id, a.id)}
+                              >
+                                🗑
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* 関連編集（左下右） */}
+            <div className="w-1/2 flex flex-col overflow-hidden">
+              <div className="px-3 py-2 border-b bg-white flex items-center justify-between">
+                <span className="font-semibold text-sm">関連と多重度の編集</span>
+                <button
+                  className="px-2 py-0.5 text-xs rounded bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                  onClick={handleAddRelation}
+                >
+                  ＋ 関連を追加
+                </button>
+              </div>
+              <div className="flex-1 overflow-auto px-3 pb-3 pt-2">
+                <div className="text-[11px] text-slate-600 mb-2">
+                  どのクラス同士が関係しているか、多重度がどうなっているかを確認・修正します。
+                </div>
+                {relations.length === 0 && (
+                  <div className="text-[11px] text-slate-500">
+                    まだ関連がありません。「関連を追加」からクラス間の関係を追加してください。
+                  </div>
+                )}
+                <div className="flex flex-col gap-2 mt-1">
+                  {relations.map((r) => {
+                    const hintCandidates = getRelationHintCandidates(r);
+                    return (
+                      <div
+                        key={r.id}
+                        className="border rounded bg-slate-50 p-2 flex flex-col gap-2"
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <select
+                            className="border rounded px-1 py-0.5 text-[11px]"
+                            value={r.fromClassId}
+                            onChange={(e) =>
+                              handleUpdateRelation(r.id, {
+                                fromClassId: e.target.value,
+                              })
+                            }
+                          >
+                            {classes.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name || "(無名)"}
+                              </option>
+                            ))}
+                          </select>
+                          <span className="text-[11px]">の</span>
+                          <select
+                            className="border rounded px-1 py-0.5 text-[11px]"
+                            value={r.leftMultiplicity}
+                            onChange={(e) =>
+                              handleUpdateRelation(r.id, {
+                                leftMultiplicity: e.target.value,
+                              })
+                            }
+                          >
+                            {MULTIPLICITY_OPTIONS.map((m) => (
+                              <option key={m} value={m}>
+                                {m || " "}
+                              </option>
+                            ))}
+                          </select>
+                          <span className="text-[11px]">→</span>
+                          <select
+                            className="border rounded px-1 py-0.5 text-[11px]"
+                            value={r.toClassId}
+                            onChange={(e) =>
+                              handleUpdateRelation(r.id, {
+                                toClassId: e.target.value,
+                              })
+                            }
+                          >
+                            {classes.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name || "(無名)"}
+                              </option>
+                            ))}
+                          </select>
+                          <select
+                            className="border rounded px-1 py-0.5 text-[11px]"
+                            value={r.rightMultiplicity}
+                            onChange={(e) =>
+                              handleUpdateRelation(r.id, {
+                                rightMultiplicity: e.target.value,
+                              })
+                            }
+                          >
+                            {MULTIPLICITY_OPTIONS.map((m) => (
+                              <option key={m} value={m}>
+                                {m || " "}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-[11px]">関連名</span>
+                          <input
+                            className="flex-1 border rounded px-2 py-1 text-[11px]"
+                            value={r.label}
+                            onChange={(e) =>
+                              handleUpdateRelation(r.id, {
+                                label: e.target.value,
+                              })
+                            }
+                            placeholder="例）履修する、担当する など"
+                          />
+                          <label className="flex items-center gap-1 text-[11px] text-slate-600">
+                            <input
+                              type="checkbox"
+                              className="accent-slate-600"
+                              checked={r.dotted}
+                              onChange={(e) =>
+                                handleUpdateRelation(r.id, {
+                                  dotted: e.target.checked,
+                                })
+                              }
+                            />
+                            不確かな関連（点線）
+                          </label>
+                          <button
+                            className="px-2 py-0.5 text-[11px] rounded bg-red-100 text-red-700 hover:bg-red-200"
+                            onClick={() => handleDeleteRelation(r.id)}
+                          >
+                            🗑
+                          </button>
+                        </div>
+
+                        {hintCandidates.length > 0 && (
+                          <div className="text-[11px] text-slate-600 flex flex-wrap items-center gap-1">
+                            <span>候補:</span>
+                            {hintCandidates.map((h) => (
+                              <button
+                                key={h.label}
+                                className="px-1.5 py-0.5 rounded bg-slate-100 hover:bg-slate-200"
+                                type="button"
+                                onClick={() =>
+                                  handleUpdateRelation(r.id, { label: h.label })
+                                }
+                              >
+                                {h.label}
+                                <span className="text-[10px] text-slate-500 ml-1">
+                                  ({h.count})
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           </div>
         </div>
-        <div className="flex-shrink-0">
-          <button
-            type="button"
-            className="text-xs px-3 py-1 rounded border bg-neutral-50 hover:bg-neutral-100"
-            onClick={() => router.push("/level4")}
-          >
-            オブジェクト図へ戻る
-          </button>
+
+        {/* 右 4：上＝クラス図プレビュー / 下＝フィードバック */}
+        <div className="w-2/5 flex flex-col overflow-hidden">
+          {/* 右上：クラス図プレビュー */}
+          <div className="h-1/2 border-b bg-white flex flex-col">
+            <div className="px-3 py-2 border-b flex items-center justify-between">
+              <span className="font-semibold text-sm">
+                あなたのクラス図（プレビュー）
+              </span>
+            </div>
+            <div className="flex-1 overflow-auto">
+              {!previewUrl && (
+                <div className="p-3 text-[11px] text-slate-500">
+                  左側でクラスと関連を編集すると、ここにクラス図が表示されます。
+                </div>
+              )}
+              {previewUrl && (
+                <iframe
+                  src={previewUrl}
+                  className="w-full h-full"
+                  title="クラス図プレビュー"
+                />
+              )}
+            </div>
+          </div>
+
+          {/* 右下：フィードバック */}
+          <div className="flex-1 bg-white flex flex-col">
+            <div className="px-3 py-2 border-b flex items-center justify-between">
+              <span className="font-semibold text-sm">フィードバック</span>
+            </div>
+            <div className="flex-1 overflow-auto p-3 text-[11px]">
+              <div className="text-slate-600 mb-2">
+                今のクラス図の状態から、学習のヒントになりそうなポイントをまとめています。
+              </div>
+              <ul className="list-disc pl-4 space-y-1">
+                {feedbackMessages.map((m, idx) => (
+                  <li key={idx}>{m}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
         </div>
       </div>
-
-      {loadErr && (
-        <div className="text-xs text-red-600 border border-red-200 bg-red-50 rounded p-2">
-          {loadErr}
-        </div>
-      )}
-
-      {/* メイン：左 = 編集 / 右 = プレビュー */}
-      <section className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
-        {/* 左側：クラス・関連・チェック */}
-        <div className="lg:col-span-2 space-y-4">
-          {/* クラス編集ゾーン */}
-          <section className="rounded-lg border bg-white p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="text-xs font-semibold">クラスの編集</div>
-              <button
-                type="button"
-                className="text-[11px] px-3 py-1 rounded border bg-emerald-50 hover:bg-emerald-100"
-                onClick={handleAddClass}
-              >
-                クラスを追加
-              </button>
-            </div>
-            <p className="text-[11px] text-neutral-600">
-              クラス名・属性名・型を編集すると、右のクラス図プレビューに自動で反映されます。
-              「クラス名未定」から始まるクラスは、自分で名前を考えてみましょう。
-            </p>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {classes.map((c) => {
-                const hasAuto = c.name.startsWith("クラス名未定");
-                return (
-                  <div
-                    key={c.id}
-                    className={`border rounded p-2 text-[11px] space-y-2 ${
-                      hasAuto ? "bg-amber-50 border-amber-300" : "bg-neutral-50"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex-1">
-                        <div className="text-[11px] text-neutral-600 mb-0.5">
-                          クラス名
-                        </div>
-                        <input
-                          className="w-full border rounded px-2 py-1 bg-white"
-                          value={c.name}
-                          onChange={(e) => {
-                            const newName = e.target.value;
-                            updateClass(c.id, (prev) => ({
-                              ...prev,
-                              name: newName,
-                              isAutoNamed: newName.startsWith("クラス名未定"),
-                            }));
-                          }}
-                        />
-                      </div>
-                      <button
-                        type="button"
-                        className="text-[11px] px-2 py-1 rounded border border-red-300 text-red-600 bg-white hover:bg-red-50"
-                        onClick={() => handleDeleteClass(c.id)}
-                      >
-                        削除
-                      </button>
-                    </div>
-                    {hasAuto && (
-                      <div className="text-[10px] text-amber-800">
-                        ※ 自動推定されたクラスです。問題文やオブジェクト図を見ながら、適切なクラス名を考えてみましょう。
-                      </div>
-                    )}
-
-                    <div className="border rounded bg-white p-1">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-[10px] font-semibold">
-                          属性一覧
-                        </span>
-                        <button
-                          type="button"
-                          className="text-[10px] px-2 py-0.5 rounded border bg-neutral-50 hover:bg-neutral-100"
-                          onClick={() =>
-                            updateClass(c.id, (prev) => ({
-                              ...prev,
-                              attrs: [
-                                ...prev.attrs,
-                                {
-                                  id: makeId(),
-                                  name: "新しい属性",
-                                  type: "string",
-                                  status: "none",
-                                },
-                              ],
-                            }))
-                          }
-                        >
-                          属性を追加
-                        </button>
-                      </div>
-                      {c.attrs.length === 0 && (
-                        <div className="text-[10px] text-neutral-400 px-1 pb-1">
-                          属性はまだありません。必要に応じて追加してみましょう。
-                        </div>
-                      )}
-                      <div className="space-y-1">
-                        {c.attrs.map((a) => (
-                          <div
-                            key={a.id}
-                            className="flex items-center gap-1 text-[10px]"
-                          >
-                            <input
-                              className="flex-1 border rounded px-1 py-0.5"
-                              value={a.name}
-                              onChange={(e) =>
-                                updateClass(c.id, (prev) => ({
-                                  ...prev,
-                                  attrs: prev.attrs.map((x) =>
-                                    x.id === a.id
-                                      ? { ...x, name: e.target.value }
-                                      : x
-                                  ),
-                                }))
-                              }
-                            />
-                            <span className="text-neutral-600">:</span>
-                            <select
-                              className="w-20 border rounded px-1 py-0.5"
-                              value={a.type}
-                              onChange={(e) =>
-                                updateClass(c.id, (prev) => ({
-                                  ...prev,
-                                  attrs: prev.attrs.map((x) =>
-                                    x.id === a.id
-                                      ? { ...x, type: e.target.value }
-                                      : x
-                                  ),
-                                }))
-                              }
-                            >
-                              <option value="string">string</option>
-                              <option value="int">int</option>
-                              <option value="real">real</option>
-                              <option value="boolean">boolean</option>
-                              <option value="other">other</option>
-                            </select>
-                            {a.status !== "none" && (
-                              <button
-                                type="button"
-                                className={`px-1.5 py-0.5 rounded ${
-                                  a.status === "incomplete"
-                                    ? "bg-amber-100 text-amber-800"
-                                    : "bg-red-100 text-red-700"
-                                }`}
-                                onClick={() =>
-                                  updateClass(c.id, (prev) => ({
-                                    ...prev,
-                                    attrs: prev.attrs.map((x) =>
-                                      x.id === a.id
-                                        ? { ...x, status: "none" }
-                                        : x
-                                    ),
-                                  }))
-                                }
-                              >
-                                {a.status === "incomplete"
-                                  ? "要確認 (修正済みにする)"
-                                  : "型の矛盾 (修正済みにする)"}
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              className="px-1 py-0.5 rounded border bg-neutral-50 hover:bg-neutral-100"
-                              onClick={() =>
-                                updateClass(c.id, (prev) => ({
-                                  ...prev,
-                                  attrs: prev.attrs.filter(
-                                    (x) => x.id !== a.id
-                                  ),
-                                }))
-                              }
-                            >
-                              ×
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {unnamedClassIds.length > 0 && (
-              <div className="text-[11px] text-amber-800">
-                ※ 「クラス名未定」で始まるクラスがまだ残っています。可能であれば、それぞれに意味のある名前を付けてみましょう。
-              </div>
-            )}
-          </section>
-
-          {/* 関連編集ゾーン */}
-          <section className="rounded-lg border bg-white p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="text-xs font-semibold">関連と多重度の編集</div>
-              <button
-                type="button"
-                className="text-[11px] px-3 py-1 rounded border bg-emerald-50 hover:bg-emerald-100"
-                onClick={handleAddRelation}
-                disabled={classes.length === 0}
-              >
-                関連を追加
-              </button>
-            </div>
-            <p className="text-[11px] text-neutral-600">
-              どのクラス同士が関係しているか、多重度がどうなっているかを確認・修正します。
-              不要な関連は「削除」ボタンで消すことができます。
-            </p>
-
-            {relations.length === 0 && (
-              <div className="text-[11px] text-neutral-400">
-                現在、関連はありません。必要に応じて「関連を追加」ボタンから追加できます。
-              </div>
-            )}
-
-            <div className="space-y-2">
-              {relations.map((r) => (
-                <div
-                  key={r.id}
-                  className={`border rounded p-2 text-[11px] flex flex-wrap items-center gap-2 ${
-                    r.style === "dotted"
-                      ? "bg-neutral-50 border-dashed"
-                      : "bg-neutral-50"
-                  }`}
-                >
-                  <select
-                    className="border rounded px-1 py-0.5"
-                    value={r.fromId}
-                    onChange={(e) =>
-                      updateRelation(r.id, (prev) => ({
-                        ...prev,
-                        fromId: e.target.value,
-                      }))
-                    }
-                  >
-                    {classes.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    className="w-20 border rounded px-1 py-0.5"
-                    value={r.multFrom}
-                    onChange={(e) =>
-                      updateRelation(r.id, (prev) => ({
-                        ...prev,
-                        multFrom: e.target.value,
-                      }))
-                    }
-                  >
-                    <option value="">(なし)</option>
-                    <option value="1">1</option>
-                    <option value="0..1">0..1</option>
-                    <option value="1..*">1..*</option>
-                    <option value="0..*">0..*</option>
-                  </select>
-                  <span>—</span>
-                  <input
-                    className="flex-1 border rounded px-1 py-0.5"
-                    placeholder="関連の名前（任意）"
-                    value={r.label}
-                    onChange={(e) =>
-                      updateRelation(r.id, (prev) => ({
-                        ...prev,
-                        label: e.target.value,
-                      }))
-                    }
-                  />
-                  <span>→</span>
-                  <select
-                    className="border rounded px-1 py-0.5"
-                    value={r.toId}
-                    onChange={(e) =>
-                      updateRelation(r.id, (prev) => ({
-                        ...prev,
-                        toId: e.target.value,
-                      }))
-                    }
-                  >
-                    {classes.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    className="w-20 border rounded px-1 py-0.5"
-                    value={r.multTo}
-                    onChange={(e) =>
-                      updateRelation(r.id, (prev) => ({
-                        ...prev,
-                        multTo: e.target.value,
-                      }))
-                    }
-                  >
-                    <option value="">(なし)</option>
-                    <option value="1">1</option>
-                    <option value="0..1">0..1</option>
-                    <option value="1..*">1..*</option>
-                    <option value="0..*">0..*</option>
-                  </select>
-                  <label className="inline-flex items-center gap-1 ml-2">
-                    <input
-                      type="checkbox"
-                      className="border rounded"
-                      checked={r.style === "dotted"}
-                      onChange={(e) =>
-                        updateRelation(r.id, (prev) => ({
-                          ...prev,
-                          style: e.target.checked ? "dotted" : "solid",
-                        }))
-                      }
-                    />
-                    <span>不確かな関連（点線）</span>
-                  </label>
-                  <button
-                    type="button"
-                    className="ml-auto px-2 py-0.5 rounded border border-red-300 text-red-600 bg-white hover:bg-red-50"
-                    onClick={() => handleDeleteRelation(r.id)}
-                  >
-                    削除
-                  </button>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          {/* チェック＆採点＋保存/復元 */}
-          <section className="rounded-lg border bg-white p-4 space-y-3">
-            <div className="flex flex-wrap gap-2 text-xs">
-              <button
-                type="button"
-                className="px-3 py-1 rounded border"
-                onClick={handleCheckDiagram}
-              >
-                クラス図の整合性チェック
-              </button>
-              <button
-                type="button"
-                className="px-3 py-1 rounded border"
-                onClick={handleGrade}
-              >
-                模範クラス図と比較して採点
-              </button>
-              <button
-                type="button"
-                className="px-3 py-1 rounded border bg-blue-50 hover:bg-blue-100"
-                onClick={handleSaveSnapshot}
-              >
-                状態を保存
-              </button>
-              <button
-                type="button"
-                className="px-3 py-1 rounded border bg-purple-50 hover:bg-purple-100"
-                onClick={handleRestoreSnapshot}
-              >
-                最後の保存状態に戻る
-              </button>
-            </div>
-
-            {snapshotMessage && (
-              <div className="text-[11px] text-neutral-700">
-                {snapshotMessage}
-              </div>
-            )}
-
-            {checkMessages.length > 0 && (
-              <div className="border rounded p-2 bg-neutral-50 text-[11px] space-y-1">
-                <div className="font-semibold mb-1">
-                  クラス図の整合性チェック結果
-                </div>
-                <ul className="list-disc pl-4 space-y-0.5">
-                  {checkMessages.map((m, i) => (
-                    <li key={i}>{m}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {gradeErr && (
-              <div className="text-xs text-red-600">{gradeErr}</div>
-            )}
-
-            {score && (
-              <div className="border rounded p-2 bg-neutral-50 text-[11px] space-y-1">
-                <div className="font-semibold">
-                  採点結果：総合 {score.total} 点
-                </div>
-                <div>・クラス抽出：{score.classes} 点</div>
-                <div>・関連抽出：{score.relations} 点</div>
-                <ul className="list-disc pl-4 mt-1 space-y-0.5">
-                  {score.comments.map((c, i) => (
-                    <li key={i}>{c}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </section>
-        </div>
-
-        {/* 右側：あなたのクラス図プレビュー（スクロールに追従） */}
-        <div className="lg:col-span-1">
-          <section className="rounded-lg border bg-white p-4 space-y-2 lg:sticky lg:top-4">
-            <div className="text-xs font-semibold">
-              あなたのクラス図（プレビュー）
-            </div>
-            <p className="text-[11px] text-neutral-600">
-              左側でクラスや関連を編集すると、このクラス図が自動で更新されます。
-            </p>
-            {currentUrl ? (
-              <div className="flex items-center justify-center max-h-[520px] overflow-auto bg-neutral-50 rounded">
-                <img
-                  alt="current-class-uml"
-                  src={currentUrl}
-                  className="w-full h-auto"
-                />
-              </div>
-            ) : (
-              <div className="text-[11px] text-neutral-400 p-2 text-center">
-                クラスや関連を編集すると、ここにクラス図が表示されます。
-              </div>
-            )}
-          </section>
-        </div>
-      </section>
     </div>
   );
-}
+};
+
+export default ClassEditorPage;
