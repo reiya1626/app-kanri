@@ -1,7 +1,12 @@
 // app/level4/class-editor/page.tsx
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, {
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { useRouter } from "next/navigation";
 import plantumlEncoder from "plantuml-encoder";
 import { useProblemConfig } from "../../../components/problem-config";
@@ -41,6 +46,10 @@ const makeId = () => Math.random().toString(36).slice(2);
 
 // 文字列エスケープ
 const esc = (s: string) => s.replace(/"/g, '\\"');
+
+// 正規表現用エスケープ
+const escapeRegExp = (s: string) =>
+  s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // ===== PlantUML からの簡易パーサ =====
 function parseInitialPuml(puml: string | undefined): {
@@ -104,7 +113,6 @@ function parseInitialPuml(puml: string | undefined): {
       const toName = mRel[5].trim();
       const label = (mRel[6] || "").trim();
 
-      // 一旦クラス名をそのまま ID として入れておき、後で解決
       relations.push({
         id: makeId(),
         fromClassId: fromName,
@@ -167,6 +175,34 @@ function makeFeedback(classes: ClassInfo[], relations: Relation[]): string[] {
   return msgs;
 }
 
+// 問題文ハイライト用：選択語を <mark> で囲む
+function highlightText(text: string, keywords: string[]): ReactNode[] {
+  const terms = Array.from(
+    new Set(
+      keywords
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0)
+    )
+  );
+  if (terms.length === 0) return [text];
+
+  const pattern = new RegExp(
+    "(" + terms.map(escapeRegExp).join("|") + ")",
+    "g"
+  );
+  const parts = text.split(pattern);
+
+  return parts.map((part, idx) =>
+    terms.includes(part) ? (
+      <mark key={idx} className="bg-yellow-200 px-0.5 rounded">
+        {part}
+      </mark>
+    ) : (
+      part
+    )
+  );
+}
+
 // ===== メインコンポーネント =====
 const ClassEditorPage: React.FC = () => {
   const router = useRouter();
@@ -175,11 +211,12 @@ const ClassEditorPage: React.FC = () => {
   const [classes, setClasses] = useState<ClassInfo[]>([]);
   const [relations, setRelations] = useState<Relation[]>([]);
   const [selectedClassId, setSelectedClassId] = useState<string | null>(null);
+  const [selectedRelationId, setSelectedRelationId] =
+    useState<string | null>(null);
   const [encodedPuml, setEncodedPuml] = useState<string>("");
 
   // ===== 初期読み込み =====
   useEffect(() => {
-    // 1. 保存されている編集状態があれば優先
     try {
       const rawSaved = localStorage.getItem(STORAGE_KEY_EDITOR_STATE);
       if (rawSaved) {
@@ -195,7 +232,6 @@ const ClassEditorPage: React.FC = () => {
       // 無視
     }
 
-    // 2. それがなければ、オブジェクト図ページから渡された初期 PUML を使う
     try {
       const raw = localStorage.getItem(STORAGE_KEY_EDITOR_INITIAL);
       if (!raw) return;
@@ -212,7 +248,7 @@ const ClassEditorPage: React.FC = () => {
     }
   }, []);
 
-  // ===== PlantUML の再生成（クラス＋関連＋多重度すべて） =====
+  // ===== PlantUML の再生成 =====
   useEffect(() => {
     if (classes.length === 0) {
       setEncodedPuml("");
@@ -224,9 +260,27 @@ const ClassEditorPage: React.FC = () => {
     lines.push("hide empty members");
     lines.push("skinparam classAttributeIconSize 0");
 
-    // クラス定義
+    const selectedRelation =
+      relations.find((r) => r.id === selectedRelationId) ?? null;
+
+    // クラス定義：選択中クラス → 青、選択中関連の両端クラス → 赤系
     for (const cls of classes) {
-      lines.push(`class ${esc(cls.name)} {`);
+      const isSelectedClass = cls.id === selectedClassId;
+      const isEndpointOfSelectedRelation =
+        selectedRelation &&
+        (selectedRelation.fromClassId === cls.id ||
+          selectedRelation.toClassId === cls.id);
+
+      let colorPart = "";
+      if (isSelectedClass) {
+        // クラス選択 → 青
+        colorPart = " #CCEEFF"; // 薄い水色
+      } else if (isEndpointOfSelectedRelation) {
+        // 選択中関連の両端 → 赤系
+        colorPart = " #FFCCCC"; // 薄いピンク
+      }
+
+      lines.push(`class ${esc(cls.name)}${colorPart} {`);
       for (const a of cls.attrs) {
         const ty = a.type || "string";
         lines.push(`  ${esc(a.name)}: ${ty}`);
@@ -234,19 +288,20 @@ const ClassEditorPage: React.FC = () => {
       lines.push("}");
     }
 
-    // 関連定義
+    // 関連定義：選択中関連だけ赤線
     for (const r of relations) {
       const from = classes.find((c) => c.id === r.fromClassId);
       const to = classes.find((c) => c.id === r.toClassId);
       if (!from || !to) continue;
 
-      const style = "--"; // 常に実線
+      const isRelSelected = r.id === selectedRelationId;
+      const arrow = isRelSelected ? `-[#red]-` : "--";
       const leftMult = r.leftMultiplicity || "";
       const rightMult = r.rightMultiplicity || "";
       const labelPart = r.label ? ` : ${esc(r.label)}` : "";
 
       lines.push(
-        `${esc(from.name)} "${leftMult}" ${style} "${rightMult}" ${esc(
+        `${esc(from.name)} "${leftMult}" ${arrow} "${rightMult}" ${esc(
           to.name
         )}${labelPart}`
       );
@@ -261,7 +316,7 @@ const ClassEditorPage: React.FC = () => {
       console.error("encode error", e);
       setEncodedPuml("");
     }
-  }, [classes, relations]);
+  }, [classes, relations, selectedClassId, selectedRelationId]);
 
   const previewUrl = useMemo(
     () =>
@@ -276,6 +331,28 @@ const ClassEditorPage: React.FC = () => {
     [classes, relations]
   );
 
+  // 選択中要素
+  const selectedClass =
+    classes.find((c) => c.id === selectedClassId) ?? null;
+  const selectedRelation =
+    relations.find((r) => r.id === selectedRelationId) ?? null;
+
+  // 問題文ハイライト対象語
+  const problemHighlightTerms = useMemo(() => {
+    const terms: string[] = [];
+    if (selectedClass) {
+      terms.push(selectedClass.name);
+    }
+    if (selectedRelation) {
+      if (selectedRelation.label) terms.push(selectedRelation.label);
+      const from = classes.find((c) => c.id === selectedRelation.fromClassId);
+      const to = classes.find((c) => c.id === selectedRelation.toClassId);
+      if (from) terms.push(from.name);
+      if (to) terms.push(to.name);
+    }
+    return terms;
+  }, [selectedClass, selectedRelation, classes]);
+
   // ===== ハンドラ：クラス =====
   const handleAddClass = () => {
     const id = makeId();
@@ -286,6 +363,8 @@ const ClassEditorPage: React.FC = () => {
     };
     setClasses((prev) => [...prev, newClass]);
     setSelectedClassId(id);
+    // ここでは関連選択はそのままでも良いが、混乱を避けるならクリア
+    setSelectedRelationId(null);
   };
 
   const handleUpdateClass = (id: string, partial: Partial<ClassInfo>) => {
@@ -300,6 +379,7 @@ const ClassEditorPage: React.FC = () => {
       prev.filter((r) => r.fromClassId !== id && r.toClassId !== id)
     );
     if (selectedClassId === id) setSelectedClassId(null);
+    setSelectedRelationId(null);
   };
 
   const handleAddAttr = (classId: string) => {
@@ -359,6 +439,7 @@ const ClassEditorPage: React.FC = () => {
       rightMultiplicity: "0..1",
     };
     setRelations((prev) => [...prev, newRel]);
+    setSelectedRelationId(newRel.id);
   };
 
   const handleUpdateRelation = (id: string, partial: Partial<Relation>) => {
@@ -369,6 +450,7 @@ const ClassEditorPage: React.FC = () => {
 
   const handleDeleteRelation = (id: string) => {
     setRelations((prev) => prev.filter((r) => r.id !== id));
+    if (selectedRelationId === id) setSelectedRelationId(null);
   };
 
   // ===== 状態の保存・復元・リセット =====
@@ -392,6 +474,7 @@ const ClassEditorPage: React.FC = () => {
       setClasses(parsed.classes ?? []);
       setRelations(parsed.relations ?? []);
       setSelectedClassId(parsed.classes?.[0]?.id ?? null);
+      setSelectedRelationId(null);
       alert("保存されていた状態を復元しました。");
     } catch {
       alert("状態の読み込み中にエラーが発生しました。");
@@ -407,25 +490,22 @@ const ClassEditorPage: React.FC = () => {
       return;
     }
     localStorage.removeItem(STORAGE_KEY_EDITOR_STATE);
-    // 初期 PUML から再読み込み
     const raw = localStorage.getItem(STORAGE_KEY_EDITOR_INITIAL);
     if (!raw) {
       setClasses([]);
       setRelations([]);
       setSelectedClassId(null);
+      setSelectedRelationId(null);
       return;
     }
     const payload = JSON.parse(raw) as EditorInitialPayload;
-    const { classes: initClasses, relations: initRelations } = parseInitialPuml(
-      payload.initialClassPuml
-    );
+    const { classes: initClasses, relations: initRelations } =
+      parseInitialPuml(payload.initialClassPuml);
     setClasses(initClasses);
     setRelations(initRelations);
     setSelectedClassId(initClasses[0]?.id ?? null);
+    setSelectedRelationId(null);
   };
-
-  // 選択中クラス
-  const selectedClass = classes.find((c) => c.id === selectedClassId) ?? null;
 
   // 多重度候補
   const multiplicityOptions = ["1", "0..1", "0..*", "1..*"];
@@ -475,7 +555,7 @@ const ClassEditorPage: React.FC = () => {
               クラス図作成問題（本文）
             </div>
             <div className="flex-1 p-3 overflow-auto text-[12px] leading-relaxed whitespace-pre-wrap">
-              {classProblemText}
+              {highlightText(classProblemText, problemHighlightTerms)}
             </div>
           </div>
 
@@ -501,25 +581,44 @@ const ClassEditorPage: React.FC = () => {
                       まだクラスがありません。「クラスを追加」から作成してください。
                     </div>
                   )}
-                  {classes.map((c) => (
-                    <button
-                      key={c.id}
-                      className={
-                        "w-full text-left px-2 py-1 border-b flex items-center justify-between hover:bg-slate-100 " +
-                        (selectedClassId === c.id ? "bg-sky-100" : "")
-                      }
-                      onClick={() =>
-                        setSelectedClassId(
-                          selectedClassId === c.id ? null : c.id
-                        )
-                      }
-                    >
-                      <span className="truncate">{c.name}</span>
-                      <span className="text-[10px] text-slate-500 ml-1">
-                        {c.attrs.length} 属性
-                      </span>
-                    </button>
-                  ))}
+                  {classes.map((c) => {
+                    const isSelected = selectedClassId === c.id;
+                    const isEndpointOfSelectedRelation =
+                      selectedRelation &&
+                      (selectedRelation.fromClassId === c.id ||
+                        selectedRelation.toClassId === c.id);
+
+                    let itemColor = "";
+                    if (isSelected) {
+                      // クラス選択 → 青
+                      itemColor = "bg-sky-200 border-sky-400";
+                    } else if (isEndpointOfSelectedRelation) {
+                      // 選択中関連の両端 → 赤系
+                      itemColor = "bg-red-50 border-red-300";
+                    } else {
+                      itemColor = "bg-slate-50 border-slate-200";
+                    }
+
+                    const hoverColor = isSelected
+                      ? "hover:bg-sky-200"
+                      : "hover:bg-sky-50";
+
+                    return (
+                      <button
+                        key={c.id}
+                        className={`w-full text-left px-2 py-1 border-b flex items-center justify-between transition-colors ${itemColor} ${hoverColor}`}
+                        onClick={() => {
+                          // クラスの選択はトグル、関連の選択は保持したまま
+                          setSelectedClassId(isSelected ? null : c.id);
+                        }}
+                      >
+                        <span className="truncate">{c.name}</span>
+                        <span className="text-[10px] text-slate-500 ml-1">
+                          {c.attrs.length} 属性
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
 
                 {/* クラス詳細 */}
@@ -648,102 +747,119 @@ const ClassEditorPage: React.FC = () => {
                     まだ関連がありません。どのクラス同士が関係しているか、矢印と多重度を追加してみましょう。
                   </div>
                 )}
-                {relations.map((r) => (
-                  <div
-                    key={r.id}
-                    className="m-2 p-2 border rounded bg-white flex flex-col gap-1"
-                  >
-                    <div className="flex flex-wrap items-center gap-2">
-                      <select
-                        className="border rounded px-1 py-0.5 text-[11px]"
-                        value={r.fromClassId}
-                        onChange={(e) =>
-                          handleUpdateRelation(r.id, {
-                            fromClassId: e.target.value,
-                          })
-                        }
-                      >
-                        {classes.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.name}
-                          </option>
-                        ))}
-                      </select>
+                {relations.map((r) => {
+                  const isSelected = selectedRelationId === r.id;
 
-                      <select
-                        className="border rounded px-1 py-0.5 text-[11px]"
-                        value={r.leftMultiplicity}
-                        onChange={(e) =>
-                          handleUpdateRelation(r.id, {
-                            leftMultiplicity: e.target.value,
-                          })
-                        }
-                      >
-                        {multiplicityOptions.map((m) => (
-                          <option key={m} value={m}>
-                            {m}
-                          </option>
-                        ))}
-                      </select>
+                  return (
+                    <div
+                      key={r.id}
+                      className={
+                        "m-2 p-2 border rounded bg-white flex flex-col gap-1 cursor-pointer transition-colors " +
+                        (isSelected
+                          ? "border-red-400 ring-1 ring-red-300 bg-red-50"
+                          : "border-slate-200 hover:bg-slate-50")
+                      }
+                      onClick={() =>
+                        setSelectedRelationId(isSelected ? null : r.id)
+                      }
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <select
+                          className="border rounded px-1 py-0.5 text-[11px]"
+                          value={r.fromClassId}
+                          onChange={(e) =>
+                            handleUpdateRelation(r.id, {
+                              fromClassId: e.target.value,
+                            })
+                          }
+                        >
+                          {classes.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.name}
+                            </option>
+                          ))}
+                        </select>
 
-                      <span className="text-[11px]">→</span>
+                        <select
+                          className="border rounded px-1 py-0.5 text-[11px]"
+                          value={r.leftMultiplicity}
+                          onChange={(e) =>
+                            handleUpdateRelation(r.id, {
+                              leftMultiplicity: e.target.value,
+                            })
+                          }
+                        >
+                          {multiplicityOptions.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
 
-                      <select
-                        className="border rounded px-1 py-0.5 text-[11px]"
-                        value={r.rightMultiplicity}
-                        onChange={(e) =>
-                          handleUpdateRelation(r.id, {
-                            rightMultiplicity: e.target.value,
-                          })
-                        }
-                      >
-                        {multiplicityOptions.map((m) => (
-                          <option key={m} value={m}>
-                            {m}
-                          </option>
-                        ))}
-                      </select>
+                        <span className="text-[11px]">→</span>
 
-                      <select
-                        className="border rounded px-1 py-0.5 text-[11px]"
-                        value={r.toClassId}
-                        onChange={(e) =>
-                          handleUpdateRelation(r.id, {
-                            toClassId: e.target.value,
-                          })
-                        }
-                      >
-                        {classes.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.name}
-                          </option>
-                        ))}
-                      </select>
+                        <select
+                          className="border rounded px-1 py-0.5 text-[11px]"
+                          value={r.rightMultiplicity}
+                          onChange={(e) =>
+                            handleUpdateRelation(r.id, {
+                              rightMultiplicity: e.target.value,
+                            })
+                          }
+                        >
+                          {multiplicityOptions.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+
+                        <select
+                          className="border rounded px-1 py-0.5 text-[11px]"
+                          value={r.toClassId}
+                          onChange={(e) =>
+                            handleUpdateRelation(r.id, {
+                              toClassId: e.target.value,
+                            })
+                          }
+                        >
+                          {classes.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="flex items-center gap-2 mt-1">
+                        <span className="text-[11px]">関連名:</span>
+                        <input
+                          className="flex-1 border rounded px-1 py-0.5 text-[11px]"
+                          value={r.label}
+                          onChange={(e) =>
+                            handleUpdateRelation(r.id, {
+                              label: e.target.value,
+                            })
+                          }
+                          placeholder="例）履修する、担当する など"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between mt-1">
+                        <div />
+                        <button
+                          className="px-2 py-0.5 text-[11px] rounded border border-red-300 text-red-600 hover:bg-red-50"
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            handleDeleteRelation(r.id);
+                          }}
+                        >
+                          🗑 この関連を削除
+                        </button>
+                      </div>
                     </div>
-
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className="text-[11px]">関連名:</span>
-                      <input
-                        className="flex-1 border rounded px-1 py-0.5 text-[11px]"
-                        value={r.label}
-                        onChange={(e) =>
-                          handleUpdateRelation(r.id, { label: e.target.value })
-                        }
-                        placeholder="例）履修する、担当する など"
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between mt-1">
-                      <div />
-                      <button
-                        className="px-2 py-0.5 text-[11px] rounded border border-red-300 text-red-600 hover:bg-red-50"
-                        onClick={() => handleDeleteRelation(r.id)}
-                      >
-                        🗑 この関連を削除
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -763,10 +879,10 @@ const ClassEditorPage: React.FC = () => {
                 </div>
               )}
               {previewUrl && (
-                <iframe
+                <img
                   src={previewUrl}
-                  className="w-full h-full"
-                  title="あなたのクラス図プレビュー"
+                  alt="あなたのクラス図プレビュー"
+                  className="w-full h-full object-contain"
                 />
               )}
             </div>
