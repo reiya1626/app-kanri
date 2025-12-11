@@ -303,8 +303,7 @@ export async function POST(req: NextRequest) {
   for (const [key, total] of assocCount.entries()) {
     const [a, b] = key.split("::");
     const maxPerA = assocMulti.get(key) ?? 0;
-    const dotted = total <= 1;
-    const style = dotted ? ".." : "--";
+    const style = "--";
     const multRight = maxPerA > 1 ? "0..*" : "0..1";
 
     // label の多数決（上で relationHints も作っているが、ここでも同じロジックで1つ選ぶ）

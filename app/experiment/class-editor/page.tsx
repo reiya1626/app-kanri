@@ -1,4 +1,4 @@
-// app/level4/class-editor/page.tsx
+// app/experiment/class-editor/page.tsx
 "use client";
 
 import React, {
@@ -38,8 +38,8 @@ type EditorInitialPayload = {
 };
 
 // ===== 定数 =====
-const STORAGE_KEY_EDITOR_STATE = "LEVEL4_CLASS_EDITOR_STATE_V1";
-const STORAGE_KEY_EDITOR_INITIAL = "LEVEL4_CLASS_EDITOR_INITIAL";
+const STORAGE_KEY_EDITOR_STATE = "EXPERIMENT_CLASS_EDITOR_STATE_V1";
+const STORAGE_KEY_EDITOR_INITIAL = "EXPERIMENT_CLASS_EDITOR_INITIAL";
 
 // 簡易ID生成
 const makeId = () => Math.random().toString(36).slice(2);
@@ -518,7 +518,7 @@ const ClassEditorPage: React.FC = () => {
         <div className="flex items-center gap-2">
           <button
             className="px-3 py-1 rounded bg-slate-100 text-sm hover:bg-slate-200"
-            onClick={() => router.push("/level4")}
+            onClick={() => router.push("/experiment")}
           >
             ← オブジェクト図へ戻る
           </button>

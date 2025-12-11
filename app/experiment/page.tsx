@@ -1,4 +1,4 @@
-// app/level4/page.tsx
+// app/experiment/page.tsx
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -55,8 +55,8 @@ type EditorPayload = {
   };
 };
 
-const STORAGE_KEY_STATE = "LEVEL4_OBJECT_EDITOR_STATE";
-const STORAGE_KEY_EDITOR_INITIAL = "LEVEL4_CLASS_EDITOR_INITIAL";
+const STORAGE_KEY_STATE = "EXPERIMENT_OBJECT_EDITOR_STATE";
+const STORAGE_KEY_EDITOR_INITIAL = "EXPERIMENT_CLASS_EDITOR_INITIAL";
 
 // 簡易ID生成
 const makeId = () => Math.random().toString(36).slice(2);
@@ -85,7 +85,7 @@ const formatSlotValue = (raw: string): string => {
 };
 
 // ===== メインコンポーネント =====
-const Level4Page: React.FC = () => {
+const ExperimentPage: React.FC = () => {
   const router = useRouter();
 
   // 教員トップ画面で設定された問題文を取得
@@ -431,7 +431,7 @@ const Level4Page: React.FC = () => {
       JSON.stringify(editorPayload)
     );
 
-    router.push("/level4/class-editor");
+    router.push("/experiment/class-editor");
   };
 
   // ===== オブジェクト図問題文のハイライト（選択オブジェクト名） =====
@@ -934,4 +934,4 @@ const Level4Page: React.FC = () => {
   );
 };
 
-export default Level4Page;
+export default ExperimentPage;
