@@ -1,7 +1,7 @@
 // app/experiment/page.tsx
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import plantumlEncoder from "plantuml-encoder";
 import { useProblemConfig } from "../../components/problem-config";
@@ -21,7 +21,7 @@ type Obj = {
 type Link = {
   id: string;
   from: string; // Obj.id
-  to: string;   // Obj.id
+  to: string; // Obj.id
   label: string;
 };
 
@@ -80,16 +80,72 @@ const formatSlotValue = (raw: string): string => {
   const ty = detectType(t);
   if (ty === "int" || ty === "real") return t;
   if (ty === "boolean") return t.toLowerCase();
-  // string のときだけ "...":
   return `"${escLabel(t)}"`;
+};
+
+// ===== OD作成アシスト（パターン1: 不足・過剰） =====
+const stripHtmlTags = (s: string) => s.replace(/<[^>]*>/g, "");
+
+const normalizeObjectLabel = (raw: string) => {
+  const noTags = stripHtmlTags(raw).trim();
+  const left = noTags.includes(":") ? noTags.split(":")[0].trim() : noTags;
+  return left.replace(/^"+|"+$/g, "").trim();
+};
+
+// 末尾番号などを落としてベース名化（例：学生1→学生）
+const baseNameForAssist = (name: string) => {
+  let s = normalizeObjectLabel(name);
+  s = s.replace(/[0-9]+$/g, "");
+  s = s.replace(/[０-９]+$/g, "");
+  s = s.replace(/[A-Za-z]+[0-9]+$/g, "");
+  s = s.replace(/[_\-\s]+$/g, "");
+  return s.trim();
+};
+
+// 正答PlantUMLから object ラベル抽出（{があってもなくても拾う）
+const extractObjectLabelsFromPuml = (puml: string) => {
+  const labels: string[] = [];
+  if (!puml) return labels;
+
+  const lines = puml.split(/\r?\n/);
+
+  // object "ラベル" as id { ... } でも {なしでもOK、色指定があってもOK
+  const reQuoted =
+    /^\s*object\s+"([^"]+)"(?:\s+as\s+[\w.\-]+)?(?:\s+#[A-Za-z0-9]+)?(?:\s*\{)?\s*$/i;
+
+  // object 文学 as bungaku { ... } でも {なしでもOK
+  const reBare =
+    /^\s*object\s+([\wぁ-んァ-ン一-龥ー]+)(?:\s+as\s+[\w.\-]+)?(?:\s+#[A-Za-z0-9]+)?(?:\s*\{)?\s*$/i;
+
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) continue;
+    if (t.startsWith("'")) continue; // コメント
+
+    const m1 = line.match(reQuoted);
+    if (m1?.[1]) {
+      labels.push(m1[1]);
+      continue;
+    }
+    const m2 = line.match(reBare);
+    if (m2?.[1]) {
+      labels.push(m2[1]);
+      continue;
+    }
+  }
+
+  // "..." のようなダミーは除外
+  return labels
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && !/^\.+$/.test(s));
 };
 
 // ===== メインコンポーネント =====
 const ExperimentPage: React.FC = () => {
   const router = useRouter();
 
-  // 教員トップ画面で設定された問題文を取得
-  const { classProblemText, objectProblemText } = useProblemConfig();
+  const { classProblemText, objectProblemText, objectAnswerPuml } =
+    useProblemConfig();
 
   // --- オブジェクト／リンクの状態 ---
   const [objects, setObjects] = useState<Obj[]>([]);
@@ -97,6 +153,9 @@ const ExperimentPage: React.FC = () => {
 
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [selectedLinkId, setSelectedLinkId] = useState<string | null>(null);
+
+  // 「オブジェクト名入力中」のID（入力途中は過剰判定に含めない）
+  const [editingObjectId, setEditingObjectId] = useState<string | null>(null);
 
   // --- プレビュー（PlantUML） ---
   const [encodedObjectPuml, setEncodedObjectPuml] = useState<string>("");
@@ -108,6 +167,19 @@ const ExperimentPage: React.FC = () => {
   // --- 問題文の表示制御 ---
   const [showClassProblemFull, setShowClassProblemFull] = useState(false);
   const [showObjectProblemFull, setShowObjectProblemFull] = useState(false);
+
+  // ===== ヒント段階（A案） =====
+  // チェックでLv0（個数）
+  // それ以上（1個ずつ開示）は「前回ヒント以降に編集がある」時のみ可能（連打防止）
+  const [assistChecked, setAssistChecked] = useState(false);
+  const [revealMissingCount, setRevealMissingCount] = useState(0);
+  const [revealExtraCount, setRevealExtraCount] = useState(0);
+  const [dirtySinceLastHint, setDirtySinceLastHint] = useState(false);
+
+  const markDirty = () => setDirtySinceLastHint(true);
+
+  // アシスト欄のスクロール制御（ヒント追加時に下へ）
+  const assistScrollRef = useRef<HTMLDivElement | null>(null);
 
   // ===== ローカルストレージからの読み込み =====
   useEffect(() => {
@@ -125,6 +197,11 @@ const ExperimentPage: React.FC = () => {
     }
   }, []);
 
+  // ===== 無名オブジェクト判定（推定クラス図を止めるため） =====
+  const hasUnnamedObject = useMemo(() => {
+    return objects.some((o) => !o.name || o.name.trim().length === 0);
+  }, [objects]);
+
   // ===== オブジェクト図 PlantUML の生成（リアルタイム） =====
   useEffect(() => {
     if (objects.length === 0 && links.length === 0) {
@@ -132,9 +209,8 @@ const ExperimentPage: React.FC = () => {
       return;
     }
 
-    // どのオブジェクトをハイライトするか決定
-    const objectHighlightIds = new Set<string>(); // オブジェクト選択による強調（黄色）
-    const linkHighlightIds = new Set<string>();   // リンク選択による強調（ピンク）
+    const objectHighlightIds = new Set<string>();
+    const linkHighlightIds = new Set<string>();
 
     if (selectedObjectId) objectHighlightIds.add(selectedObjectId);
     const currentLink = links.find((l) => l.id === selectedLinkId) ?? null;
@@ -146,18 +222,15 @@ const ExperimentPage: React.FC = () => {
     const lines: string[] = [];
     lines.push("@startuml");
 
-    // オブジェクト
     for (const o of objects) {
       const safeName = o.name || "(無名)";
       const underlined = `<u>${escLabel(safeName)}</u>`;
 
       let fill = "";
       if (objectHighlightIds.has(o.id)) {
-        // オブジェクトを選択中 → 黄色
-        fill = " #FFF6BF";
+        fill = " #FFF6BF"; // yellow
       } else if (linkHighlightIds.has(o.id)) {
-        // リンクを選択中 → ピンク
-        fill = " #FFD6E0";
+        fill = " #FFD6E0"; // pink
       }
 
       lines.push(`object "${underlined}" as ${o.id}${fill} {`);
@@ -170,7 +243,6 @@ const ExperimentPage: React.FC = () => {
       lines.push("}");
     }
 
-    // リンク（選択されているものだけ赤線）
     for (const l of links) {
       const from = objects.find((o) => o.id === l.from);
       const to = objects.find((o) => o.id === l.to);
@@ -193,8 +265,17 @@ const ExperimentPage: React.FC = () => {
   }, [objects, links, selectedObjectId, selectedLinkId]);
 
   // ===== 推定クラス図のリアルタイム更新 =====
+  // 無名オブジェクトがある間は変換を止め、PlantUMLのエラー画面を学習者に見せない
   useEffect(() => {
     if (objects.length === 0 && links.length === 0) {
+      setClassPuml("");
+      setEncodedClassPuml("");
+      setIssues(null);
+      setRelationHints([]);
+      return;
+    }
+
+    if (hasUnnamedObject) {
       setClassPuml("");
       setEncodedClassPuml("");
       setIssues(null);
@@ -242,7 +323,113 @@ const ExperimentPage: React.FC = () => {
       clearTimeout(id);
       controller.abort();
     };
-  }, [objects, links]);
+  }, [objects, links, hasUnnamedObject]);
+
+  // ===== 選択オブジェクト =====
+  const selectedObject = useMemo(
+    () => objects.find((o) => o.id === selectedObjectId) ?? null,
+    [objects, selectedObjectId]
+  );
+
+  // ===== OD作成アシスト（差分計算） =====
+  const odAssist = useMemo(() => {
+    const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
+
+    const requiredBases = new Set<string>();
+    if (enabled) {
+      const labels = extractObjectLabelsFromPuml(objectAnswerPuml);
+      for (const raw of labels) {
+        const base = baseNameForAssist(raw);
+        if (base) requiredBases.add(base);
+      }
+    }
+
+    const presentBases = new Set<string>();
+    for (const o of objects) {
+      // 入力中のオブジェクトは判定から除外（入力途中の過剰ストレスを減らす）
+      if (editingObjectId && o.id === editingObjectId) continue;
+
+      if (!o.name || o.name.trim().length === 0) continue;
+      const base = baseNameForAssist(o.name);
+      if (!base) continue;
+      presentBases.add(base);
+    }
+
+    const missingBases = enabled
+      ? Array.from(requiredBases).filter((b) => !presentBases.has(b)).sort()
+      : [];
+    const extraBases = enabled
+      ? Array.from(presentBases).filter((b) => !requiredBases.has(b)).sort()
+      : [];
+
+    return { enabled, missingBases, extraBases };
+  }, [objects, objectAnswerPuml, editingObjectId]);
+
+  // 「今現在過剰があるか」
+  const hasExtraNow = odAssist.enabled && odAssist.extraBases.length > 0;
+
+  // 赤エラー表示は「チェック後のみ」
+  const showExtraError = assistChecked && hasExtraNow;
+
+  // ===== ヒント操作 =====
+  const handleAssistCheck = () => {
+    setAssistChecked(true);
+    setRevealMissingCount(0);
+    setRevealExtraCount(0);
+    // dirtySinceLastHint は触らない（チェックしただけで次のヒントを許可しない）
+  };
+
+  const scrollAssistToBottom = () => {
+    // レンダリング後に最下部へ
+    setTimeout(() => {
+      assistScrollRef.current?.scrollTo({
+        top: assistScrollRef.current.scrollHeight,
+        behavior: "smooth",
+      });
+    }, 0);
+  };
+
+  const handleRevealNextMissing = () => {
+    if (!assistChecked) {
+      alert("まず「チェック」を押してください。");
+      return;
+    }
+    if (odAssist.missingBases.length === 0) return;
+
+    if (!dirtySinceLastHint) {
+      alert(
+        "次のヒントを見る前に、オブジェクト図を一度修正してください（追加/削除/名前変更など）。"
+      );
+      return;
+    }
+
+    if (revealMissingCount >= odAssist.missingBases.length) return;
+
+    setRevealMissingCount((c) => c + 1);
+    setDirtySinceLastHint(false); // 連打防止
+    scrollAssistToBottom();
+  };
+
+  const handleRevealNextExtra = () => {
+    if (!assistChecked) {
+      alert("まず「チェック」を押してください。");
+      return;
+    }
+    if (odAssist.extraBases.length === 0) return;
+
+    if (!dirtySinceLastHint) {
+      alert(
+        "次のヒントを見る前に、オブジェクト図を一度修正してください（削除/名前変更など）。"
+      );
+      return;
+    }
+
+    if (revealExtraCount >= odAssist.extraBases.length) return;
+
+    setRevealExtraCount((c) => c + 1);
+    setDirtySinceLastHint(false); // 連打防止
+    scrollAssistToBottom();
+  };
 
   // ===== オブジェクト操作 =====
   const handleAddObject = () => {
@@ -250,24 +437,24 @@ const ExperimentPage: React.FC = () => {
     const newObj: Obj = { id, name: "", slots: [] };
     setObjects((prev) => [...prev, newObj]);
     setSelectedObjectId(id);
+    setSelectedLinkId(null);
+    markDirty();
   };
 
   const handleUpdateObject = (id: string, partial: Partial<Obj>) => {
     setObjects((prev) =>
       prev.map((o) => (o.id === id ? { ...o, ...partial } : o))
     );
+    markDirty();
   };
 
   const handleDeleteObject = (id: string) => {
     setObjects((prev) => prev.filter((o) => o.id !== id));
     setLinks((prev) => prev.filter((l) => l.from !== id && l.to !== id));
     if (selectedObjectId === id) setSelectedObjectId(null);
+    if (editingObjectId === id) setEditingObjectId(null);
+    markDirty();
   };
-
-  const selectedObject = useMemo(
-    () => objects.find((o) => o.id === selectedObjectId) ?? null,
-    [objects, selectedObjectId]
-  );
 
   // ===== スロット操作 =====
   const handleAddSlotToSelected = () => {
@@ -276,7 +463,10 @@ const ExperimentPage: React.FC = () => {
       ...selectedObject,
       slots: [...selectedObject.slots, { key: "", value: "" }],
     };
-    handleUpdateObject(selectedObject.id, updated);
+    setObjects((prev) =>
+      prev.map((o) => (o.id === selectedObject.id ? updated : o))
+    );
+    markDirty();
   };
 
   const handleUpdateSlot = (index: number, partial: Partial<Slot>) => {
@@ -284,13 +474,23 @@ const ExperimentPage: React.FC = () => {
     const newSlots = selectedObject.slots.map((s, i) =>
       i === index ? { ...s, ...partial } : s
     );
-    handleUpdateObject(selectedObject.id, { slots: newSlots } as Partial<Obj>);
+    setObjects((prev) =>
+      prev.map((o) =>
+        o.id === selectedObject.id ? { ...o, slots: newSlots } : o
+      )
+    );
+    markDirty();
   };
 
   const handleDeleteSlot = (index: number) => {
     if (!selectedObject) return;
     const newSlots = selectedObject.slots.filter((_, i) => i !== index);
-    handleUpdateObject(selectedObject.id, { slots: newSlots } as Partial<Obj>);
+    setObjects((prev) =>
+      prev.map((o) =>
+        o.id === selectedObject.id ? { ...o, slots: newSlots } : o
+      )
+    );
+    markDirty();
   };
 
   // ===== リンク操作 =====
@@ -305,17 +505,21 @@ const ExperimentPage: React.FC = () => {
     };
     setLinks((prev) => [...prev, newLink]);
     setSelectedLinkId(id);
+    setSelectedObjectId(null);
+    markDirty();
   };
 
   const handleUpdateLink = (id: string, partial: Partial<Link>) => {
     setLinks((prev) =>
       prev.map((l) => (l.id === id ? { ...l, ...partial } : l))
     );
+    markDirty();
   };
 
   const handleDeleteLink = (id: string) => {
     setLinks((prev) => prev.filter((l) => l.id !== id));
     if (selectedLinkId === id) setSelectedLinkId(null);
+    markDirty();
   };
 
   const selectedLink = useMemo(
@@ -342,6 +546,8 @@ const ExperimentPage: React.FC = () => {
       setLinks(parsed.links ?? []);
       setSelectedObjectId(null);
       setSelectedLinkId(null);
+      setEditingObjectId(null);
+      markDirty();
       alert("保存されていた状態を復元しました。");
     } catch {
       alert("状態の読み込み中にエラーが発生しました。");
@@ -357,14 +563,39 @@ const ExperimentPage: React.FC = () => {
     setLinks([]);
     setSelectedObjectId(null);
     setSelectedLinkId(null);
+    setEditingObjectId(null);
     setClassPuml("");
     setEncodedClassPuml("");
     setIssues(null);
     setRelationHints([]);
+    markDirty();
   };
 
   // ===== クラス図編集ページへ遷移 =====
+  // - 無名があるなら進めない
+  // - 過剰があるなら「チェックを要求」→チェック後ならエラーとして止める
   const handleConvertAndOpenClassEditor = async () => {
+    if (hasUnnamedObject) {
+      alert(
+        "オブジェクト名が未入力のものがあります。すべてのオブジェクトに名前を入力してください。"
+      );
+      return;
+    }
+
+    if (hasExtraNow) {
+      if (!assistChecked) {
+        alert(
+          "正答例にない可能性のあるオブジェクトが含まれるか確認するため、まず「チェック」を押してください。"
+        );
+        return;
+      }
+      alert(
+        `エラー：正答例にない可能性のあるオブジェクトが含まれています（過剰：${odAssist.extraBases.length}）。\n` +
+          `「過剰ヒントを1つ見る」で候補を確認し、削除/修正してから進んでください。`
+      );
+      return;
+    }
+
     let result: ConvertResponse | null = null;
 
     if (classPuml) {
@@ -407,7 +638,6 @@ const ExperimentPage: React.FC = () => {
         setEncodedClassPuml(data.encodedPuml);
         setIssues(data.issues ?? null);
         setRelationHints(data.relationHints ?? []);
-
         result = data;
       } catch (e) {
         console.error(e);
@@ -421,16 +651,12 @@ const ExperimentPage: React.FC = () => {
     const editorPayload: EditorPayload = {
       initialClassPuml: result.classPuml,
       relationHints: result.relationHints ?? [],
-      snapshot: {
-        objects,
-        links,
-      },
+      snapshot: { objects, links },
     };
     localStorage.setItem(
       STORAGE_KEY_EDITOR_INITIAL,
       JSON.stringify(editorPayload)
     );
-
     router.push("/experiment/class-editor");
   };
 
@@ -454,9 +680,7 @@ const ExperimentPage: React.FC = () => {
           </span>
         );
       }
-      nodes.push(
-        <React.Fragment key={`part-${idx}`}>{part}</React.Fragment>
-      );
+      nodes.push(<React.Fragment key={`part-${idx}`}>{part}</React.Fragment>);
     });
 
     return nodes;
@@ -484,12 +708,14 @@ const ExperimentPage: React.FC = () => {
         >
           すべてクリア
         </button>
+
         <button
           className="px-3 py-1 rounded bg-emerald-100 text-emerald-700 text-sm font-semibold hover:bg-emerald-200"
           onClick={handleSaveState}
         >
           状態を保存
         </button>
+
         <button
           className="px-3 py-1 rounded bg-sky-100 text-sky-700 text-sm font-semibold hover:bg-sky-200"
           onClick={handleLoadState}
@@ -498,9 +724,25 @@ const ExperimentPage: React.FC = () => {
         </button>
 
         <div className="flex-1" />
+
         <button
-          className="px-4 py-1.5 rounded bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700"
+          className={
+            "px-4 py-1.5 rounded text-sm font-semibold " +
+            ((hasUnnamedObject || (assistChecked && hasExtraNow))
+              ? "bg-slate-300 text-slate-600 cursor-not-allowed"
+              : "bg-indigo-600 text-white hover:bg-indigo-700")
+          }
           onClick={handleConvertAndOpenClassEditor}
+          disabled={hasUnnamedObject || (assistChecked && hasExtraNow)}
+          title={
+            hasUnnamedObject
+              ? "オブジェクト名未入力があるため進めません"
+              : assistChecked && hasExtraNow
+              ? "過剰オブジェクト（チェック後エラー）を解消すると進めます"
+              : hasExtraNow
+              ? "過剰の可能性があります。先に「チェック」で確認してください"
+              : ""
+          }
         >
           クラス図編集画面へ進む
         </button>
@@ -569,6 +811,169 @@ const ExperimentPage: React.FC = () => {
               </button>
             </div>
 
+            {/* OD作成アシスト（全体スクロール＋ヘッダsticky） */}
+            <div
+              ref={assistScrollRef}
+              className="border-b bg-slate-50 max-h-[220px] overflow-y-auto"
+            >
+              {/* ヘッダ（sticky） */}
+              <div className="sticky top-0 z-10 bg-slate-50 p-2 border-b">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-[12px]">
+                    OD作成アシスト（オブジェクト）
+                  </span>
+                  {!odAssist.enabled && (
+                    <span className="text-[11px] text-slate-500">
+                      正答例（オブジェクト図）が未設定のため利用できません
+                    </span>
+                  )}
+                </div>
+
+                {odAssist.enabled && (
+                  <>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <button
+                        className="px-3 py-1 text-[11px] rounded bg-slate-100 hover:bg-slate-200"
+                        onClick={handleAssistCheck}
+                      >
+                        チェック
+                      </button>
+
+                      <button
+                        className="px-3 py-1 text-[11px] rounded bg-emerald-100 text-emerald-700 hover:bg-emerald-200 disabled:opacity-50"
+                        onClick={handleRevealNextMissing}
+                        disabled={
+                          !assistChecked ||
+                          odAssist.missingBases.length === 0 ||
+                          !dirtySinceLastHint ||
+                          revealMissingCount >= odAssist.missingBases.length
+                        }
+                        title={
+                          !assistChecked
+                            ? "先にチェックしてください"
+                            : !dirtySinceLastHint
+                            ? "次のヒントを見る前に修正してください"
+                            : ""
+                        }
+                      >
+                        不足ヒントを1つ見る
+                      </button>
+
+                      <button
+                        className="px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50"
+                        onClick={handleRevealNextExtra}
+                        disabled={
+                          !assistChecked ||
+                          odAssist.extraBases.length === 0 ||
+                          !dirtySinceLastHint ||
+                          revealExtraCount >= odAssist.extraBases.length
+                        }
+                        title={
+                          !assistChecked
+                            ? "先にチェックしてください"
+                            : !dirtySinceLastHint
+                            ? "次のヒントを見る前に修正してください"
+                            : ""
+                        }
+                      >
+                        過剰ヒントを1つ見る
+                      </button>
+                    </div>
+
+                    {assistChecked ? (
+                      <div className="mt-2 text-[11px] text-slate-700">
+                        不足：
+                        <span className="font-semibold">
+                          {odAssist.missingBases.length}
+                        </span>{" "}
+                        個　／　過剰：
+                        <span className="font-semibold">
+                          {odAssist.extraBases.length}
+                        </span>{" "}
+                        個
+                      </div>
+                    ) : (
+                      <div className="mt-2 text-[11px] text-slate-600">
+                        ※ ヒントの前に「チェック」で不足・過剰の数を確認できます
+                      </div>
+                    )}
+
+                    {assistChecked && !dirtySinceLastHint && (
+                      <div className="mt-1 text-[11px] text-slate-500">
+                        ※ 次のヒントを見るには、オブジェクト図を一度修正してください
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {/* 本文（スクロール） */}
+              <div className="p-2 pr-2">
+                {odAssist.enabled && showExtraError && (
+                  <div className="border border-red-300 bg-red-50 rounded p-2">
+                    <div className="text-[11px] font-semibold text-red-700">
+                      エラー：正答例にない可能性のあるオブジェクトが含まれています（過剰：
+                      {odAssist.extraBases.length}）
+                    </div>
+                    <div className="text-[11px] text-red-700 mt-1">
+                      候補を「過剰ヒントを1つ見る」で確認し、削除/修正してください。
+                    </div>
+                  </div>
+                )}
+
+                {odAssist.enabled && assistChecked && revealMissingCount > 0 && (
+                  <div className="mt-2">
+                    <div className="text-[11px] text-slate-600 mb-1">
+                      不足の可能性（開示済み：{revealMissingCount}/
+                      {odAssist.missingBases.length}）
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {odAssist.missingBases
+                        .slice(0, revealMissingCount)
+                        .map((base) => (
+                          <span
+                            key={base}
+                            className="text-[11px] bg-white border rounded px-2 py-1"
+                          >
+                            {base}
+                          </span>
+                        ))}
+                    </div>
+                  </div>
+                )}
+
+                {odAssist.enabled && assistChecked && revealExtraCount > 0 && (
+                  <div className="mt-2">
+                    <div className="text-[11px] text-slate-600 mb-1">
+                      過剰の可能性（開示済み：{revealExtraCount}/
+                      {odAssist.extraBases.length}）
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {odAssist.extraBases
+                        .slice(0, revealExtraCount)
+                        .map((base) => (
+                          <span
+                            key={base}
+                            className="text-[11px] bg-white border border-red-200 rounded px-2 py-1 text-red-700"
+                          >
+                            {base}
+                          </span>
+                        ))}
+                    </div>
+                  </div>
+                )}
+
+                {odAssist.enabled &&
+                  assistChecked &&
+                  !hasExtraNow &&
+                  odAssist.missingBases.length === 0 && (
+                    <div className="text-[11px] text-slate-600">
+                      不足・過剰は見つかりませんでした。
+                    </div>
+                  )}
+              </div>
+            </div>
+
             <div className="flex flex-1 overflow-hidden">
               {/* オブジェクト一覧 */}
               <div className="w-2/5 border-r overflow-y-auto text-xs bg-slate-50">
@@ -588,13 +993,12 @@ const ExperimentPage: React.FC = () => {
                           ? "bg-amber-100 ring-1 ring-amber-400"
                           : "hover:bg-slate-100")
                       }
-                      onClick={() =>
-                        setSelectedObjectId((prev) => (prev === o.id ? null : o.id))
-                      }
+                      onClick={() => {
+                        setSelectedObjectId((prev) => (prev === o.id ? null : o.id));
+                        setSelectedLinkId(null);
+                      }}
                     >
-                      <span className="truncate">
-                        {o.name || "(無名オブジェクト)"}
-                      </span>
+                      <span className="truncate">{o.name || "(無名オブジェクト)"}</span>
                       <span className="text-[10px] text-slate-500 ml-2">
                         {o.slots.length} スロット
                       </span>
@@ -612,7 +1016,6 @@ const ExperimentPage: React.FC = () => {
                 )}
                 {selectedObject && (
                   <div className="flex flex-col gap-2">
-                    {/* 名前 */}
                     <div>
                       <label className="block text-[11px] font-semibold mb-1">
                         オブジェクト名
@@ -625,11 +1028,15 @@ const ExperimentPage: React.FC = () => {
                             name: e.target.value,
                           })
                         }
+                        onFocus={() => setEditingObjectId(selectedObject.id)}
+                        onBlur={() => setEditingObjectId(null)}
                         placeholder="例）学生1、授業A など"
                       />
+                      <div className="mt-1 text-[10px] text-slate-500">
+                        ※ 入力中のオブジェクトは一時的に過剰判定から除外されます
+                      </div>
                     </div>
 
-                    {/* スロット一覧 */}
                     <div>
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-[11px] font-semibold">
@@ -642,11 +1049,13 @@ const ExperimentPage: React.FC = () => {
                           ＋ スロット追加
                         </button>
                       </div>
+
                       {selectedObject.slots.length === 0 && (
                         <div className="text-[11px] text-slate-500 mb-1">
                           例）スロット名：年齢、値：19 など
                         </div>
                       )}
+
                       <div className="flex flex-col gap-1">
                         {selectedObject.slots.map((s, idx) => (
                           <div
@@ -662,16 +1071,12 @@ const ExperimentPage: React.FC = () => {
                                 }
                                 placeholder="スロット名（例：年齢）"
                               />
-                              <span className="text-[11px] text-slate-400">
-                                =
-                              </span>
+                              <span className="text-[11px] text-slate-400">=</span>
                               <input
                                 className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                                 value={s.value}
                                 onChange={(e) =>
-                                  handleUpdateSlot(idx, {
-                                    value: e.target.value,
-                                  })
+                                  handleUpdateSlot(idx, { value: e.target.value })
                                 }
                                 placeholder={'値（例：19、"文学" など）'}
                               />
@@ -690,7 +1095,6 @@ const ExperimentPage: React.FC = () => {
                       </div>
                     </div>
 
-                    {/* 削除 */}
                     <div className="mt-3 pt-2 border-t border-dashed border-red-200 flex justify-end">
                       <button
                         type="button"
@@ -751,7 +1155,7 @@ const ExperimentPage: React.FC = () => {
               <div className="w-1/2 border-r overflow-y-auto bg-slate-50">
                 {links.length === 0 && (
                   <div className="p-2 text-[11px] text-slate-500">
-                    まだリンクがありません。「リンク追加」からオブジェクト間の関係を追加してください。
+                    まだリンクがありません。「リンク追加」から関係を追加してください。
                   </div>
                 )}
                 {links.map((l) => {
@@ -767,9 +1171,10 @@ const ExperimentPage: React.FC = () => {
                           ? "bg-rose-100 ring-1 ring-rose-400"
                           : "hover:bg-slate-100")
                       }
-                      onClick={() =>
-                        setSelectedLinkId((prev) => (prev === l.id ? null : l.id))
-                      }
+                      onClick={() => {
+                        setSelectedLinkId((prev) => (prev === l.id ? null : l.id));
+                        setSelectedObjectId(null);
+                      }}
                     >
                       <div className="flex justify-between">
                         <span className="truncate">
@@ -777,9 +1182,7 @@ const ExperimentPage: React.FC = () => {
                         </span>
                       </div>
                       {l.label && (
-                        <div className="text-[10px] text-slate-500">
-                          {l.label}
-                        </div>
+                        <div className="text-[10px] text-slate-500">{l.label}</div>
                       )}
                     </button>
                   );
@@ -795,10 +1198,9 @@ const ExperimentPage: React.FC = () => {
                 )}
                 {selectedLink && (
                   <div className="flex flex-col gap-2 text-xs">
-                    {/* ◯は △を ～ の形 */}
                     <div>
                       <label className="block text-[11px] font-semibold mb-1">
-                        関係を持つオブジェクトとその名前
+                        関係を持つオブジェクト
                       </label>
                       <div className="flex flex-wrap items-center gap-2">
                         <select
@@ -816,7 +1218,7 @@ const ExperimentPage: React.FC = () => {
                             </option>
                           ))}
                         </select>
-                        <span className="text-[11px]">は</span>
+                        <span className="text-[11px]">→</span>
                         <select
                           className="border rounded px-1 py-0.5 text-[11px]"
                           value={selectedLink.to}
@@ -832,17 +1234,12 @@ const ExperimentPage: React.FC = () => {
                             </option>
                           ))}
                         </select>
-                        <span className="text-[11px]">を</span>
-                        <span className="text-[11px] text-slate-500">
-                          {selectedLink.label || "（〜する）"}
-                        </span>
                       </div>
                     </div>
 
-                    {/* ラベル */}
                     <div>
                       <label className="block text-[11px] font-semibold mb-1">
-                        関係の説明
+                        関係の説明（ラベル）
                       </label>
                       <input
                         className="w-full border rounded px-2 py-1 text-[11px]"
@@ -856,7 +1253,6 @@ const ExperimentPage: React.FC = () => {
                       />
                     </div>
 
-                    {/* 削除 */}
                     <div className="mt-3 pt-2 border-t border-dashed border-red-200 flex justify-end">
                       <button
                         className="px-3 py-1 text-[11px] rounded bg-red-100 text-red-700 hover:bg-red-200 font-semibold"
@@ -874,17 +1270,26 @@ const ExperimentPage: React.FC = () => {
           {/* 推定クラス図プレビュー */}
           <div className="flex-1 flex flex-col">
             <div className="p-2 border-b bg-white flex items-center justify-between">
-              <span className="font-semibold text-sm">
-                推定クラス図プレビュー
-              </span>
+              <span className="font-semibold text-sm">推定クラス図プレビュー</span>
             </div>
+
             <div className="flex-1 overflow-auto bg-white flex flex-col">
-              {!encodedClassPuml && (
-                <div className="p-3 text-[11px] text-slate-500">
-                  オブジェクトとリンクを入力すると、ここに推定されたクラス図が表示されます。
+              {/* 無名があるなら、PlantUMLエラーの代わりに説明を出す */}
+              {hasUnnamedObject && (
+                <div className="p-3 text-[11px] text-slate-600">
+                  推定クラス図は一時停止中です。<br />
+                  <span className="font-semibold">オブジェクト名が未入力</span>
+                  のものがあるため、すべてのオブジェクトに名前を入力してください。
                 </div>
               )}
-              {encodedClassPuml && (
+
+              {!hasUnnamedObject && !encodedClassPuml && (
+                <div className="p-3 text-[11px] text-slate-500">
+                  オブジェクトとリンクを入力すると、ここに推定クラス図が表示されます。
+                </div>
+              )}
+
+              {!hasUnnamedObject && encodedClassPuml && (
                 <div className="flex-1 flex flex-col">
                   {classPreviewUrl && (
                     <div className="flex-1 overflow-auto border-b">
@@ -895,6 +1300,7 @@ const ExperimentPage: React.FC = () => {
                       />
                     </div>
                   )}
+
                   {issues && (
                     <div className="p-2 text-[11px] border-t bg-slate-50">
                       <div className="font-semibold mb-1">
@@ -910,14 +1316,12 @@ const ExperimentPage: React.FC = () => {
                           <div className="font-semibold">{c.name}</div>
                           {c.incomplete.length > 0 && (
                             <div className="text-amber-700">
-                              未入力の可能性がある属性:{" "}
-                              {c.incomplete.join(", ")}
+                              未入力の可能性がある属性: {c.incomplete.join(", ")}
                             </div>
                           )}
                           {c.contradictory.length > 0 && (
                             <div className="text-red-700">
-                              型が混在している属性:{" "}
-                              {c.contradictory.join(", ")}
+                              型が混在している属性: {c.contradictory.join(", ")}
                             </div>
                           )}
                         </div>
