@@ -12,7 +12,8 @@ import plantumlEncoder from "plantuml-encoder";
  * - 型集合を保持して <!> / <?> を属性に付与
  * - クラスタ単位で <<incomplete>> / <<contradictory>> をクラスに付与
  * - 関連は“弱い観測/曖昧”を点線（..）で出力
- * - 多重度は簡易（0..1 / 0..*）を右側に表示
+ * - 多重度は OD だけでは断定しにくいので、変換結果の多重度は原則 0..* とする
+ *   （OD観測値は multiplicityHints で別返し）
  * - 明示リンクに label があれば、それを関連名として採用（多数決で1つに絞る）
  * - さらに、クラス対ごとのラベル候補一覧 relationHints も返す
  */
@@ -33,6 +34,29 @@ type RelationHint = {
   fromClass: string;
   toClass: string;
   candidates: { label: string; count: number }[];
+};
+
+/**
+ * 多重度ヒント（OD観測値）
+ * - 変換結果（PlantUML）では断定的な多重度を置かず、基本は 0..* を採用
+ * - 代わりに「各インスタンスが持つ接続数（観測）」を返して、編集画面で根拠として提示できるようにする
+ */
+type MultiplicityHint = {
+  /** "A--B"（クラス名を辞書順で並べたキー） */
+  key: string;
+  /** 辞書順で小さい方 */
+  a: string;
+  /** 辞書順で大きい方 */
+  b: string;
+  /** Aクラス各インスタンスがBへ持つリンク本数（OD観測） */
+  aToBCounts: number[];
+  /** Bクラス各インスタンスがAへ持つリンク本数（OD観測） */
+  bToACounts: number[];
+  /** サマリ（表示用） */
+  aToBMin: number;
+  aToBMax: number;
+  bToAMin: number;
+  bToAMax: number;
 };
 
 // ===== ユーティリティ =====
@@ -144,6 +168,15 @@ export async function POST(req: NextRequest) {
   // 最終的なクラス一覧
   const classes = classNames.map((name) => ({ name }));
 
+  // クラス→インスタンス名（OD観測の集計に使う）
+  const classMembers = new Map<string, string[]>();
+  for (const o of objects) {
+    const c = obj2class.get(o.name);
+    if (!c) continue;
+    if (!classMembers.has(c)) classMembers.set(c, []);
+    classMembers.get(c)!.push(o.name);
+  }
+
   // --- 型集合と“空値観測”を保持 ---
   const typeSets = new Map<string, Map<string, Set<PrimType>>>(); // class -> key -> set(types)
   const emptySeen = new Map<string, Map<string, boolean>>(); // class -> key -> seenEmpty
@@ -181,9 +214,72 @@ export async function POST(req: NextRequest) {
   }
 
   // --- 参照（関連）観測 ---
-  const assocCount = new Map<string, number>(); // key: "A::B" → total occurrences
-  const assocMulti = new Map<string, number>(); // key: "A::B" → max occurrences per (A-instance)
+  // NOTE:
+  // - relationHints は従来どおり「A::B（向き付き）」で保持
+  // - 多重度ヒントは「A--B（無向）」で保持（クラス名を辞書順で並べる）
   const assocLabelCount = new Map<string, Map<string, number>>(); // key: "A::B" → label -> count
+
+  // 多重度ヒント用の集計（無向）
+  type PairAgg = {
+    a: string;
+    b: string;
+    // instanceName -> count
+    aCounts: Map<string, number>;
+    bCounts: Map<string, number>;
+    labelCounts: Map<string, number>;
+    total: number;
+  };
+  const pairAgg = new Map<string, PairAgg>(); // key: "A--B"
+
+  const getPairKey = (c1: string, c2: string) =>
+    c1 <= c2 ? `${c1}--${c2}` : `${c2}--${c1}`;
+
+  const getOrCreatePair = (c1: string, c2: string) => {
+    const key = getPairKey(c1, c2);
+    let agg = pairAgg.get(key);
+    if (!agg) {
+      const a = c1 <= c2 ? c1 : c2;
+      const b = c1 <= c2 ? c2 : c1;
+      agg = {
+        a,
+        b,
+        aCounts: new Map(),
+        bCounts: new Map(),
+        labelCounts: new Map(),
+        total: 0,
+      };
+      pairAgg.set(key, agg);
+    }
+    return agg;
+  };
+
+  const addPairObservation = (
+    classFrom: string,
+    classTo: string,
+    fromInstance: string,
+    toInstance: string,
+    rawLabel?: string
+  ) => {
+    const agg = getOrCreatePair(classFrom, classTo);
+    agg.total += 1;
+
+    // どちらが agg.a / agg.b かでカウント先を分ける
+    if (classFrom === agg.a && classTo === agg.b) {
+      agg.aCounts.set(fromInstance, (agg.aCounts.get(fromInstance) ?? 0) + 1);
+      agg.bCounts.set(toInstance, (agg.bCounts.get(toInstance) ?? 0) + 1);
+    } else if (classFrom === agg.b && classTo === agg.a) {
+      agg.aCounts.set(toInstance, (agg.aCounts.get(toInstance) ?? 0) + 1);
+      agg.bCounts.set(fromInstance, (agg.bCounts.get(fromInstance) ?? 0) + 1);
+    } else {
+      // 同一クラス（自己関連）など
+      // agg.a === agg.b の場合、両方 aCounts に積む
+      agg.aCounts.set(fromInstance, (agg.aCounts.get(fromInstance) ?? 0) + 1);
+      agg.bCounts.set(toInstance, (agg.bCounts.get(toInstance) ?? 0) + 1);
+    }
+
+    const lbl = (rawLabel ?? "").trim();
+    if (lbl) agg.labelCounts.set(lbl, (agg.labelCounts.get(lbl) ?? 0) + 1);
+  };
 
   const countLabel = (key: string, rawLabel?: string) => {
     const lbl = (rawLabel ?? "").trim();
@@ -201,12 +297,11 @@ export async function POST(req: NextRequest) {
     const a = obj2class.get(l.from);
     const b = obj2class.get(l.to);
     if (!a || !b) continue;
-    const key = `${a}::${b}`;
-    assocCount.set(key, (assocCount.get(key) ?? 0) + 1);
-    // 明示リンクは1つ/objとみなす
-    assocMulti.set(key, Math.max(assocMulti.get(key) ?? 0, 1));
-    // ラベルも観測
-    countLabel(key, l.label);
+    // relationHints 用（向き付き）
+    countLabel(`${a}::${b}`, l.label);
+
+    // 多重度ヒント用（無向）
+    addPairObservation(a, b, l.from, l.to, l.label);
   }
 
   // 2) 属性値が他オブジェクト名に一致する場合を参照としてカウント
@@ -216,8 +311,6 @@ export async function POST(req: NextRequest) {
     const aClass = obj2class.get(o.name);
     if (!aClass) continue;
 
-    const perTargetCount = new Map<string, number>(); // B-class -> count from this A-obj
-
     for (const a of o.attrs ?? []) {
       const raw = (a.value ?? "").trim();
       if (!raw) continue;
@@ -226,17 +319,11 @@ export async function POST(req: NextRequest) {
         if (nameSet.has(v)) {
           const bClass = obj2class.get(v);
           if (!bClass) continue;
-          const key = `${aClass}::${bClass}`;
-          assocCount.set(key, (assocCount.get(key) ?? 0) + 1);
-          perTargetCount.set(bClass, (perTargetCount.get(bClass) ?? 0) + 1);
+
+          // 多重度ヒント用（無向）
+          addPairObservation(aClass, bClass, o.name, v, undefined);
         }
       }
-    }
-
-    // この A-instance から B-class への最大出現数（多重度判断に使う）
-    for (const [bClass, cnt] of perTargetCount) {
-      const key = `${aClass}::${bClass}`;
-      assocMulti.set(key, Math.max(assocMulti.get(key) ?? 0, cnt));
     }
   }
 
@@ -250,6 +337,43 @@ export async function POST(req: NextRequest) {
     if (candidates.length > 0) {
       relationHints.push({ fromClass, toClass, candidates });
     }
+  }
+
+  // ===== multiplicityHints（OD観測）を作成 =====
+  const multiplicityHints: MultiplicityHint[] = [];
+
+  const calcMinMax = (arr: number[]) => {
+    if (arr.length === 0) return { min: 0, max: 0 };
+    let min = arr[0];
+    let max = arr[0];
+    for (const n of arr) {
+      if (n < min) min = n;
+      if (n > max) max = n;
+    }
+    return { min, max };
+  };
+
+  for (const agg of pairAgg.values()) {
+    const aMembers = classMembers.get(agg.a) ?? [];
+    const bMembers = classMembers.get(agg.b) ?? [];
+
+    const aToBCounts = aMembers.map((inst) => agg.aCounts.get(inst) ?? 0);
+    const bToACounts = bMembers.map((inst) => agg.bCounts.get(inst) ?? 0);
+
+    const aMM = calcMinMax(aToBCounts);
+    const bMM = calcMinMax(bToACounts);
+
+    multiplicityHints.push({
+      key: `${agg.a}--${agg.b}`,
+      a: agg.a,
+      b: agg.b,
+      aToBCounts,
+      bToACounts,
+      aToBMin: aMM.min,
+      aToBMax: aMM.max,
+      bToAMin: bMM.min,
+      bToAMax: bMM.max,
+    });
   }
 
   // ===== PlantUML 出力 =====
@@ -281,7 +405,7 @@ export async function POST(req: NextRequest) {
         mark = "<!>"; // 型が混在
         hasContradiction = true;
       }
-      const showType: PrimType = (types[0] ?? "string");
+      const showType: PrimType = types[0] ?? "string";
       body += `  ${esc(k)}: ${showType} ${mark}\n`;
     }
 
@@ -294,36 +418,41 @@ export async function POST(req: NextRequest) {
   }
 
   // --- 関連（点線 or 実線 + ラベル） ---
-  // 簡易規則：
-  //  - 観測回数が少ない（<=1）→ “不確か” とみなし点線 ..
-  //  - A-instance→B-class の最大多重が >1 → 右側多重 0..*
-  //  - それ以外は 0..1
-  // ラベル：
-  //  - 明示リンクで観測された label のうち、最多のものを1つ採用
-  for (const [key, total] of assocCount.entries()) {
-    const [a, b] = key.split("::");
-    const maxPerA = assocMulti.get(key) ?? 0;
-    const style = "--";
-    const multRight = maxPerA > 1 ? "0..*" : "0..1";
+  // ODのみから断定的な多重度（特に下限/上限）を置くとミスリードになりやすいので、
+  // 変換結果では原則 0..* を採用する。
+  // （観測値は multiplicityHints として別返し）
+  // ラベル：明示リンクで観測された label のうち、最多のものを1つ採用
+  // 関連は「無向のクラス対」ごとに 1 本だけ出力する（A--B）
+  const pairKeys = Array.from(pairAgg.keys()).sort();
+  for (const pairKey of pairKeys) {
+    const agg = pairAgg.get(pairKey);
+    if (!agg) continue;
 
-    // label の多数決（上で relationHints も作っているが、ここでも同じロジックで1つ選ぶ）
-    const labelMap = assocLabelCount.get(key);
+    const a = agg.a;
+    const b = agg.b;
+
+    // 観測が少ないときは点線（不確か）
+    const style = agg.total <= 1 ? ".." : "--";
+
+    // ODのみから断定しない（下限/上限とも）
+    const multLeft = "0..*";
+    const multRight = "0..*";
+
+    // ラベル多数決
     let labelPart = "";
-    if (labelMap && labelMap.size > 0) {
+    if (agg.labelCounts.size > 0) {
       let bestLabel = "";
       let bestCount = 0;
-      for (const [lab, cnt] of labelMap.entries()) {
+      for (const [lab, cnt] of agg.labelCounts.entries()) {
         if (cnt > bestCount) {
           bestLabel = lab;
           bestCount = cnt;
         }
       }
-      if (bestLabel) {
-        labelPart = ` : ${esc(bestLabel)}`;
-      }
+      if (bestLabel) labelPart = ` : ${esc(bestLabel)}`;
     }
 
-    puml += `${esc(a)} "1" ${style} "${multRight}" ${esc(b)}${labelPart}\n`;
+    puml += `${esc(a)} "${multLeft}" ${style} "${multRight}" ${esc(b)}${labelPart}\n`;
   }
 
   puml += "@enduml";
@@ -337,6 +466,7 @@ export async function POST(req: NextRequest) {
     encodedPuml: encoded,
     issues,
     relationHints, // ★ クラス対ごとのラベル候補一覧（class-editor で使う）
+    multiplicityHints, // ★ 多重度の観測値（ODから）
   });
 }
 
@@ -358,7 +488,8 @@ function summarizeIssues(
     for (const [k, setTypes] of tmap.entries()) {
       const types = Array.from(setTypes.values());
       if (types.length === 0 && (emap.get(k) ?? false)) incomplete.push(k);
-      else if (types.length > 1) contradictory.push(`${k} [${types.join(", ")}]`);
+      else if (types.length > 1)
+        contradictory.push(`${k} [${types.join(", ")}]`);
     }
 
     if (incomplete.length || contradictory.length) {
