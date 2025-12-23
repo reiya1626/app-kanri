@@ -434,14 +434,16 @@ const ExperimentPage: React.FC = () => {
   const [showObjectProblemFull, setShowObjectProblemFull] = useState(false);
 
   // ===== アシスト状態（オブジェクト） =====
-  const [objChecked, setObjChecked] = useState(false); // ← 診断済みフラグとして使う
-  const [objRevealExtra, setObjRevealExtra] = useState(0);
+  const [objChecked, setObjChecked] = useState(false); // 診断済み
+  const [objRevealExtra, setObjRevealExtra] = useState(0); // 表示数（全件表示に使う）
   const [objDirtySinceHint, setObjDirtySinceHint] = useState(false);
+  const [objRevealAllDone, setObjRevealAllDone] = useState(false); // 全件表示済み→再診断促し
 
   // ===== アシスト状態（リンク） =====
-  const [linkChecked, setLinkChecked] = useState(false); // ← 診断済みフラグとして使う
-  const [linkRevealExtra, setLinkRevealExtra] = useState(0);
+  const [linkChecked, setLinkChecked] = useState(false); // 診断済み
+  const [linkRevealExtra, setLinkRevealExtra] = useState(0); // 表示数（全件表示に使う）
   const [linkDirtySinceHint, setLinkDirtySinceHint] = useState(false);
+  const [linkRevealAllDone, setLinkRevealAllDone] = useState(false); // ★追加：全件表示済み→再診断促し
 
   // ===== アシスト折りたたみ =====
   const [objAssistCollapsed, setObjAssistCollapsed] = useState(false);
@@ -708,10 +710,13 @@ const ExperimentPage: React.FC = () => {
       const pretty = label
         ? `${aBase} — ${bBase}（${label}）`
         : `${aBase} — ${bBase}`;
+
       presentLinks.push({ a: aBase, b: bBase, label, endpointKey, fullKey, pretty });
     }
 
-    const presentEndpointKeys = new Set<string>(presentLinks.map((p) => p.endpointKey));
+    const presentEndpointKeys = new Set<string>(
+      presentLinks.map((p) => p.endpointKey)
+    );
 
     const missingEndpoints = enabled
       ? Array.from(requiredEndpointKeys)
@@ -763,35 +768,65 @@ const ExperimentPage: React.FC = () => {
   const linkHasExtraNow = linkAssist.enabled && linkExtraCount > 0;
   const linkShowExtraError = linkChecked && linkHasExtraNow;
 
-  // ===== オブジェクトアシスト操作 =====
-  const handleObjDiagnose = () => setObjChecked(true);
+  // ===== 「正答例と異なる◯◯を見る」ボタン：無効理由（ホバー表示用） =====
+  const getObjRevealDisabledReason = () => {
+    if (!objChecked) return "まず『オブジェクトを診断する』を押してください。";
+    if (objAssist.extraBases.length === 0)
+      return "正答例と異なる候補が見つからないため、表示するものがありません。";
+    if (objRevealAllDone)
+      return "候補はすべて表示しました。もう一度『オブジェクトを診断する』を押して、現在の状態を再確認してください。";
+    return null;
+  };
 
-  const handleObjRevealNextExtra = () => {
+  // ★リンクも同じ仕様（全件表示→再診断促し）
+  const getLinkRevealDisabledReason = () => {
+    if (!linkChecked) return "まず『リンクを診断する』を押してください。";
+    if (linkAssist.extraLinks.length === 0)
+      return "正答例と異なる候補が見つからないため、表示するものがありません。";
+    if (linkRevealAllDone)
+      return "候補はすべて表示しました。もう一度『リンクを診断する』を押して、現在の状態を再確認してください。";
+    return null;
+  };
+
+  const objRevealDisabledReason = getObjRevealDisabledReason();
+  const objRevealDisabled = objRevealDisabledReason !== null;
+
+  const linkRevealDisabledReason = getLinkRevealDisabledReason();
+  const linkRevealDisabled = linkRevealDisabledReason !== null;
+
+  // ===== オブジェクトアシスト操作 =====
+  const handleObjDiagnose = () => {
+    setObjChecked(true);
+    setObjRevealAllDone(false);
+    setObjRevealExtra(0);
+    setObjDirtySinceHint(false);
+  };
+
+  const handleObjRevealAllExtra = () => {
     if (!objChecked) return alert("まず「オブジェクトを診断する」を押してください。");
     if (objAssist.extraBases.length === 0) return;
-    if (!objDirtySinceHint)
-      return alert("次の表示を見る前に、オブジェクト図を一度修正してください。");
-    if (objRevealExtra >= objAssist.extraBases.length) return;
 
     setObjAssistCollapsed(false);
-    setObjRevealExtra((c) => c + 1);
-    setObjDirtySinceHint(false);
+    setObjRevealExtra(objAssist.extraBases.length); // 全件表示
+    setObjRevealAllDone(true); // 再度は診断を促す
     scrollObjAssistToBottom();
   };
 
-  // ===== リンクアシスト操作 =====
-  const handleLinkDiagnose = () => setLinkChecked(true);
+  // ===== リンクアシスト操作（★同じ仕様に変更） =====
+  const handleLinkDiagnose = () => {
+    setLinkChecked(true);
+    setLinkRevealAllDone(false);
+    setLinkRevealExtra(0);
+    setLinkDirtySinceHint(false);
+  };
 
-  const handleLinkRevealNextExtra = () => {
+  const handleLinkRevealAllExtra = () => {
     if (!linkChecked) return alert("まず「リンクを診断する」を押してください。");
     if (linkAssist.extraLinks.length === 0) return;
-    if (!linkDirtySinceHint)
-      return alert("次の表示を見る前に、オブジェクト図を一度修正してください。");
-    if (linkRevealExtra >= linkAssist.extraLinks.length) return;
 
     setLinkAssistCollapsed(false);
-    setLinkRevealExtra((c) => c + 1);
-    setLinkDirtySinceHint(false);
+    setLinkRevealExtra(linkAssist.extraLinks.length); // 全件表示
+    setLinkRevealAllDone(true); // 再度は診断を促す
     scrollLinkAssistToBottom();
   };
 
@@ -802,6 +837,7 @@ const ExperimentPage: React.FC = () => {
     setObjects((prev) => [...prev, newObj]);
     setSelectedObjectId(id);
     setSelectedLinkId(null);
+    setEditingObjectId(null);
     markMeaningfulChange(true, true);
   };
 
@@ -906,17 +942,23 @@ const ExperimentPage: React.FC = () => {
     setIssues(null);
     setRelationHints([]);
     markMeaningfulChange(true, true);
+
+    // アシスト関連もリセット
+    setObjChecked(false);
+    setObjRevealExtra(0);
+    setObjDirtySinceHint(false);
+    setObjRevealAllDone(false);
+
+    setLinkChecked(false);
+    setLinkRevealExtra(0);
+    setLinkDirtySinceHint(false);
+    setLinkRevealAllDone(false);
   };
 
   // ===== 進む前の警告（学習者向け最適化） =====
-  // レベル感：
-  // - 強：診断済みで「正答例と異なる候補」が残っている（過剰候補）
-  // - 中：診断済みで「未カバー」が残っている（具体名は出さない）
-  // - 弱：未診断のまま（まず診断を促す）
   const buildProceedWarningMessage = () => {
     const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
 
-    // 正答例が無いなら警告は出さない（このツールの学習設計上はOK）
     if (!enabled) return { needsConfirm: false, message: "" };
 
     const parts: string[] = [];
@@ -940,10 +982,8 @@ const ExperimentPage: React.FC = () => {
       if (linkMissingCount > 0) medium = true;
     }
 
-    // 何もなければ警告なし
     if (!strong && !medium && !weak) return { needsConfirm: false, message: "" };
 
-    // タイトル（強いもの優先）
     const title = strong
       ? "【要確認】このまま進むと、クラス化（抽象化）が崩れる可能性があります。"
       : medium
@@ -953,7 +993,6 @@ const ExperimentPage: React.FC = () => {
     parts.push(title);
     parts.push("");
 
-    // 状態（数だけ、具体名は出さない）
     parts.push("■ 現在の状態（数のみ）");
     parts.push(
       `・オブジェクト：カバー ${objMatchedCount}/${objRequiredCount} ／ 未カバー ${objMissingCount}/${objRequiredCount} ／ 正答例と異なる候補 ${objExtraCount}`
@@ -963,7 +1002,6 @@ const ExperimentPage: React.FC = () => {
     );
     parts.push("");
 
-    // 理由
     parts.push("■ なぜ注意が必要？");
     if (strong) {
       parts.push(
@@ -980,7 +1018,6 @@ const ExperimentPage: React.FC = () => {
     }
     parts.push("");
 
-    // 行動誘導
     parts.push("■ まず何をすればいい？（おすすめの次の一手）");
     if (!objChecked || !linkChecked) {
       parts.push("・「オブジェクトを診断する」「リンクを診断する」を押して、状態を確認してください。");
@@ -993,7 +1030,6 @@ const ExperimentPage: React.FC = () => {
     }
     parts.push("");
 
-    // 注意（それでも進む場合）
     parts.push("■ それでも進む場合");
     parts.push("・根拠があって「正答例と異なる候補」を入れているなら、進んでもOKです。");
     parts.push("・ただし次のクラス図編集で「なぜ入れたか」を説明できる状態にしておくのがおすすめです。");
@@ -1005,30 +1041,23 @@ const ExperimentPage: React.FC = () => {
 
   // ===== クラス図編集ページへ遷移（警告＋保存） =====
   const handleConvertAndOpenClassEditor = async () => {
-    // ここだけは“警告”ではなく“ブロック”のまま（PlantUML/推定CDが破綻しやすい）
     if (hasUnnamedObject) {
-      alert(
-        "オブジェクト名が未入力のものがあります。\nすべてのオブジェクトに名前を入力してください。"
-      );
+      alert("オブジェクト名が未入力のものがあります。\nすべてのオブジェクトに名前を入力してください。");
       return;
     }
 
-    // まず「状態を保存」してから、警告→遷移の流れにする
-    // （OKで進んでも、キャンセルでも保存はされる＝やり直しや比較がしやすい）
     try {
       localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify({ objects, links }));
     } catch {
-      // 失敗しても致命ではないので続行
+      // ignore
     }
 
-    // 警告（confirm）
     const warn = buildProceedWarningMessage();
     if (warn.needsConfirm) {
       const ok = window.confirm(warn.message);
       if (!ok) return;
     }
 
-    // convert（必要なら取得）
     let result: ConvertResponse | null = null;
 
     if (classPuml) {
@@ -1081,7 +1110,6 @@ const ExperimentPage: React.FC = () => {
 
     if (!result) return;
 
-    // 遷移時にも“編集用payload”を保存
     const editorPayload: EditorPayload = {
       initialClassPuml: result.classPuml,
       relationHints: result.relationHints ?? [],
@@ -1279,18 +1307,28 @@ const ExperimentPage: React.FC = () => {
                       オブジェクトを診断する
                     </button>
 
-                    <button
-                      className="px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50"
-                      onClick={handleObjRevealNextExtra}
-                      disabled={
-                        !objChecked ||
-                        objAssist.extraBases.length === 0 ||
-                        !objDirtySinceHint ||
-                        objRevealExtra >= objAssist.extraBases.length
-                      }
-                    >
-                      正答例と異なるオブジェクトを見る
-                    </button>
+                    <div className="relative inline-block group">
+                      <button
+                        className="px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                        onClick={handleObjRevealAllExtra}
+                        disabled={objRevealDisabled}
+                        aria-describedby={objRevealDisabled ? "obj-reveal-disabled-tip" : undefined}
+                      >
+                        正答例と異なるオブジェクトを見る
+                      </button>
+
+                      {objRevealDisabled && (
+                        <div
+                          id="obj-reveal-disabled-tip"
+                          role="tooltip"
+                          className="pointer-events-none absolute left-0 top-full mt-1 z-20 w-[280px] rounded border bg-white px-2 py-1 text-[11px] text-slate-700 shadow
+                                    opacity-0 translate-y-1 transition
+                                    group-hover:opacity-100 group-hover:translate-y-0"
+                        >
+                          {objRevealDisabledReason}
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {!objChecked ? (
@@ -1301,8 +1339,8 @@ const ExperimentPage: React.FC = () => {
                     <div className="mt-2 text-[11px] text-slate-600">
                       <div>
                         カバー：<span className="font-semibold">{objMatchedCount}</span>/
-                        {objRequiredCount}　
-                        未カバー：<span className="font-semibold">{objMissingCount}</span>/
+                        {objRequiredCount}　未カバー：
+                        <span className="font-semibold">{objMissingCount}</span>/
                         {objRequiredCount}
                       </div>
                       <div className="mt-1 text-slate-500">
@@ -1337,20 +1375,22 @@ const ExperimentPage: React.FC = () => {
                   {objChecked && objRevealExtra > 0 && (
                     <div className="mt-3 text-[11px]">
                       <div className="font-semibold text-slate-700">
-                        正答例と異なる可能性（開示済み：
-                        {Math.min(objRevealExtra, objAssist.extraBases.length)}/
-                        {objAssist.extraBases.length}）
+                        正答例と異なる可能性（表示：
+                        {Math.min(objRevealExtra, objAssist.extraBases.length)}/{objAssist.extraBases.length}）
                       </div>
                       <div className="mt-1 flex flex-wrap gap-1">
                         {objAssist.extraBases.slice(0, objRevealExtra).map((b) => (
-                          <span
-                            key={b}
-                            className="px-2 py-0.5 rounded border bg-white text-red-700"
-                          >
+                          <span key={b} className="px-2 py-0.5 rounded border bg-white text-red-700">
                             {b}
                           </span>
                         ))}
                       </div>
+
+                      {objRevealAllDone && (
+                        <div className="mt-2 text-[11px] text-slate-600">
+                          ※ いま表示している候補は「診断時点」のものです。次は「オブジェクトを診断する」を押して更新してください。
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1382,9 +1422,7 @@ const ExperimentPage: React.FC = () => {
                       }}
                     >
                       <span className="truncate">{o.name || "(無名オブジェクト)"}</span>
-                      <span className="text-[10px] text-slate-500 ml-2">
-                        {o.slots.length} スロット
-                      </span>
+                      <span className="text-[10px] text-slate-500 ml-2">{o.slots.length} スロット</span>
                     </button>
                   );
                 })}
@@ -1401,10 +1439,7 @@ const ExperimentPage: React.FC = () => {
                   <div className="flex flex-col gap-2">
                     <div>
                       <div className="flex items-center">
-                        <label
-                          className="block text-[11px] font-semibold mb-1"
-                          title={TOOLTIP.objectName}
-                        >
+                        <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.objectName}>
                           オブジェクト名
                         </label>
                         <HelpBadge title={TOOLTIP.objectName} />
@@ -1413,9 +1448,7 @@ const ExperimentPage: React.FC = () => {
                       <input
                         className="w-full border rounded px-2 py-1 text-xs"
                         value={selectedObject.name}
-                        onChange={(e) =>
-                          handleUpdateObjectName(selectedObject.id, e.target.value)
-                        }
+                        onChange={(e) => handleUpdateObjectName(selectedObject.id, e.target.value)}
                         onFocus={() => setEditingObjectId(selectedObject.id)}
                         onBlur={() => setEditingObjectId(null)}
                         placeholder="例）学生1、授業A など"
@@ -1444,24 +1477,17 @@ const ExperimentPage: React.FC = () => {
                       </div>
 
                       {selectedObject.slots.length === 0 && (
-                        <div className="text-[11px] text-slate-500 mb-1">
-                          例）スロット名：年齢、値：19 など
-                        </div>
+                        <div className="text-[11px] text-slate-500 mb-1">例）スロット名：年齢、値：19 など</div>
                       )}
 
                       <div className="flex flex-col gap-1">
                         {selectedObject.slots.map((s, idx) => (
-                          <div
-                            key={idx}
-                            className="border rounded px-2 py-1 bg-white flex flex-col gap-2"
-                          >
+                          <div key={idx} className="border rounded px-2 py-1 bg-white flex flex-col gap-2">
                             <div className="flex items-center gap-2">
                               <input
                                 className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                                 value={s.key}
-                                onChange={(e) =>
-                                  handleUpdateSlot(idx, { key: e.target.value })
-                                }
+                                onChange={(e) => handleUpdateSlot(idx, { key: e.target.value })}
                                 placeholder="スロット名（例：年齢）"
                                 title={TOOLTIP.slotKey}
                               />
@@ -1469,9 +1495,7 @@ const ExperimentPage: React.FC = () => {
                               <input
                                 className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                                 value={s.value}
-                                onChange={(e) =>
-                                  handleUpdateSlot(idx, { value: e.target.value })
-                                }
+                                onChange={(e) => handleUpdateSlot(idx, { value: e.target.value })}
                                 placeholder={'値（例：19、"文学" など）'}
                                 title={TOOLTIP.slotValue}
                               />
@@ -1520,11 +1544,7 @@ const ExperimentPage: React.FC = () => {
                 </div>
               )}
               {objectPreviewUrl && (
-                <iframe
-                  src={objectPreviewUrl}
-                  className="w-full h-full"
-                  title="オブジェクト図プレビュー"
-                />
+                <iframe src={objectPreviewUrl} className="w-full h-full" title="オブジェクト図プレビュー" />
               )}
             </div>
           </div>
@@ -1574,18 +1594,28 @@ const ExperimentPage: React.FC = () => {
                       リンクを診断する
                     </button>
 
-                    <button
-                      className="px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50"
-                      onClick={handleLinkRevealNextExtra}
-                      disabled={
-                        !linkChecked ||
-                        linkAssist.extraLinks.length === 0 ||
-                        !linkDirtySinceHint ||
-                        linkRevealExtra >= linkAssist.extraLinks.length
-                      }
-                    >
-                      正答例と異なるリンクを見る
-                    </button>
+                    <div className="relative inline-block group">
+                      <button
+                        className="px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                        onClick={handleLinkRevealAllExtra}
+                        disabled={linkRevealDisabled}
+                        aria-describedby={linkRevealDisabled ? "link-reveal-disabled-tip" : undefined}
+                      >
+                        正答例と異なるリンクを見る
+                      </button>
+
+                      {linkRevealDisabled && (
+                        <div
+                          id="link-reveal-disabled-tip"
+                          role="tooltip"
+                          className="pointer-events-none absolute left-0 top-full mt-1 z-20 w-[280px] rounded border bg-white px-2 py-1 text-[11px] text-slate-700 shadow
+                                    opacity-0 translate-y-1 transition
+                                    group-hover:opacity-100 group-hover:translate-y-0"
+                        >
+                          {linkRevealDisabledReason}
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {!linkChecked ? (
@@ -1595,10 +1625,8 @@ const ExperimentPage: React.FC = () => {
                   ) : (
                     <div className="mt-2 text-[11px] text-slate-600">
                       <div>
-                        カバー：<span className="font-semibold">{linkMatchedCount}</span>/
-                        {linkRequiredCount}　
-                        未カバー：<span className="font-semibold">{linkMissingCount}</span>/
-                        {linkRequiredCount}
+                        カバー：<span className="font-semibold">{linkMatchedCount}</span>/{linkRequiredCount}　
+                        未カバー：<span className="font-semibold">{linkMissingCount}</span>/{linkRequiredCount}
                       </div>
                       <div className="mt-1 text-slate-500">
                         ※ 未カバーは「正答例にあるのに入力にない」端点ペアの数です（具体名は表示しません）
@@ -1632,28 +1660,28 @@ const ExperimentPage: React.FC = () => {
                   {linkChecked && linkRevealExtra > 0 && (
                     <div className="mt-3 text-[11px]">
                       <div className="font-semibold text-slate-700">
-                        正答例と異なる可能性（開示済み：
-                        {Math.min(linkRevealExtra, linkAssist.extraLinks.length)}/
-                        {linkAssist.extraLinks.length}）
+                        正答例と異なる可能性（表示：
+                        {Math.min(linkRevealExtra, linkAssist.extraLinks.length)}/{linkAssist.extraLinks.length}）
                       </div>
                       <div className="mt-1 flex flex-wrap gap-1">
                         {linkAssist.extraLinks.slice(0, linkRevealExtra).map((p) => (
-                          <span
-                            key={p.fullKey}
-                            className="px-2 py-0.5 rounded border bg-white text-red-700"
-                          >
+                          <span key={p.fullKey} className="px-2 py-0.5 rounded border bg-white text-red-700">
                             {p.pretty}
                           </span>
                         ))}
                       </div>
+
+                      {linkRevealAllDone && (
+                        <div className="mt-2 text-[11px] text-slate-600">
+                          ※ いま表示している候補は「診断時点」のものです。次は「リンクを診断する」を押して更新してください。
+                        </div>
+                      )}
                     </div>
                   )}
 
                   {linkChecked && linkAssist.labelWarnings.length > 0 && (
                     <div className="mt-3 border border-amber-300 bg-amber-50 text-amber-900 text-[11px] rounded p-2">
-                      <div className="font-semibold">
-                        注意：リンクラベルが正答例と異なる可能性があります
-                      </div>
+                      <div className="font-semibold">注意：リンクラベルが正答例と異なる可能性があります</div>
                       <div className="mt-1 space-y-1">
                         {linkAssist.labelWarnings.slice(0, 6).map((w, idx) => (
                           <div key={idx}>
@@ -1662,9 +1690,7 @@ const ExperimentPage: React.FC = () => {
                           </div>
                         ))}
                         {linkAssist.labelWarnings.length > 6 && (
-                          <div className="text-amber-800">
-                            …他 {linkAssist.labelWarnings.length - 6} 件
-                          </div>
+                          <div className="text-amber-800">…他 {linkAssist.labelWarnings.length - 6} 件</div>
                         )}
                       </div>
                     </div>
@@ -1721,10 +1747,7 @@ const ExperimentPage: React.FC = () => {
                   <div className="flex flex-col gap-2 text-xs">
                     <div>
                       <div className="flex items-center">
-                        <label
-                          className="block text-[11px] font-semibold mb-1"
-                          title={TOOLTIP.linkEndpoints}
-                        >
+                        <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.linkEndpoints}>
                           リンク（関係を持つオブジェクト）
                         </label>
                         <HelpBadge title={TOOLTIP.linkEndpoints} />
@@ -1734,9 +1757,7 @@ const ExperimentPage: React.FC = () => {
                         <select
                           className="border rounded px-1 py-0.5 text-[11px]"
                           value={selectedLink.from}
-                          onChange={(e) =>
-                            handleUpdateLink(selectedLink.id, { from: e.target.value })
-                          }
+                          onChange={(e) => handleUpdateLink(selectedLink.id, { from: e.target.value })}
                           title={TOOLTIP.linkEndpoints}
                         >
                           {objects.map((o) => (
@@ -1749,9 +1770,7 @@ const ExperimentPage: React.FC = () => {
                         <select
                           className="border rounded px-1 py-0.5 text-[11px]"
                           value={selectedLink.to}
-                          onChange={(e) =>
-                            handleUpdateLink(selectedLink.id, { to: e.target.value })
-                          }
+                          onChange={(e) => handleUpdateLink(selectedLink.id, { to: e.target.value })}
                           title={TOOLTIP.linkEndpoints}
                         >
                           {objects.map((o) => (
@@ -1765,10 +1784,7 @@ const ExperimentPage: React.FC = () => {
 
                     <div>
                       <div className="flex items-center">
-                        <label
-                          className="block text-[11px] font-semibold mb-1"
-                          title={TOOLTIP.linkLabel}
-                        >
+                        <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.linkLabel}>
                           リンクラベル（関係を説明する動詞）
                         </label>
                         <HelpBadge title={TOOLTIP.linkLabel} />
@@ -1777,9 +1793,7 @@ const ExperimentPage: React.FC = () => {
                       <input
                         className="w-full border rounded px-2 py-1 text-[11px]"
                         value={selectedLink.label}
-                        onChange={(e) =>
-                          handleUpdateLink(selectedLink.id, { label: e.target.value })
-                        }
+                        onChange={(e) => handleUpdateLink(selectedLink.id, { label: e.target.value })}
                         placeholder="例）履修する、担当する など"
                         title={TOOLTIP.linkLabel}
                       />
