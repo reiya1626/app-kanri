@@ -110,40 +110,237 @@ const normalizeLinkLabel = (raw: string) => {
   return t;
 };
 
-// 正答PlantUMLから object ラベル抽出（{があってもなくても拾う）
-const extractObjectLabelsFromPuml = (puml: string) => {
-  const labels: string[] = [];
-  if (!puml) return labels;
+const normalizeSlotKeyForAssist = (raw: string) => {
+  const t = stripHtmlTags(raw ?? "")
+    .trim()
+    .replace(/^"+|"+$/g, "")
+    .replace(/\s+/g, "");
+  return t;
+};
+
+// ===== 正答PUMLから「オブジェクト(base) -> 期待スロットキー集合」を抽出 =====
+const extractObjectBaseToSlotKeysFromPuml = (puml: string) => {
+  const map = new Map<string, Set<string>>();
+  if (!puml) return map;
 
   const lines = puml.split(/\r?\n/);
 
-  const reQuoted =
-    /^\s*object\s+"([^"]+)"(?:\s+as\s+[\w.\-]+)?(?:\s+#[A-Za-z0-9]+)?(?:\s*\{)?\s*$/i;
+  const reObjQuoted =
+    /^\s*object\s+"([^"]+)"(?:\s+as\s+[\w.\-]+)?(?:\s+#[A-Za-z0-9]+)?\s*(?:\{)?\s*$/i;
+  const reObjBare =
+    /^\s*object\s+([\wぁ-んァ-ン一-龥ー]+)(?:\s+as\s+[\w.\-]+)?(?:\s+#[A-Za-z0-9]+)?\s*(?:\{)?\s*$/i;
 
-  const reBare =
-    /^\s*object\s+([\wぁ-んァ-ン一-龥ー]+)(?:\s+as\s+[\w.\-]+)?(?:\s+#[A-Za-z0-9]+)?(?:\s*\{)?\s*$/i;
+  let currentBase: string | null = null;
+  let inBlock = false;
+
+  const ensure = (base: string) => {
+    if (!map.has(base)) map.set(base, new Set<string>());
+  };
+
+  const parseSlotKeyLine = (line: string) => {
+    const t0 = stripHtmlTags(line).trim();
+    if (!t0) return null;
+    if (t0.startsWith("'")) return null;
+    if (t0 === "}") return null;
+
+    // "key: value" or "key"
+    const idx = t0.indexOf(":");
+    const keyRaw = idx >= 0 ? t0.slice(0, idx).trim() : t0.trim();
+    const key = normalizeSlotKeyForAssist(keyRaw);
+    return key || null;
+  };
 
   for (const line of lines) {
     const t = line.trim();
     if (!t) continue;
     if (t.startsWith("'")) continue;
 
-    const m1 = line.match(reQuoted);
-    if (m1?.[1]) {
-      labels.push(m1[1]);
+    if (
+      /^(?:@startuml|@enduml|skinparam|hide|title|left to right direction)/i.test(t)
+    ) {
       continue;
     }
-    const m2 = line.match(reBare);
-    if (m2?.[1]) {
-      labels.push(m2[1]);
+
+    // ブロック外で object 開始を探す
+    if (!inBlock) {
+      const m1 = line.match(reObjQuoted);
+      const m2 = line.match(reObjBare);
+      const label = m1?.[1] ?? m2?.[1];
+      if (!label) continue;
+
+      const base = baseNameForAssist(label);
+      if (!base) continue;
+
+      ensure(base);
+
+      // { が行に含まれていればブロック開始扱い
+      if (t.includes("{")) {
+        currentBase = base;
+        inBlock = true;
+      } else {
+        currentBase = null;
+        inBlock = false;
+      }
       continue;
+    }
+
+    // ブロック内
+    if (inBlock) {
+      if (t === "}") {
+        currentBase = null;
+        inBlock = false;
+        continue;
+      }
+      if (!currentBase) continue;
+
+      const key = parseSlotKeyLine(line);
+      if (!key) continue;
+
+      map.get(currentBase)!.add(key);
     }
   }
 
-  return labels
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0 && !/^\.+$/.test(s));
+  return map;
 };
+
+// ===== オブジェクト比較（値は無視、キー集合で比較） =====
+type ObjSig = {
+  base: string;
+  slotKeys: string[];
+  sig: string;           // base||k1,k2...
+  chipLabel: string;     // チップに表示する短い文言（分かりやすく）
+  tooltip: string;       // hover 用の説明（任意）
+};
+
+const makeObjSig = (base: string, slotKeysRaw: string[]): ObjSig => {
+  const uniq = new Set<string>();
+  for (const k of slotKeysRaw) {
+    const nk = normalizeSlotKeyForAssist(k);
+    if (nk) uniq.add(nk);
+  }
+
+  const keys = Array.from(uniq).sort((a, b) => a.localeCompare(b, "ja"));
+  const sig = `${base}||${keys.join(",")}`;
+
+  const keysText = keys.length > 0 ? keys.join(" / ") : "なし";
+  const chipLabel = `${base}（入力スロット：${keysText}）`;
+
+  const tooltip = `オブジェクト「${base}」に入力されているスロットキー：${keysText}`;
+
+  return { base, slotKeys: keys, sig, chipLabel, tooltip };
+};
+
+
+type ObjAssistLive = {
+  enabled: boolean;
+  requiredSigSet: Set<string>;
+  presentSigSet: Set<string>;
+  missingSigs: string[];
+  extraCandidates: ObjSig[]; // presentだが正答にない（=キー集合違いも含む）
+  requiredCount: number;
+  matchedCount: number;
+  missingCount: number;
+  extraCount: number;
+};
+
+const computeObjAssistLive = (
+  objects: Obj[],
+  objectAnswerPuml: string,
+  editingObjectId: string | null
+): ObjAssistLive => {
+  const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
+  if (!enabled) {
+    return {
+      enabled: false,
+      requiredSigSet: new Set(),
+      presentSigSet: new Set(),
+      missingSigs: [],
+      extraCandidates: [],
+      requiredCount: 0,
+      matchedCount: 0,
+      missingCount: 0,
+      extraCount: 0,
+    };
+  }
+
+  // 正答：base -> keys(集合)
+  const baseToKeys = extractObjectBaseToSlotKeysFromPuml(objectAnswerPuml);
+
+  // 正答Sig集合
+  const requiredSigSet = new Set<string>();
+  for (const [base, set] of baseToKeys.entries()) {
+    const sig = makeObjSig(base, Array.from(set)).sig;
+    requiredSigSet.add(sig);
+  }
+
+  // 入力Sig集合（入力中は過剰判定に入れない）
+  const presentSigSet = new Set<string>();
+  const presentSigs: ObjSig[] = [];
+
+  for (const o of objects) {
+    if (editingObjectId && o.id === editingObjectId) continue;
+    if (!o.name || o.name.trim().length === 0) continue;
+
+    const base = baseNameForAssist(o.name);
+    if (!base) continue;
+
+    const keys = o.slots
+      .map((s) => s.key)
+      .map((k) => normalizeSlotKeyForAssist(k))
+      .filter((k) => k.length > 0);
+
+    const os = makeObjSig(base, keys);
+    presentSigSet.add(os.sig);
+    presentSigs.push(os);
+  }
+
+  const missingSigs = Array.from(requiredSigSet).filter((s) => !presentSigSet.has(s));
+
+  // extraCandidates：presentにあってrequiredにないSig（＝キー違い/不足/余分/未知オブジェクトすべて）
+  const extraUniq = new Map<string, ObjSig>();
+  for (const p of presentSigs) {
+    if (!requiredSigSet.has(p.sig)) extraUniq.set(p.sig, p);
+  }
+  const extraCandidates = Array.from(extraUniq.values()).sort((a, b) =>
+    a.chipLabel.localeCompare(b.chipLabel, "ja")
+  );
+
+  const requiredCount = requiredSigSet.size;
+  const missingCount = missingSigs.length;
+  const matchedCount = Math.max(0, requiredCount - missingCount);
+  const extraCount = extraCandidates.length;
+
+  return {
+    enabled,
+    requiredSigSet,
+    presentSigSet,
+    missingSigs,
+    extraCandidates,
+    requiredCount,
+    matchedCount,
+    missingCount,
+    extraCount,
+  };
+};
+
+// ===== リンク比較（既存のロジック） =====
+type LinkSig = {
+  a: string; // base
+  b: string; // base
+  label: string; // normalized label
+  endpointKey: string; // endpoints only
+  fullKey: string; // endpoints + label (for warnings)
+  pretty: string; // display
+};
+
+const makeEndpointKey = (aBase: string, bBase: string) => {
+  const x = aBase <= bBase ? aBase : bBase;
+  const y = aBase <= bBase ? bBase : aBase;
+  return `${x}||${y}`;
+};
+
+const makeFullKey = (endpointKey: string, labelNorm: string) =>
+  `${endpointKey}||${labelNorm}`;
 
 // 正答PUML内の object 行から alias -> baseName を作る
 const extractAliasToBaseFromPuml = (puml: string) => {
@@ -180,24 +377,6 @@ const extractAliasToBaseFromPuml = (puml: string) => {
   return map;
 };
 
-type LinkSig = {
-  a: string; // base
-  b: string; // base
-  label: string; // normalized label
-  endpointKey: string; // endpoints only
-  fullKey: string; // endpoints + label (for warnings)
-  pretty: string; // display
-};
-
-const makeEndpointKey = (aBase: string, bBase: string) => {
-  const x = aBase <= bBase ? aBase : bBase;
-  const y = aBase <= bBase ? bBase : aBase;
-  return `${x}||${y}`;
-};
-
-const makeFullKey = (endpointKey: string, labelNorm: string) =>
-  `${endpointKey}||${labelNorm}`;
-
 // 正答PUMLからリンク抽出（aliasでも日本語でも拾える）
 const extractLinksFromPuml = (puml: string) => {
   const out: LinkSig[] = [];
@@ -215,9 +394,7 @@ const extractLinksFromPuml = (puml: string) => {
     if (!t) continue;
     if (t.startsWith("'")) continue;
     if (
-      /^(?:@startuml|@enduml|skinparam|hide|title|left to right direction)/i.test(
-        t
-      )
+      /^(?:@startuml|@enduml|skinparam|hide|title|left to right direction)/i.test(t)
     )
       continue;
     if (/^\s*object\s+/i.test(t)) continue;
@@ -250,6 +427,120 @@ const extractLinksFromPuml = (puml: string) => {
     if (!uniq.has(l.fullKey)) uniq.set(l.fullKey, l);
   }
   return Array.from(uniq.values());
+};
+
+type LinkAssistLive = {
+  enabled: boolean;
+  requiredEndpointKeys: Set<string>;
+  presentEndpointKeys: Set<string>;
+  missingPretty: string[];
+  extraLinks: LinkSig[];
+  labelWarnings: { pretty: string; expected: string[]; actual: string }[];
+  requiredCount: number;
+  matchedCount: number;
+  missingCount: number;
+  extraCount: number;
+};
+
+const computeLinkAssistLive = (
+  objectAnswerPuml: string,
+  objects: Obj[],
+  links: Link[]
+): LinkAssistLive => {
+  const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
+  if (!enabled) {
+    return {
+      enabled: false,
+      requiredEndpointKeys: new Set(),
+      presentEndpointKeys: new Set(),
+      missingPretty: [],
+      extraLinks: [],
+      labelWarnings: [],
+      requiredCount: 0,
+      matchedCount: 0,
+      missingCount: 0,
+      extraCount: 0,
+    };
+  }
+
+  const requiredLinks = extractLinksFromPuml(objectAnswerPuml);
+  const requiredEndpointKeys = new Set<string>(requiredLinks.map((r) => r.endpointKey));
+
+  const requiredLabelsByEndpoint = new Map<string, Set<string>>();
+  for (const r of requiredLinks) {
+    if (!r.label) continue;
+    const s = requiredLabelsByEndpoint.get(r.endpointKey) ?? new Set<string>();
+    s.add(r.label);
+    requiredLabelsByEndpoint.set(r.endpointKey, s);
+  }
+
+  const presentLinks: LinkSig[] = [];
+  for (const l of links) {
+    const fromObj = objects.find((o) => o.id === l.from);
+    const toObj = objects.find((o) => o.id === l.to);
+    if (!fromObj || !toObj) continue;
+    if (!fromObj.name || !toObj.name) continue;
+
+    const aBase = baseNameForAssist(fromObj.name);
+    const bBase = baseNameForAssist(toObj.name);
+    if (!aBase || !bBase) continue;
+
+    const label = normalizeLinkLabel(l.label ?? "");
+    const endpointKey = makeEndpointKey(aBase, bBase);
+    const fullKey = makeFullKey(endpointKey, label);
+    const pretty = label
+      ? `${aBase} — ${bBase}（${label}）`
+      : `${aBase} — ${bBase}`;
+    presentLinks.push({ a: aBase, b: bBase, label, endpointKey, fullKey, pretty });
+  }
+
+  const presentEndpointKeys = new Set<string>(presentLinks.map((p) => p.endpointKey));
+
+  const missingEndpoints = Array.from(requiredEndpointKeys)
+    .filter((k) => !presentEndpointKeys.has(k))
+    .sort((a, b) => a.localeCompare(b, "ja"));
+
+  const extraLinks = presentLinks
+    .filter((p) => !requiredEndpointKeys.has(p.endpointKey))
+    .sort((x, y) => x.pretty.localeCompare(y.pretty, "ja"));
+
+  const missingPretty = missingEndpoints.map((k) => {
+    const [x, y] = k.split("||");
+    return `${x} — ${y}`;
+  });
+
+  const labelWarnings: { pretty: string; expected: string[]; actual: string }[] = [];
+  for (const p of presentLinks) {
+    const expectedSet = requiredLabelsByEndpoint.get(p.endpointKey);
+    if (!expectedSet || expectedSet.size === 0) continue;
+    const expected = Array.from(expectedSet);
+    if (!expected.includes(p.label)) {
+      const [x, y] = p.endpointKey.split("||");
+      labelWarnings.push({
+        pretty: `${x} — ${y}`,
+        expected,
+        actual: p.label || "(未入力)",
+      });
+    }
+  }
+
+  const requiredCount = requiredEndpointKeys.size;
+  const missingCount = missingPretty.length;
+  const matchedCount = Math.max(0, requiredCount - missingCount);
+  const extraCount = extraLinks.length;
+
+  return {
+    enabled,
+    requiredEndpointKeys,
+    presentEndpointKeys,
+    missingPretty,
+    extraLinks,
+    labelWarnings,
+    requiredCount,
+    matchedCount,
+    missingCount,
+    extraCount,
+  };
 };
 
 // ===== 問題文ハイライト用ユーティリティ =====
@@ -434,16 +725,20 @@ const ExperimentPage: React.FC = () => {
   const [showObjectProblemFull, setShowObjectProblemFull] = useState(false);
 
   // ===== アシスト状態（オブジェクト） =====
-  const [objChecked, setObjChecked] = useState(false); // 診断済み
-  const [objRevealExtra, setObjRevealExtra] = useState(0); // 表示数（全件表示に使う）
+  const [objChecked, setObjChecked] = useState(false); // 診断済みフラグ
+  const [objRevealExtra, setObjRevealExtra] = useState(0);
   const [objDirtySinceHint, setObjDirtySinceHint] = useState(false);
-  const [objRevealAllDone, setObjRevealAllDone] = useState(false); // 全件表示済み→再診断促し
+
+  // 診断結果スナップショット（編集しても変化させない）
+  const [objDiagSnap, setObjDiagSnap] = useState<ObjAssistLive | null>(null);
 
   // ===== アシスト状態（リンク） =====
-  const [linkChecked, setLinkChecked] = useState(false); // 診断済み
-  const [linkRevealExtra, setLinkRevealExtra] = useState(0); // 表示数（全件表示に使う）
+  const [linkChecked, setLinkChecked] = useState(false); // 診断済みフラグ
+  const [linkRevealExtra, setLinkRevealExtra] = useState(0);
   const [linkDirtySinceHint, setLinkDirtySinceHint] = useState(false);
-  const [linkRevealAllDone, setLinkRevealAllDone] = useState(false); // ★追加：全件表示済み→再診断促し
+
+  // 診断結果スナップショット
+  const [linkDiagSnap, setLinkDiagSnap] = useState<LinkAssistLive | null>(null);
 
   // ===== アシスト折りたたみ =====
   const [objAssistCollapsed, setObjAssistCollapsed] = useState(false);
@@ -634,157 +929,67 @@ const ExperimentPage: React.FC = () => {
     return objects.find((o) => o.id === selectedLink.to)?.name?.trim() ?? "";
   }, [selectedLink, objects]);
 
-  // ===== パターン1（オブジェクト不足/過剰） =====
-  const objAssist = useMemo(() => {
-    const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
-
-    const requiredBases = new Set<string>();
-    if (enabled) {
-      const labels = extractObjectLabelsFromPuml(objectAnswerPuml);
-      for (const raw of labels) {
-        const base = baseNameForAssist(raw);
-        if (base) requiredBases.add(base);
-      }
-    }
-
-    const presentBases = new Set<string>();
-    for (const o of objects) {
-      if (editingObjectId && o.id === editingObjectId) continue;
-      if (!o.name || o.name.trim().length === 0) continue;
-
-      const base = baseNameForAssist(o.name);
-      if (!base) continue;
-      presentBases.add(base);
-    }
-
-    const missingBases = enabled
-      ? Array.from(requiredBases).filter((b) => !presentBases.has(b)).sort()
-      : [];
-    const extraBases = enabled
-      ? Array.from(presentBases).filter((b) => !requiredBases.has(b)).sort()
-      : [];
-
-    return { enabled, requiredBases, presentBases, missingBases, extraBases };
+  // ===== ライブ比較（編集に追従：警告・進む判定に使う） =====
+  const objAssistLive = useMemo(() => {
+    return computeObjAssistLive(objects, objectAnswerPuml ?? "", editingObjectId);
   }, [objects, objectAnswerPuml, editingObjectId]);
 
-  const objRequiredCount = objAssist.requiredBases.size;
-  const objMissingCount = objAssist.missingBases.length;
-  const objMatchedCount = Math.max(0, objRequiredCount - objMissingCount);
-  const objExtraCount = objAssist.extraBases.length;
-
-  const objHasExtraNow = objAssist.enabled && objExtraCount > 0;
-  const objShowExtraError = objChecked && objHasExtraNow;
-
-  // ===== パターン4（リンク不足/過剰） =====
-  // 方針②：不足/過剰は「端点だけ」で判定、ラベルは別の注意(warn)で扱う
-  const linkAssist = useMemo(() => {
-    const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
-
-    const requiredLinks = enabled ? extractLinksFromPuml(objectAnswerPuml) : [];
-    const requiredEndpointKeys = new Set<string>(
-      requiredLinks.map((r) => r.endpointKey)
-    );
-
-    const requiredLabelsByEndpoint = new Map<string, Set<string>>();
-    for (const r of requiredLinks) {
-      if (!r.label) continue;
-      const s = requiredLabelsByEndpoint.get(r.endpointKey) ?? new Set<string>();
-      s.add(r.label);
-      requiredLabelsByEndpoint.set(r.endpointKey, s);
-    }
-
-    const presentLinks: LinkSig[] = [];
-    for (const l of links) {
-      const fromObj = objects.find((o) => o.id === l.from);
-      const toObj = objects.find((o) => o.id === l.to);
-      if (!fromObj || !toObj) continue;
-      if (!fromObj.name || !toObj.name) continue;
-
-      const aBase = baseNameForAssist(fromObj.name);
-      const bBase = baseNameForAssist(toObj.name);
-      if (!aBase || !bBase) continue;
-
-      const label = normalizeLinkLabel(l.label ?? "");
-      const endpointKey = makeEndpointKey(aBase, bBase);
-      const fullKey = makeFullKey(endpointKey, label);
-      const pretty = label
-        ? `${aBase} — ${bBase}（${label}）`
-        : `${aBase} — ${bBase}`;
-
-      presentLinks.push({ a: aBase, b: bBase, label, endpointKey, fullKey, pretty });
-    }
-
-    const presentEndpointKeys = new Set<string>(
-      presentLinks.map((p) => p.endpointKey)
-    );
-
-    const missingEndpoints = enabled
-      ? Array.from(requiredEndpointKeys)
-          .filter((k) => !presentEndpointKeys.has(k))
-          .sort((a, b) => a.localeCompare(b, "ja"))
-      : [];
-
-    const extraLinks = enabled
-      ? presentLinks
-          .filter((p) => !requiredEndpointKeys.has(p.endpointKey))
-          .sort((x, y) => x.pretty.localeCompare(y.pretty, "ja"))
-      : [];
-
-    const missingPretty = missingEndpoints.map((k) => {
-      const [x, y] = k.split("||");
-      return `${x} — ${y}`;
-    });
-
-    const labelWarnings: { pretty: string; expected: string[]; actual: string }[] = [];
-    for (const p of presentLinks) {
-      const expectedSet = requiredLabelsByEndpoint.get(p.endpointKey);
-      if (!expectedSet || expectedSet.size === 0) continue;
-      const expected = Array.from(expectedSet);
-      if (!expected.includes(p.label)) {
-        const [x, y] = p.endpointKey.split("||");
-        labelWarnings.push({
-          pretty: `${x} — ${y}`,
-          expected,
-          actual: p.label || "(未入力)",
-        });
-      }
-    }
-
-    return {
-      enabled,
-      requiredEndpointKeys,
-      presentEndpointKeys,
-      missingPretty,
-      extraLinks,
-      labelWarnings,
-    };
+  const linkAssistLive = useMemo(() => {
+    return computeLinkAssistLive(objectAnswerPuml ?? "", objects, links);
   }, [objectAnswerPuml, objects, links]);
 
-  const linkRequiredCount = linkAssist.requiredEndpointKeys.size;
-  const linkMissingCount = linkAssist.missingPretty.length;
-  const linkMatchedCount = Math.max(0, linkRequiredCount - linkMissingCount);
-  const linkExtraCount = linkAssist.extraLinks.length;
+  // ライブ統計（Proceed警告に使う）
+  const objRequiredCountLive = objAssistLive.requiredCount;
+  const objMatchedCountLive = objAssistLive.matchedCount;
+  const objMissingCountLive = objAssistLive.missingCount;
+  const objExtraCountLive = objAssistLive.extraCount;
 
-  const linkHasExtraNow = linkAssist.enabled && linkExtraCount > 0;
-  const linkShowExtraError = linkChecked && linkHasExtraNow;
+  const linkRequiredCountLive = linkAssistLive.requiredCount;
+  const linkMatchedCountLive = linkAssistLive.matchedCount;
+  const linkMissingCountLive = linkAssistLive.missingCount;
+  const linkExtraCountLive = linkAssistLive.extraCount;
+
+  // ===== 診断スナップショット統計（UI表示と「候補を見る」に使う） =====
+  const objDiag = objDiagSnap;
+  const linkDiag = linkDiagSnap;
+
+  const objRequiredCount = objDiag?.requiredCount ?? 0;
+  const objMatchedCount = objDiag?.matchedCount ?? 0;
+  const objMissingCount = objDiag?.missingCount ?? 0;
+  const objExtraCount = objDiag?.extraCount ?? 0;
+  const objExtraCandidates = objDiag?.extraCandidates ?? [];
+
+  const linkRequiredCount = linkDiag?.requiredCount ?? 0;
+  const linkMatchedCount = linkDiag?.matchedCount ?? 0;
+  const linkMissingCount = linkDiag?.missingCount ?? 0;
+  const linkExtraCount = linkDiag?.extraCount ?? 0;
+  const linkExtraCandidates = linkDiag?.extraLinks ?? [];
+
+  const objHasExtraNow = objDiag?.enabled && objExtraCount > 0;
+  const objShowExtraError = objChecked && !!objHasExtraNow;
+
+  const linkHasExtraNow = linkDiag?.enabled && linkExtraCount > 0;
+  const linkShowExtraError = linkChecked && !!linkHasExtraNow;
 
   // ===== 「正答例と異なる◯◯を見る」ボタン：無効理由（ホバー表示用） =====
   const getObjRevealDisabledReason = () => {
-    if (!objChecked) return "まず『オブジェクトを診断する』を押してください。";
-    if (objAssist.extraBases.length === 0)
+    if (!objChecked || !objDiag) return "まず『オブジェクトを診断する』を押してください。";
+    if (objExtraCandidates.length === 0)
       return "正答例と異なる候補が見つからないため、表示するものがありません。";
-    if (objRevealAllDone)
-      return "候補はすべて表示しました。もう一度『オブジェクトを診断する』を押して、現在の状態を再確認してください。";
+    if (objRevealExtra >= objExtraCandidates.length) return "候補はすべて表示済みです。";
+    // 「次を見る」前だけ編集を要求（初回表示は許可）
+    if (objRevealExtra > 0 && !objDirtySinceHint)
+      return "次の候補を見る前に、オブジェクト図を一度修正してください。";
     return null;
   };
 
-  // ★リンクも同じ仕様（全件表示→再診断促し）
   const getLinkRevealDisabledReason = () => {
-    if (!linkChecked) return "まず『リンクを診断する』を押してください。";
-    if (linkAssist.extraLinks.length === 0)
+    if (!linkChecked || !linkDiag) return "まず『リンクを診断する』を押してください。";
+    if (linkExtraCandidates.length === 0)
       return "正答例と異なる候補が見つからないため、表示するものがありません。";
-    if (linkRevealAllDone)
-      return "候補はすべて表示しました。もう一度『リンクを診断する』を押して、現在の状態を再確認してください。";
+    if (linkRevealExtra >= linkExtraCandidates.length) return "候補はすべて表示済みです。";
+    if (linkRevealExtra > 0 && !linkDirtySinceHint)
+      return "次の候補を見る前に、リンク（端点/ラベル）を一度修正してください。";
     return null;
   };
 
@@ -796,37 +1001,45 @@ const ExperimentPage: React.FC = () => {
 
   // ===== オブジェクトアシスト操作 =====
   const handleObjDiagnose = () => {
+    const snap = computeObjAssistLive(objects, objectAnswerPuml ?? "", editingObjectId);
     setObjChecked(true);
-    setObjRevealAllDone(false);
+    setObjDiagSnap(snap);
     setObjRevealExtra(0);
     setObjDirtySinceHint(false);
   };
 
-  const handleObjRevealAllExtra = () => {
-    if (!objChecked) return alert("まず「オブジェクトを診断する」を押してください。");
-    if (objAssist.extraBases.length === 0) return;
+  const handleObjRevealNextExtra = () => {
+    if (!objChecked || !objDiagSnap) return alert("まず「オブジェクトを診断する」を押してください。");
+    if (objDiagSnap.extraCandidates.length === 0) return;
+    if (objRevealExtra > 0 && !objDirtySinceHint)
+      return alert("次の表示を見る前に、オブジェクト図を一度修正してください。");
+    if (objRevealExtra >= objDiagSnap.extraCandidates.length) return;
 
     setObjAssistCollapsed(false);
-    setObjRevealExtra(objAssist.extraBases.length); // 全件表示
-    setObjRevealAllDone(true); // 再度は診断を促す
+    setObjRevealExtra((c) => c + 1);
+    setObjDirtySinceHint(false);
     scrollObjAssistToBottom();
   };
 
-  // ===== リンクアシスト操作（★同じ仕様に変更） =====
+  // ===== リンクアシスト操作 =====
   const handleLinkDiagnose = () => {
+    const snap = computeLinkAssistLive(objectAnswerPuml ?? "", objects, links);
     setLinkChecked(true);
-    setLinkRevealAllDone(false);
+    setLinkDiagSnap(snap);
     setLinkRevealExtra(0);
     setLinkDirtySinceHint(false);
   };
 
-  const handleLinkRevealAllExtra = () => {
-    if (!linkChecked) return alert("まず「リンクを診断する」を押してください。");
-    if (linkAssist.extraLinks.length === 0) return;
+  const handleLinkRevealNextExtra = () => {
+    if (!linkChecked || !linkDiagSnap) return alert("まず「リンクを診断する」を押してください。");
+    if (linkDiagSnap.extraLinks.length === 0) return;
+    if (linkRevealExtra > 0 && !linkDirtySinceHint)
+      return alert("次の表示を見る前に、リンク（端点/ラベル）を一度修正してください。");
+    if (linkRevealExtra >= linkDiagSnap.extraLinks.length) return;
 
     setLinkAssistCollapsed(false);
-    setLinkRevealExtra(linkAssist.extraLinks.length); // 全件表示
-    setLinkRevealAllDone(true); // 再度は診断を促す
+    setLinkRevealExtra((c) => c + 1);
+    setLinkDirtySinceHint(false);
     scrollLinkAssistToBottom();
   };
 
@@ -837,7 +1050,6 @@ const ExperimentPage: React.FC = () => {
     setObjects((prev) => [...prev, newObj]);
     setSelectedObjectId(id);
     setSelectedLinkId(null);
-    setEditingObjectId(null);
     markMeaningfulChange(true, true);
   };
 
@@ -862,6 +1074,7 @@ const ExperimentPage: React.FC = () => {
       slots: [...selectedObject.slots, { key: "", value: "" }],
     };
     setObjects((prev) => prev.map((o) => (o.id === selectedObject.id ? updated : o)));
+    markMeaningfulChange(true, false);
   };
 
   const handleUpdateSlot = (index: number, partial: Partial<Slot>) => {
@@ -870,6 +1083,7 @@ const ExperimentPage: React.FC = () => {
     setObjects((prev) =>
       prev.map((o) => (o.id === selectedObject.id ? { ...o, slots: newSlots } : o))
     );
+    markMeaningfulChange(true, false);
   };
 
   const handleDeleteSlot = (index: number) => {
@@ -878,6 +1092,7 @@ const ExperimentPage: React.FC = () => {
     setObjects((prev) =>
       prev.map((o) => (o.id === selectedObject.id ? { ...o, slots: newSlots } : o))
     );
+    markMeaningfulChange(true, false);
   };
 
   // ===== リンク操作 =====
@@ -942,23 +1157,12 @@ const ExperimentPage: React.FC = () => {
     setIssues(null);
     setRelationHints([]);
     markMeaningfulChange(true, true);
-
-    // アシスト関連もリセット
-    setObjChecked(false);
-    setObjRevealExtra(0);
-    setObjDirtySinceHint(false);
-    setObjRevealAllDone(false);
-
-    setLinkChecked(false);
-    setLinkRevealExtra(0);
-    setLinkDirtySinceHint(false);
-    setLinkRevealAllDone(false);
   };
 
   // ===== 進む前の警告（学習者向け最適化） =====
+  // ※ ここは「現在の状態」を元にしたいので、ライブ比較を使う
   const buildProceedWarningMessage = () => {
     const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
-
     if (!enabled) return { needsConfirm: false, message: "" };
 
     const parts: string[] = [];
@@ -968,18 +1172,18 @@ const ExperimentPage: React.FC = () => {
 
     // --- オブジェクト ---
     if (!objChecked) {
-      if (objMissingCount > 0 || objExtraCount > 0) weak = true;
+      if (objMissingCountLive > 0 || objExtraCountLive > 0) weak = true;
     } else {
-      if (objExtraCount > 0) strong = true;
-      if (objMissingCount > 0) medium = true;
+      if (objExtraCountLive > 0) strong = true;
+      if (objMissingCountLive > 0) medium = true;
     }
 
     // --- リンク ---
     if (!linkChecked) {
-      if (linkMissingCount > 0 || linkExtraCount > 0) weak = true;
+      if (linkMissingCountLive > 0 || linkExtraCountLive > 0) weak = true;
     } else {
-      if (linkExtraCount > 0) strong = true;
-      if (linkMissingCount > 0) medium = true;
+      if (linkExtraCountLive > 0) strong = true;
+      if (linkMissingCountLive > 0) medium = true;
     }
 
     if (!strong && !medium && !weak) return { needsConfirm: false, message: "" };
@@ -995,10 +1199,10 @@ const ExperimentPage: React.FC = () => {
 
     parts.push("■ 現在の状態（数のみ）");
     parts.push(
-      `・オブジェクト：カバー ${objMatchedCount}/${objRequiredCount} ／ 未カバー ${objMissingCount}/${objRequiredCount} ／ 正答例と異なる候補 ${objExtraCount}`
+      `・オブジェクト：カバー ${objMatchedCountLive}/${objRequiredCountLive} ／ 未カバー ${objMissingCountLive}/${objRequiredCountLive} ／ 正答例と異なる候補 ${objExtraCountLive}`
     );
     parts.push(
-      `・リンク：カバー ${linkMatchedCount}/${linkRequiredCount} ／ 未カバー ${linkMissingCount}/${linkRequiredCount} ／ 正答例と異なる候補 ${linkExtraCount}`
+      `・リンク：カバー ${linkMatchedCountLive}/${linkRequiredCountLive} ／ 未カバー ${linkMissingCountLive}/${linkRequiredCountLive} ／ 正答例と異なる候補 ${linkExtraCountLive}`
     );
     parts.push("");
 
@@ -1022,11 +1226,11 @@ const ExperimentPage: React.FC = () => {
     if (!objChecked || !linkChecked) {
       parts.push("・「オブジェクトを診断する」「リンクを診断する」を押して、状態を確認してください。");
     }
-    if (objChecked && objExtraCount > 0) {
-      parts.push("・「正答例と異なるオブジェクトを見る」で、候補を根拠と照らして確認してください。");
+    if (objChecked && objExtraCountLive > 0) {
+      parts.push("・「正答例と異なるオブジェクトを見る」で候補を根拠と照らして確認してください。");
     }
-    if (linkChecked && linkExtraCount > 0) {
-      parts.push("・「正答例と異なるリンクを見る」で、候補を根拠と照らして確認してください。");
+    if (linkChecked && linkExtraCountLive > 0) {
+      parts.push("・「正答例と異なるリンクを見る」で候補を根拠と照らして確認してください。");
     }
     parts.push("");
 
@@ -1042,7 +1246,9 @@ const ExperimentPage: React.FC = () => {
   // ===== クラス図編集ページへ遷移（警告＋保存） =====
   const handleConvertAndOpenClassEditor = async () => {
     if (hasUnnamedObject) {
-      alert("オブジェクト名が未入力のものがあります。\nすべてのオブジェクトに名前を入力してください。");
+      alert(
+        "オブジェクト名が未入力のものがあります。\nすべてのオブジェクトに名前を入力してください。"
+      );
       return;
     }
 
@@ -1127,7 +1333,6 @@ const ExperimentPage: React.FC = () => {
   // ===== オブジェクト図作成問題文のハイライト =====
   const highlightedObjectProblem = useMemo<React.ReactNode>(() => {
     const text = objectProblemText || "";
-
     const tokens: { text: string; kind: "object" | "link" }[] = [];
 
     const objName = selectedObject?.name?.trim();
@@ -1287,17 +1492,17 @@ const ExperimentPage: React.FC = () => {
             >
               <AssistHeader
                 title="OD作成アシスト（オブジェクト）"
-                enabled={objAssist.enabled}
+                enabled={objAssistLive.enabled}
                 collapsed={objAssistCollapsed}
                 onToggle={() => setObjAssistCollapsed((v) => !v)}
                 rightText={
-                  objAssist.enabled && objChecked
+                  objAssistLive.enabled && objChecked && objDiag
                     ? `カバー：${objMatchedCount}/${objRequiredCount}　未カバー：${objMissingCount}/${objRequiredCount}　正答例と異なる候補：${objExtraCount}`
                     : undefined
                 }
               />
 
-              {!objAssistCollapsed && objAssist.enabled && (
+              {!objAssistCollapsed && objAssistLive.enabled && (
                 <div className="p-2">
                   <div className="flex flex-wrap items-center gap-2">
                     <button
@@ -1310,7 +1515,7 @@ const ExperimentPage: React.FC = () => {
                     <div className="relative inline-block group">
                       <button
                         className="px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                        onClick={handleObjRevealAllExtra}
+                        onClick={handleObjRevealNextExtra}
                         disabled={objRevealDisabled}
                         aria-describedby={objRevealDisabled ? "obj-reveal-disabled-tip" : undefined}
                       >
@@ -1331,34 +1536,34 @@ const ExperimentPage: React.FC = () => {
                     </div>
                   </div>
 
-                  {!objChecked ? (
+                  {!objChecked || !objDiag ? (
                     <div className="mt-2 text-[11px] text-slate-600">
-                      ※ 「オブジェクトを診断する」で、正答例に対するカバー/未カバーを確認できます
+                      ※ 「オブジェクトを診断する」で、正答例に対するカバー/未カバー/候補（スロットキー含む）を確認できます
                     </div>
                   ) : (
                     <div className="mt-2 text-[11px] text-slate-600">
                       <div>
                         カバー：<span className="font-semibold">{objMatchedCount}</span>/
-                        {objRequiredCount}　未カバー：
-                        <span className="font-semibold">{objMissingCount}</span>/
+                        {objRequiredCount}　
+                        未カバー：<span className="font-semibold">{objMissingCount}</span>/
                         {objRequiredCount}
                       </div>
                       <div className="mt-1 text-slate-500">
-                        ※ 未カバーは「正答例にあるのに入力にない」ものの数です（具体名は表示しません）
+                        ※ 未カバーは「正答例の期待（オブジェクト名＋スロットキー集合）が入力にない」数です（具体名は表示しません）
                       </div>
                     </div>
                   )}
 
-                  {objChecked && objMatchedCount === objRequiredCount && objExtraCount === 0 && (
+                  {objChecked && objDiag && objMatchedCount === objRequiredCount && objExtraCount === 0 && (
                     <div className="mt-2 text-[11px] text-emerald-700 font-semibold">
-                      正答例と一致しています（オブジェクト名の観点）
+                      正答例と一致しています（オブジェクト名＋スロットキーの観点）
                     </div>
                   )}
 
-                  {objChecked && objShowExtraError && (
+                  {objChecked && objDiag && objShowExtraError && (
                     <div className="mt-2 border border-red-300 bg-red-50 text-red-700 text-[11px] rounded p-2">
                       <div className="font-semibold">
-                        要確認：正答例にない可能性のあるオブジェクトがあります（候補：{objExtraCount}）
+                        要確認：正答例と異なる可能性のあるオブジェクトがあります（候補：{objExtraCount}）
                       </div>
                       <ul className="mt-1 list-disc pl-5 space-y-0.5">
                         <li>これは「間違い確定」ではありません。</li>
@@ -1372,25 +1577,24 @@ const ExperimentPage: React.FC = () => {
                     </div>
                   )}
 
-                  {objChecked && objRevealExtra > 0 && (
+                  {objChecked && objDiag && objRevealExtra > 0 && (
                     <div className="mt-3 text-[11px]">
                       <div className="font-semibold text-slate-700">
-                        正答例と異なる可能性（表示：
-                        {Math.min(objRevealExtra, objAssist.extraBases.length)}/{objAssist.extraBases.length}）
+                        正答例と異なる可能性
                       </div>
                       <div className="mt-1 flex flex-wrap gap-1">
-                        {objAssist.extraBases.slice(0, objRevealExtra).map((b) => (
-                          <span key={b} className="px-2 py-0.5 rounded border bg-white text-red-700">
-                            {b}
+                        {objExtraCandidates.slice(0, objRevealExtra).map((c) => (
+                          <span
+                            key={c.sig}
+                            className="px-2 py-0.5 rounded border bg-white text-red-700"
+                          >
+                            {c.chipLabel}
                           </span>
                         ))}
                       </div>
-
-                      {objRevealAllDone && (
-                        <div className="mt-2 text-[11px] text-slate-600">
-                          ※ いま表示している候補は「診断時点」のものです。次は「オブジェクトを診断する」を押して更新してください。
-                        </div>
-                      )}
+                      <div className="mt-1 text-[10px] text-slate-500">
+                        ※ この一覧は「診断した時点」の結果です。修正後は、もう一度「オブジェクトを診断する」を押して再比較してください。
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1422,7 +1626,9 @@ const ExperimentPage: React.FC = () => {
                       }}
                     >
                       <span className="truncate">{o.name || "(無名オブジェクト)"}</span>
-                      <span className="text-[10px] text-slate-500 ml-2">{o.slots.length} スロット</span>
+                      <span className="text-[10px] text-slate-500 ml-2">
+                        {o.slots.length} スロット
+                      </span>
                     </button>
                   );
                 })}
@@ -1439,7 +1645,10 @@ const ExperimentPage: React.FC = () => {
                   <div className="flex flex-col gap-2">
                     <div>
                       <div className="flex items-center">
-                        <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.objectName}>
+                        <label
+                          className="block text-[11px] font-semibold mb-1"
+                          title={TOOLTIP.objectName}
+                        >
                           オブジェクト名
                         </label>
                         <HelpBadge title={TOOLTIP.objectName} />
@@ -1448,7 +1657,9 @@ const ExperimentPage: React.FC = () => {
                       <input
                         className="w-full border rounded px-2 py-1 text-xs"
                         value={selectedObject.name}
-                        onChange={(e) => handleUpdateObjectName(selectedObject.id, e.target.value)}
+                        onChange={(e) =>
+                          handleUpdateObjectName(selectedObject.id, e.target.value)
+                        }
                         onFocus={() => setEditingObjectId(selectedObject.id)}
                         onBlur={() => setEditingObjectId(null)}
                         placeholder="例）学生1、授業A など"
@@ -1477,17 +1688,24 @@ const ExperimentPage: React.FC = () => {
                       </div>
 
                       {selectedObject.slots.length === 0 && (
-                        <div className="text-[11px] text-slate-500 mb-1">例）スロット名：年齢、値：19 など</div>
+                        <div className="text-[11px] text-slate-500 mb-1">
+                          例）スロット名：年齢、値：19 など
+                        </div>
                       )}
 
                       <div className="flex flex-col gap-1">
                         {selectedObject.slots.map((s, idx) => (
-                          <div key={idx} className="border rounded px-2 py-1 bg-white flex flex-col gap-2">
+                          <div
+                            key={idx}
+                            className="border rounded px-2 py-1 bg-white flex flex-col gap-2"
+                          >
                             <div className="flex items-center gap-2">
                               <input
                                 className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                                 value={s.key}
-                                onChange={(e) => handleUpdateSlot(idx, { key: e.target.value })}
+                                onChange={(e) =>
+                                  handleUpdateSlot(idx, { key: e.target.value })
+                                }
                                 placeholder="スロット名（例：年齢）"
                                 title={TOOLTIP.slotKey}
                               />
@@ -1495,7 +1713,9 @@ const ExperimentPage: React.FC = () => {
                               <input
                                 className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                                 value={s.value}
-                                onChange={(e) => handleUpdateSlot(idx, { value: e.target.value })}
+                                onChange={(e) =>
+                                  handleUpdateSlot(idx, { value: e.target.value })
+                                }
                                 placeholder={'値（例：19、"文学" など）'}
                                 title={TOOLTIP.slotValue}
                               />
@@ -1544,7 +1764,11 @@ const ExperimentPage: React.FC = () => {
                 </div>
               )}
               {objectPreviewUrl && (
-                <iframe src={objectPreviewUrl} className="w-full h-full" title="オブジェクト図プレビュー" />
+                <iframe
+                  src={objectPreviewUrl}
+                  className="w-full h-full"
+                  title="オブジェクト図プレビュー"
+                />
               )}
             </div>
           </div>
@@ -1574,17 +1798,17 @@ const ExperimentPage: React.FC = () => {
             >
               <AssistHeader
                 title="OD作成アシスト（リンク）"
-                enabled={linkAssist.enabled}
+                enabled={linkAssistLive.enabled}
                 collapsed={linkAssistCollapsed}
                 onToggle={() => setLinkAssistCollapsed((v) => !v)}
                 rightText={
-                  linkAssist.enabled && linkChecked
+                  linkAssistLive.enabled && linkChecked && linkDiag
                     ? `カバー：${linkMatchedCount}/${linkRequiredCount}　未カバー：${linkMissingCount}/${linkRequiredCount}　正答例と異なる候補：${linkExtraCount}`
                     : undefined
                 }
               />
 
-              {!linkAssistCollapsed && linkAssist.enabled && (
+              {!linkAssistCollapsed && linkAssistLive.enabled && (
                 <div className="p-2">
                   <div className="flex flex-wrap items-center gap-2">
                     <button
@@ -1597,7 +1821,7 @@ const ExperimentPage: React.FC = () => {
                     <div className="relative inline-block group">
                       <button
                         className="px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                        onClick={handleLinkRevealAllExtra}
+                        onClick={handleLinkRevealNextExtra}
                         disabled={linkRevealDisabled}
                         aria-describedby={linkRevealDisabled ? "link-reveal-disabled-tip" : undefined}
                       >
@@ -1618,15 +1842,17 @@ const ExperimentPage: React.FC = () => {
                     </div>
                   </div>
 
-                  {!linkChecked ? (
+                  {!linkChecked || !linkDiag ? (
                     <div className="mt-2 text-[11px] text-slate-600">
                       ※ 「リンクを診断する」で、正答例に対するカバー/未カバーを確認できます（端点のみ）
                     </div>
                   ) : (
                     <div className="mt-2 text-[11px] text-slate-600">
                       <div>
-                        カバー：<span className="font-semibold">{linkMatchedCount}</span>/{linkRequiredCount}　
-                        未カバー：<span className="font-semibold">{linkMissingCount}</span>/{linkRequiredCount}
+                        カバー：<span className="font-semibold">{linkMatchedCount}</span>/
+                        {linkRequiredCount}　
+                        未カバー：<span className="font-semibold">{linkMissingCount}</span>/
+                        {linkRequiredCount}
                       </div>
                       <div className="mt-1 text-slate-500">
                         ※ 未カバーは「正答例にあるのに入力にない」端点ペアの数です（具体名は表示しません）
@@ -1634,13 +1860,13 @@ const ExperimentPage: React.FC = () => {
                     </div>
                   )}
 
-                  {linkChecked && linkMatchedCount === linkRequiredCount && linkExtraCount === 0 && (
+                  {linkChecked && linkDiag && linkMatchedCount === linkRequiredCount && linkExtraCount === 0 && (
                     <div className="mt-2 text-[11px] text-emerald-700 font-semibold">
                       正答例と一致しています（リンク端点の観点）
                     </div>
                   )}
 
-                  {linkChecked && linkShowExtraError && (
+                  {linkChecked && linkDiag && linkShowExtraError && (
                     <div className="mt-2 border border-red-300 bg-red-50 text-red-700 text-[11px] rounded p-2">
                       <div className="font-semibold">
                         要確認：正答例にない可能性のあるリンク（端点）があります（候補：{linkExtraCount}）
@@ -1657,40 +1883,43 @@ const ExperimentPage: React.FC = () => {
                     </div>
                   )}
 
-                  {linkChecked && linkRevealExtra > 0 && (
+                  {linkChecked && linkDiag && linkRevealExtra > 0 && (
                     <div className="mt-3 text-[11px]">
                       <div className="font-semibold text-slate-700">
-                        正答例と異なる可能性（表示：
-                        {Math.min(linkRevealExtra, linkAssist.extraLinks.length)}/{linkAssist.extraLinks.length}）
+                        正答例と異なる可能性
                       </div>
                       <div className="mt-1 flex flex-wrap gap-1">
-                        {linkAssist.extraLinks.slice(0, linkRevealExtra).map((p) => (
-                          <span key={p.fullKey} className="px-2 py-0.5 rounded border bg-white text-red-700">
+                        {linkExtraCandidates.slice(0, linkRevealExtra).map((p) => (
+                          <span
+                            key={p.fullKey}
+                            className="px-2 py-0.5 rounded border bg-white text-red-700"
+                          >
                             {p.pretty}
                           </span>
                         ))}
                       </div>
-
-                      {linkRevealAllDone && (
-                        <div className="mt-2 text-[11px] text-slate-600">
-                          ※ いま表示している候補は「診断時点」のものです。次は「リンクを診断する」を押して更新してください。
-                        </div>
-                      )}
+                      <div className="mt-1 text-[10px] text-slate-500">
+                        ※ この一覧は「診断した時点」の結果です。修正後は、もう一度「リンクを診断する」を押して再比較してください。
+                      </div>
                     </div>
                   )}
 
-                  {linkChecked && linkAssist.labelWarnings.length > 0 && (
+                  {linkChecked && linkDiag && linkDiag.labelWarnings.length > 0 && (
                     <div className="mt-3 border border-amber-300 bg-amber-50 text-amber-900 text-[11px] rounded p-2">
-                      <div className="font-semibold">注意：リンクラベルが正答例と異なる可能性があります</div>
+                      <div className="font-semibold">
+                        注意：リンクラベルが正答例と異なる可能性があります
+                      </div>
                       <div className="mt-1 space-y-1">
-                        {linkAssist.labelWarnings.slice(0, 6).map((w, idx) => (
+                        {linkDiag.labelWarnings.slice(0, 6).map((w, idx) => (
                           <div key={idx}>
                             <span className="font-semibold">{w.pretty}</span>{" "}
                             期待：{w.expected.join(" / ")} ／ 入力：{w.actual}
                           </div>
                         ))}
-                        {linkAssist.labelWarnings.length > 6 && (
-                          <div className="text-amber-800">…他 {linkAssist.labelWarnings.length - 6} 件</div>
+                        {linkDiag.labelWarnings.length > 6 && (
+                          <div className="text-amber-800">
+                            …他 {linkDiag.labelWarnings.length - 6} 件
+                          </div>
                         )}
                       </div>
                     </div>
@@ -1747,7 +1976,10 @@ const ExperimentPage: React.FC = () => {
                   <div className="flex flex-col gap-2 text-xs">
                     <div>
                       <div className="flex items-center">
-                        <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.linkEndpoints}>
+                        <label
+                          className="block text-[11px] font-semibold mb-1"
+                          title={TOOLTIP.linkEndpoints}
+                        >
                           リンク（関係を持つオブジェクト）
                         </label>
                         <HelpBadge title={TOOLTIP.linkEndpoints} />
@@ -1757,7 +1989,9 @@ const ExperimentPage: React.FC = () => {
                         <select
                           className="border rounded px-1 py-0.5 text-[11px]"
                           value={selectedLink.from}
-                          onChange={(e) => handleUpdateLink(selectedLink.id, { from: e.target.value })}
+                          onChange={(e) =>
+                            handleUpdateLink(selectedLink.id, { from: e.target.value })
+                          }
                           title={TOOLTIP.linkEndpoints}
                         >
                           {objects.map((o) => (
@@ -1770,7 +2004,9 @@ const ExperimentPage: React.FC = () => {
                         <select
                           className="border rounded px-1 py-0.5 text-[11px]"
                           value={selectedLink.to}
-                          onChange={(e) => handleUpdateLink(selectedLink.id, { to: e.target.value })}
+                          onChange={(e) =>
+                            handleUpdateLink(selectedLink.id, { to: e.target.value })
+                          }
                           title={TOOLTIP.linkEndpoints}
                         >
                           {objects.map((o) => (
@@ -1784,7 +2020,10 @@ const ExperimentPage: React.FC = () => {
 
                     <div>
                       <div className="flex items-center">
-                        <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.linkLabel}>
+                        <label
+                          className="block text-[11px] font-semibold mb-1"
+                          title={TOOLTIP.linkLabel}
+                        >
                           リンクラベル（関係を説明する動詞）
                         </label>
                         <HelpBadge title={TOOLTIP.linkLabel} />
@@ -1793,7 +2032,9 @@ const ExperimentPage: React.FC = () => {
                       <input
                         className="w-full border rounded px-2 py-1 text-[11px]"
                         value={selectedLink.label}
-                        onChange={(e) => handleUpdateLink(selectedLink.id, { label: e.target.value })}
+                        onChange={(e) =>
+                          handleUpdateLink(selectedLink.id, { label: e.target.value })
+                        }
                         placeholder="例）履修する、担当する など"
                         title={TOOLTIP.linkLabel}
                       />
