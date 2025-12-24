@@ -189,6 +189,24 @@ type LinkSig = {
   pretty: string; // display
 };
 
+
+type ObjAssistSnapshot = {
+  enabled: boolean;
+  requiredBases: string[];
+  presentBases: string[];
+  missingBases: string[];
+  extraBases: string[];
+};
+
+type LinkAssistSnapshot = {
+  enabled: boolean;
+  requiredEndpointKeys: string[];
+  presentEndpointKeys: string[];
+  missingPretty: string[];
+  extraLinks: LinkSig[];
+  labelWarnings: { pretty: string; expected: string[]; actual: string }[];
+};
+
 const makeEndpointKey = (aBase: string, bBase: string) => {
   const x = aBase <= bBase ? aBase : bBase;
   const y = aBase <= bBase ? bBase : aBase;
@@ -449,6 +467,9 @@ const [classZoom, setClassZoom] = useState(1);
   const [objRevealExtra, setObjRevealExtra] = useState(0);
   const [objDirtySinceHint, setObjDirtySinceHint] = useState(false);
 
+  const [objAssistFrozen, setObjAssistFrozen] = useState<ObjAssistSnapshot | null>(null);
+  const [linkAssistFrozen, setLinkAssistFrozen] = useState<LinkAssistSnapshot | null>(null);
+
   // ===== アシスト状態（リンク） =====
   const [linkChecked, setLinkChecked] = useState(false); // ← 診断済みフラグとして使う
   const [linkRevealExtra, setLinkRevealExtra] = useState(0);
@@ -676,24 +697,38 @@ const [classZoom, setClassZoom] = useState(1);
     return { enabled, requiredBases, presentBases, missingBases, extraBases };
   }, [objects, objectAnswerPuml, editingObjectId]);
 
-  const objRequiredCount = objAssist.requiredBases.size;
-  const objMissingCount = objAssist.missingBases.length;
-  const objMatchedCount = Math.max(0, objRequiredCount - objMissingCount);
-  const objExtraCount = objAssist.extraBases.length;
+  // 現在の診断結果（ライブ）
+  // NOTE: ここでは objAssistView を参照しない（TDZ: 初期化前参照を防ぐ）
+  const objAssistLiveSnap = useMemo<ObjAssistSnapshot>(() => {
+    return {
+      enabled: objAssist.enabled,
+      requiredBases: Array.from(objAssist.requiredBases),
+      presentBases: Array.from(objAssist.presentBases),
+      missingBases: objAssist.missingBases,
+      extraBases: objAssist.extraBases,
+    };
+  }, [objAssist]);
 
-  const objHasExtraNow = objAssist.enabled && objExtraCount > 0;
+  // 「正答例と異なるオブジェクトを見る」を押した後は、その時点の診断結果を固定する
+  const objAssistView = objChecked && objAssistFrozen ? objAssistFrozen : objAssistLiveSnap;
+
+
+  const objRequiredCount = objAssistView.requiredBases.length;
+  const objMissingCount = objAssistView.missingBases.length;
+  const objMatchedCount = Math.max(0, objRequiredCount - objMissingCount);
+  const objExtraCount = objAssistView.extraBases.length;
+
+  const objHasExtraNow = objAssistView.enabled && objExtraCount > 0;
   const objShowExtraError = objChecked && objHasExtraNow;
 
   const objRevealDisabledReason = useMemo(() => {
     if (!objChecked) return "まず「オブジェクトを診断する」を押してください。";
-    if (objAssist.extraBases.length === 0)
-      return "正答例と異なる候補がないため表示できません。";
-    if (objRevealExtra >= objAssist.extraBases.length)
-      return "候補はすべて表示済みです。";
+    if (objExtraCount === 0) return "正答例と異なる候補がないため表示できません。";
+    if (objRevealExtra >= objExtraCount) return "候補はすべて表示済みです。";
     if (!objDirtySinceHint)
       return "次の候補を見る前に、オブジェクト図を一度修正してください。";
     return null;
-  }, [objChecked, objAssist.extraBases.length, objRevealExtra, objDirtySinceHint]);
+  }, [objChecked, objExtraCount, objRevealExtra, objDirtySinceHint]);
 
   const objRevealDisabled = objRevealDisabledReason !== null;
 
@@ -779,41 +814,63 @@ const [classZoom, setClassZoom] = useState(1);
     };
   }, [objectAnswerPuml, objects, links]);
 
-  const linkRequiredCount = linkAssist.requiredEndpointKeys.size;
-  const linkMissingCount = linkAssist.missingPretty.length;
-  const linkMatchedCount = Math.max(0, linkRequiredCount - linkMissingCount);
-  const linkExtraCount = linkAssist.extraLinks.length;
+  // 現在の診断結果（ライブ）
+  // NOTE: ここでは linkAssistView を参照しない（TDZ: 初期化前参照を防ぐ）
+  const linkAssistLiveSnap = useMemo<LinkAssistSnapshot>(() => {
+    return {
+      enabled: linkAssist.enabled,
+      requiredEndpointKeys: Array.from(linkAssist.requiredEndpointKeys),
+      presentEndpointKeys: Array.from(linkAssist.presentEndpointKeys),
+      missingPretty: linkAssist.missingPretty,
+      extraLinks: linkAssist.extraLinks,
+      labelWarnings: linkAssist.labelWarnings,
+    };
+  }, [linkAssist]);
 
-  const linkHasExtraNow = linkAssist.enabled && linkExtraCount > 0;
+  // 「正答例と異なるリンクを見る」を押した後は、その時点の診断結果を固定する
+  const linkAssistView =
+    linkChecked && linkAssistFrozen ? linkAssistFrozen : linkAssistLiveSnap;
+
+
+  const linkRequiredCount = linkAssistView.requiredEndpointKeys.length;
+  const linkMissingCount = linkAssistView.missingPretty.length;
+  const linkMatchedCount = Math.max(0, linkRequiredCount - linkMissingCount);
+  const linkExtraCount = linkAssistView.extraLinks.length;
+
+  const linkHasExtraNow = linkAssistView.enabled && linkExtraCount > 0;
   const linkShowExtraError = linkChecked && linkHasExtraNow;
 
   const linkRevealDisabledReason = useMemo(() => {
     if (!linkChecked) return "まず「リンクを診断する」を押してください。";
-    if (linkAssist.extraLinks.length === 0)
-      return "正答例と異なる候補がないため表示できません。";
-    if (linkRevealExtra >= linkAssist.extraLinks.length)
-      return "候補はすべて表示済みです。";
+    if (linkExtraCount === 0) return "正答例と異なる候補がないため表示できません。";
+    if (linkRevealExtra >= linkExtraCount) return "候補はすべて表示済みです。";
     if (!linkDirtySinceHint)
       return "次の候補を見る前に、リンク（端点/ラベル）を一度修正してください。";
     return null;
-  }, [
-    linkChecked,
-    linkAssist.extraLinks.length,
-    linkRevealExtra,
-    linkDirtySinceHint,
-  ]);
+  }, [linkChecked, linkExtraCount, linkRevealExtra, linkDirtySinceHint]);
 
   const linkRevealDisabled = linkRevealDisabledReason !== null;
 
   // ===== オブジェクトアシスト操作 =====
-  const handleObjDiagnose = () => setObjChecked(true);
+  const handleObjDiagnose = () => {
+    // 再診断：表示固定を解除し、最新状態で再判定できるようにする
+    setObjChecked(true);
+    setObjAssistFrozen(null);
+    setObjRevealExtra(0);
+    setObjDirtySinceHint(true); // 最初の開示はそのまま見られる
+  };
 
   const handleObjRevealNextExtra = () => {
     if (!objChecked) return alert("まず「オブジェクトを診断する」を押してください。");
-    if (objAssist.extraBases.length === 0) return;
+
+    // 最初に「見る」を押した時点の診断結果を固定（以降は編集してもここは動かない）
+    const snap = objAssistFrozen ?? objAssistLiveSnap;
+    if (!objAssistFrozen) setObjAssistFrozen(snap);
+
+    if (snap.extraBases.length === 0) return;
     if (!objDirtySinceHint)
       return alert("次の表示を見る前に、オブジェクト図を一度修正してください。");
-    if (objRevealExtra >= objAssist.extraBases.length) return;
+    if (objRevealExtra >= snap.extraBases.length) return;
 
     setObjAssistCollapsed(false);
     setObjRevealExtra((c) => c + 1);
@@ -822,14 +879,25 @@ const [classZoom, setClassZoom] = useState(1);
   };
 
   // ===== リンクアシスト操作 =====
-  const handleLinkDiagnose = () => setLinkChecked(true);
+  const handleLinkDiagnose = () => {
+    // 再診断：表示固定を解除し、最新状態で再判定できるようにする
+    setLinkChecked(true);
+    setLinkAssistFrozen(null);
+    setLinkRevealExtra(0);
+    setLinkDirtySinceHint(true); // 最初の開示はそのまま見られる
+  };
 
   const handleLinkRevealNextExtra = () => {
     if (!linkChecked) return alert("まず「リンクを診断する」を押してください。");
-    if (linkAssist.extraLinks.length === 0) return;
+
+    // 最初に「見る」を押した時点の診断結果を固定（以降は編集してもここは動かない）
+    const snap = linkAssistFrozen ?? linkAssistLiveSnap;
+    if (!linkAssistFrozen) setLinkAssistFrozen(snap);
+
+    if (snap.extraLinks.length === 0) return;
     if (!linkDirtySinceHint)
       return alert("次の表示を見る前に、オブジェクト図を一度修正してください。");
-    if (linkRevealExtra >= linkAssist.extraLinks.length) return;
+    if (linkRevealExtra >= snap.extraLinks.length) return;
 
     setLinkAssistCollapsed(false);
     setLinkRevealExtra((c) => c + 1);
@@ -1301,17 +1369,17 @@ const [classZoom, setClassZoom] = useState(1);
             >
               <AssistHeader
                 title="OD作成アシスト（オブジェクト）"
-                enabled={objAssist.enabled}
+                enabled={objAssistView.enabled}
                 collapsed={objAssistCollapsed}
                 onToggle={() => setObjAssistCollapsed((v) => !v)}
                 rightText={
-                  objAssist.enabled && objChecked
+                  objAssistView.enabled && objChecked
                     ? `カバー：${objMatchedCount}/${objRequiredCount}　未カバー：${objMissingCount}/${objRequiredCount}　正答例と異なる候補：${objExtraCount}`
                     : undefined
                 }
               />
 
-              {!objAssistCollapsed && objAssist.enabled && (
+              {!objAssistCollapsed && objAssistView.enabled && (
                 <div className="p-2">
                   <div className="flex flex-wrap items-center gap-2">
                     <button
@@ -1374,7 +1442,7 @@ const [classZoom, setClassZoom] = useState(1);
 
                   {objChecked && objMatchedCount === objRequiredCount && objExtraCount === 0 && (
                     <div className="mt-2 text-[11px] text-emerald-700 font-semibold">
-                      正答例と一致しています（オブジェクト名の観点）
+                      正答例と一致しています
                     </div>
                   )}
 
@@ -1398,12 +1466,12 @@ const [classZoom, setClassZoom] = useState(1);
                   {objChecked && objRevealExtra > 0 && (
                     <div className="mt-3 text-[11px]">
                       <div className="font-semibold text-slate-700">
-                        正答例と異なる可能性（開示済み：
-                        {Math.min(objRevealExtra, objAssist.extraBases.length)}/
-                        {objAssist.extraBases.length}）
+                        正答例と異なる可能性
+                        {Math.min(objRevealExtra, objAssistView.extraBases.length)}/
+                        {objAssistView.extraBases.length}）
                       </div>
                       <div className="mt-1 flex flex-wrap gap-1">
-                        {objAssist.extraBases.slice(0, objRevealExtra).map((b) => (
+                        {objAssistView.extraBases.slice(0, objRevealExtra).map((b) => (
                           <span
                             key={b}
                             className="px-2 py-0.5 rounded border bg-white text-red-700"
@@ -1645,17 +1713,17 @@ const [classZoom, setClassZoom] = useState(1);
             >
               <AssistHeader
                 title="OD作成アシスト（リンク）"
-                enabled={linkAssist.enabled}
+                enabled={linkAssistView.enabled}
                 collapsed={linkAssistCollapsed}
                 onToggle={() => setLinkAssistCollapsed((v) => !v)}
                 rightText={
-                  linkAssist.enabled && linkChecked
+                  linkAssistView.enabled && linkChecked
                     ? `カバー：${linkMatchedCount}/${linkRequiredCount}　未カバー：${linkMissingCount}/${linkRequiredCount}　正答例と異なる候補：${linkExtraCount}`
                     : undefined
                 }
               />
 
-              {!linkAssistCollapsed && linkAssist.enabled && (
+              {!linkAssistCollapsed && linkAssistView.enabled && (
                 <div className="p-2">
                   <div className="flex flex-wrap items-center gap-2">
                     <button
@@ -1743,11 +1811,11 @@ const [classZoom, setClassZoom] = useState(1);
                     <div className="mt-3 text-[11px]">
                       <div className="font-semibold text-slate-700">
                         正答例と異なる可能性（開示済み：
-                        {Math.min(linkRevealExtra, linkAssist.extraLinks.length)}/
-                        {linkAssist.extraLinks.length}）
+                        {Math.min(linkRevealExtra, linkAssistView.extraLinks.length)}/
+                        {linkAssistView.extraLinks.length}）
                       </div>
                       <div className="mt-1 flex flex-wrap gap-1">
-                        {linkAssist.extraLinks.slice(0, linkRevealExtra).map((p) => (
+                        {linkAssistView.extraLinks.slice(0, linkRevealExtra).map((p) => (
                           <span
                             key={p.fullKey}
                             className="px-2 py-0.5 rounded border bg-white text-red-700"
@@ -1759,21 +1827,21 @@ const [classZoom, setClassZoom] = useState(1);
                     </div>
                   )}
 
-                  {linkChecked && linkAssist.labelWarnings.length > 0 && (
+                  {linkChecked && linkAssistView.labelWarnings.length > 0 && (
                     <div className="mt-3 border border-amber-300 bg-amber-50 text-amber-900 text-[11px] rounded p-2">
                       <div className="font-semibold">
                         注意：リンクラベルが正答例と異なる可能性があります
                       </div>
                       <div className="mt-1 space-y-1">
-                        {linkAssist.labelWarnings.slice(0, 6).map((w, idx) => (
+                        {linkAssistView.labelWarnings.slice(0, 6).map((w, idx) => (
                           <div key={idx}>
                             <span className="font-semibold">{w.pretty}</span>{" "}
                             期待：{w.expected.join(" / ")} ／ 入力：{w.actual}
                           </div>
                         ))}
-                        {linkAssist.labelWarnings.length > 6 && (
+                        {linkAssistView.labelWarnings.length > 6 && (
                           <div className="text-amber-800">
-                            …他 {linkAssist.labelWarnings.length - 6} 件
+                            …他 {linkAssistView.labelWarnings.length - 6} 件
                           </div>
                         )}
                       </div>
