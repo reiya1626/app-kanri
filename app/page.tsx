@@ -92,8 +92,7 @@ export default function HomePage() {
         教員用設定ページ（問題文・正答例の登録）
       </h1>
       <p className="text-sm text-neutral-700">
-        ここで登録した内容は、<code>/level1</code>,{" "}
-        <code>/level2</code>, <code>/level3</code> の学習ページから参照されます。
+        ここで登録した内容は、学習用ページから参照されます。
         ローカル環境ではブラウザの <code>localStorage</code> に保存されます。
       </p>
 
@@ -112,11 +111,6 @@ export default function HomePage() {
           onChange={(e) => handleProblemUpload(e, "class")}
           className="text-sm"
         />
-        <p className="text-xs text-neutral-600">
-          ※.txt は全文を問題文として使用します。 .json は
-          <code>description / problem.text / text / statement</code>
-          などから自動抽出します。
-        </p>
         <div className="mt-2 text-xs">
           <div className="font-semibold mb-1">現在の内容プレビュー</div>
           {/* ← 高さ上限 + 中だけスクロール */}
@@ -135,9 +129,6 @@ export default function HomePage() {
           onChange={(e) => handleProblemUpload(e, "object")}
           className="text-sm"
         />
-        <p className="text-xs text-neutral-600">
-          クラス図問題と同様に .txt / .json を指定できます。
-        </p>
         <div className="mt-2 text-xs">
           <div className="font-semibold mb-1">現在の内容プレビュー</div>
           <div className="border rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap bg-neutral-50">
