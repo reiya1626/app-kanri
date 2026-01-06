@@ -18,6 +18,27 @@ type Obj = {
   slots: Slot[];
 };
 
+// 「オブジェクトを診断する」を押した時点の結果を固定表示するためのスナップショット
+type ObjDiagnoseSnapshot = {
+  requiredCount: number;
+  missingCount: number;
+  extraCount: number;
+  extraBases: string[];
+  slotRequiredTotal: number;
+  slotMissingTotal: number;
+  slotMatchedTotal: number;
+  extraSlotCount: number;
+};
+
+// 「リンクを診断する」を押した時点の結果を固定表示するためのスナップショット
+type LinkDiagnoseSnapshot = {
+  requiredCount: number;
+  missingCount: number;
+  extraCount: number;
+  extraLinks: LinkSig[];
+  labelWarnings: { pretty: string; expected: string[]; actual: string }[];
+};
+
 type Link = {
   id: string;
   from: string; // Obj.id
@@ -110,6 +131,23 @@ const normalizeLinkLabel = (raw: string) => {
   return t;
 };
 
+// スロットキー（スロット名）の正規化（値は見ない方針B）
+const normalizeSlotKey = (raw: string) => {
+  return stripHtmlTags(raw ?? "")
+    .trim()
+    .replace(/^"+|"+$/g, "")
+    .replace(/\s+/g, "");
+};
+
+// PlantUMLのスロット行から「キー（属性名）」だけ取り出す（: / = どちらにも対応）
+const extractSlotKeyFromPumlLine = (line: string) => {
+  const t = (line ?? "").trim();
+  if (!t) return "";
+  const m = t.match(/^(.+?)\s*[:=]/);
+  return (m?.[1] ?? t).trim();
+};
+
+
 // 正答PlantUMLから object ラベル抽出（{があってもなくても拾う）
 const extractObjectLabelsFromPuml = (puml: string) => {
   const labels: string[] = [];
@@ -180,6 +218,93 @@ const extractAliasToBaseFromPuml = (puml: string) => {
   return map;
 };
 
+// 正答PUMLから「ベース名 -> 必須スロットキー集合」を抽出（方針B：キーのみ）
+const extractRequiredSlotKeysByBaseFromPuml = (puml: string) => {
+  const map = new Map<string, Set<string>>();
+  if (!puml) return map;
+
+  const lines = puml.split(/\r?\n/);
+
+  const reObjQuoted =
+    /^\s*object\s+"([^"]+)"(?:\s+as\s+[\w.\-]+)?(?:\s+#[A-Za-z0-9]+)?(?:\s*\{)?\s*$/i;
+
+  const reObjBare =
+    /^\s*object\s+([\wぁ-んァ-ン一-龥ー]+)(?:\s+as\s+[\w.\-]+)?(?:\s+#[A-Za-z0-9]+)?(?:\s*\{)?\s*$/i;
+
+  let currentBase: string | null = null;
+  let inBlock = false;
+  let pendingBase: string | null = null;
+
+  const startBlock = (base: string) => {
+    currentBase = base;
+    inBlock = true;
+    if (!map.has(base)) map.set(base, new Set<string>());
+  };
+
+  const endBlock = () => {
+    currentBase = null;
+    inBlock = false;
+    pendingBase = null;
+  };
+
+  for (const rawLine of lines) {
+    const t = rawLine.trim();
+    if (!t) continue;
+    if (t.startsWith("'")) continue;
+
+    // object 開始行
+    const m1 = rawLine.match(reObjQuoted);
+    const m2 = rawLine.match(reObjBare);
+    if (m1?.[1] || m2?.[1]) {
+      const label = (m1?.[1] ?? m2?.[1] ?? "").trim();
+      const base = baseNameForAssist(label);
+      if (!base) {
+        currentBase = null;
+        inBlock = false;
+        pendingBase = null;
+        continue;
+      }
+
+      // { が同じ行にあるなら直ちに開始
+      if (t.includes("{")) {
+        startBlock(base);
+      } else {
+        // 次の行が { の場合に備える
+        pendingBase = base;
+        currentBase = null;
+        inBlock = false;
+      }
+      continue;
+    }
+
+    // object の直後に { が来るケース
+    if (!inBlock && pendingBase && t === "{") {
+      startBlock(pendingBase);
+      continue;
+    }
+
+    if (inBlock) {
+      if (t === "}") {
+        endBlock();
+        continue;
+      }
+      if (t === "{") continue;
+
+      // スロット行（例：氏名: "佐藤" / 会員番号: 1001）
+      // 値は見ない（キーだけ）
+      const keyPart = extractSlotKeyFromPumlLine(t);
+      const key = normalizeSlotKey(keyPart);
+      if (!key) continue;
+
+      const set = map.get(currentBase!);
+      if (set) set.add(key);
+      continue;
+    }
+  }
+
+  return map;
+};
+
 type LinkSig = {
   a: string; // base
   b: string; // base
@@ -187,24 +312,6 @@ type LinkSig = {
   endpointKey: string; // endpoints only
   fullKey: string; // endpoints + label (for warnings)
   pretty: string; // display
-};
-
-
-type ObjAssistSnapshot = {
-  enabled: boolean;
-  requiredBases: string[];
-  presentBases: string[];
-  missingBases: string[];
-  extraBases: string[];
-};
-
-type LinkAssistSnapshot = {
-  enabled: boolean;
-  requiredEndpointKeys: string[];
-  presentEndpointKeys: string[];
-  missingPretty: string[];
-  extraLinks: LinkSig[];
-  labelWarnings: { pretty: string; expected: string[]; actual: string }[];
 };
 
 const makeEndpointKey = (aBase: string, bBase: string) => {
@@ -464,16 +571,24 @@ const [classZoom, setClassZoom] = useState(1);
 
   // ===== アシスト状態（オブジェクト） =====
   const [objChecked, setObjChecked] = useState(false); // ← 診断済みフラグとして使う
+  const [objDiagnoseSnapshot, setObjDiagnoseSnapshot] =
+    useState<ObjDiagnoseSnapshot | null>(null);
   const [objRevealExtra, setObjRevealExtra] = useState(0);
   const [objDirtySinceHint, setObjDirtySinceHint] = useState(false);
 
-  const [objAssistFrozen, setObjAssistFrozen] = useState<ObjAssistSnapshot | null>(null);
-  const [linkAssistFrozen, setLinkAssistFrozen] = useState<LinkAssistSnapshot | null>(null);
-
   // ===== アシスト状態（リンク） =====
   const [linkChecked, setLinkChecked] = useState(false); // ← 診断済みフラグとして使う
+  const [linkDiagnoseSnapshot, setLinkDiagnoseSnapshot] =
+    useState<LinkDiagnoseSnapshot | null>(null);
   const [linkRevealExtra, setLinkRevealExtra] = useState(0);
   const [linkDirtySinceHint, setLinkDirtySinceHint] = useState(false);
+
+  // 「正答例と異なる〜を見る」を“編集後に解禁”するための誘導表示
+  const [objRevealUnlockedNotice, setObjRevealUnlockedNotice] = useState(false);
+  const [linkRevealUnlockedNotice, setLinkRevealUnlockedNotice] = useState(false);
+
+  const prevObjRevealCanProceedRef = useRef(false);
+  const prevLinkRevealCanProceedRef = useRef(false);
 
   // ===== アシスト折りたたみ =====
   const [objAssistCollapsed, setObjAssistCollapsed] = useState(false);
@@ -665,9 +780,11 @@ const [classZoom, setClassZoom] = useState(1);
   }, [selectedLink, objects]);
 
   // ===== パターン1（オブジェクト不足/過剰） =====
+    // ===== パターン1（オブジェクト不足/過剰）＋スロット（キー）不足（方針B） =====
   const objAssist = useMemo(() => {
     const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
 
+    // --- 正答：必要オブジェクト（ベース名） ---
     const requiredBases = new Set<string>();
     if (enabled) {
       const labels = extractObjectLabelsFromPuml(objectAnswerPuml);
@@ -677,6 +794,7 @@ const [classZoom, setClassZoom] = useState(1);
       }
     }
 
+    // --- 入力：存在オブジェクト（ベース名） ---
     const presentBases = new Set<string>();
     for (const o of objects) {
       if (editingObjectId && o.id === editingObjectId) continue;
@@ -694,43 +812,141 @@ const [classZoom, setClassZoom] = useState(1);
       ? Array.from(presentBases).filter((b) => !requiredBases.has(b)).sort()
       : [];
 
-    return { enabled, requiredBases, presentBases, missingBases, extraBases };
+    // --- 正答：必要スロットキー（ベース名ごとに集合） ---
+    const requiredSlotKeysByBase = enabled
+      ? extractRequiredSlotKeysByBaseFromPuml(objectAnswerPuml)
+      : new Map<string, Set<string>>();
+
+    // --- 入力：スロットキー（ベース名ごとに集合） ---
+    const presentSlotKeysByBase = new Map<string, Set<string>>();
+    for (const o of objects) {
+      if (editingObjectId && o.id === editingObjectId) continue;
+      if (!o.name || o.name.trim().length === 0) continue;
+
+      const base = baseNameForAssist(o.name);
+      if (!base) continue;
+
+      const set = presentSlotKeysByBase.get(base) ?? new Set<string>();
+      for (const s of o.slots) {
+        const k = normalizeSlotKey(s.key);
+        if (!k) continue;
+        set.add(k);
+      }
+      presentSlotKeysByBase.set(base, set);
+    }
+
+    // --- スロット（キー）の未カバー数（具体名は出さない） ---
+    // ※初学者の混乱回避のため、ここは「オブジェクト名がカバーされているもの」だけを対象にする。
+    //   （オブジェクト名が未カバーの間は、そのオブジェクトのスロットは評価しない）
+    let requiredSlotKeyTotal = 0;
+    let missingSlotKeyTotal = 0;
+
+    for (const [base, reqSet] of requiredSlotKeysByBase.entries()) {
+      if (!requiredBases.has(base)) continue;
+      if (!presentBases.has(base)) continue;
+      if (!reqSet || reqSet.size === 0) continue;
+      requiredSlotKeyTotal += reqSet.size;
+
+      const presentSet = presentSlotKeysByBase.get(base) ?? new Set<string>();
+      for (const k of reqSet) {
+        if (!presentSet.has(k)) missingSlotKeyTotal += 1;
+      }
+    }
+
+    const matchedSlotKeyTotal = Math.max(
+      0,
+      requiredSlotKeyTotal - missingSlotKeyTotal
+    );
+
+    // --- 参考：正答にないスロットキー（過剰候補：スロット名の観点） ---
+    let extraSlotKeyTotal = 0;
+    for (const [base, presentSet] of presentSlotKeysByBase.entries()) {
+      if (!requiredBases.has(base)) continue;
+      if (!presentBases.has(base)) continue;
+      const reqSet = requiredSlotKeysByBase.get(base) ?? new Set<string>();
+      for (const k of presentSet) {
+        if (!reqSet.has(k)) extraSlotKeyTotal += 1;
+      }
+    }
+
+    return {
+      enabled,
+      requiredBases,
+      presentBases,
+      missingBases,
+      extraBases,
+
+      requiredSlotKeysByBase,
+      presentSlotKeysByBase,
+      requiredSlotKeyTotal,
+      missingSlotKeyTotal,
+      matchedSlotKeyTotal,
+      extraSlotKeyTotal,
+    };
   }, [objects, objectAnswerPuml, editingObjectId]);
 
-  // 現在の診断結果（ライブ）
-  // NOTE: ここでは objAssistView を参照しない（TDZ: 初期化前参照を防ぐ）
-  const objAssistLiveSnap = useMemo<ObjAssistSnapshot>(() => {
-    return {
-      enabled: objAssist.enabled,
-      requiredBases: Array.from(objAssist.requiredBases),
-      presentBases: Array.from(objAssist.presentBases),
-      missingBases: objAssist.missingBases,
-      extraBases: objAssist.extraBases,
-    };
-  }, [objAssist]);
+	const objSnapshot = objChecked ? objDiagnoseSnapshot : null;
 
-  // 「正答例と異なるオブジェクトを見る」を押した後は、その時点の診断結果を固定する
-  const objAssistView = objChecked && objAssistFrozen ? objAssistFrozen : objAssistLiveSnap;
+	const objRequiredCount = objSnapshot
+	  ? objSnapshot.requiredCount
+	  : objAssist.requiredBases.size;
+	const objMissingCount = objSnapshot
+	  ? objSnapshot.missingCount
+	  : objAssist.missingBases.length;
+	const objMatchedCount = Math.max(0, objRequiredCount - objMissingCount);
+	const objExtraCount = objSnapshot ? objSnapshot.extraCount : objAssist.extraBases.length;
 
+	const objSlotRequiredTotal = objSnapshot
+	  ? objSnapshot.slotRequiredTotal
+	  : objAssist.requiredSlotKeyTotal;
+	const objSlotMissingTotal = objSnapshot
+	  ? objSnapshot.slotMissingTotal
+	  : objAssist.missingSlotKeyTotal;
+	const objSlotMatchedTotal = objSnapshot
+	  ? objSnapshot.slotMatchedTotal
+	  : objAssist.matchedSlotKeyTotal;
+	const objExtraSlotCount = objSnapshot ? objSnapshot.extraSlotCount : objAssist.extraSlotKeyTotal;
 
-  const objRequiredCount = objAssistView.requiredBases.length;
-  const objMissingCount = objAssistView.missingBases.length;
-  const objMatchedCount = Math.max(0, objRequiredCount - objMissingCount);
-  const objExtraCount = objAssistView.extraBases.length;
+	const objExtraBasesForReveal = objSnapshot ? objSnapshot.extraBases : objAssist.extraBases;
 
-  const objHasExtraNow = objAssistView.enabled && objExtraCount > 0;
+  const objHasExtraNow = objAssist.enabled && objExtraCount > 0;
   const objShowExtraError = objChecked && objHasExtraNow;
 
   const objRevealDisabledReason = useMemo(() => {
     if (!objChecked) return "まず「オブジェクトを診断する」を押してください。";
-    if (objExtraCount === 0) return "正答例と異なる候補がないため表示できません。";
-    if (objRevealExtra >= objExtraCount) return "候補はすべて表示済みです。";
+	  if (objExtraBasesForReveal.length === 0)
+      return "正答例と異なる候補がないため表示できません。";
+	  if (objRevealExtra >= objExtraBasesForReveal.length)
+      return "候補はすべて表示済みです。";
     if (!objDirtySinceHint)
-      return "次の候補を見る前に、オブジェクト図を一度修正してください。";
+      return "次の候補を見るには、診断後にオブジェクト図を一度修正してください（例：オブジェクト名／スロット名の追加・修正・削除）。";
     return null;
-  }, [objChecked, objExtraCount, objRevealExtra, objDirtySinceHint]);
+	}, [objChecked, objExtraBasesForReveal.length, objRevealExtra, objDirtySinceHint]);
 
   const objRevealDisabled = objRevealDisabledReason !== null;
+
+  const objRevealNeedsEdit =
+    objChecked &&
+    objExtraBasesForReveal.length > 0 &&
+    objRevealExtra < objExtraBasesForReveal.length &&
+    !objDirtySinceHint;
+
+  const objRevealCanProceed =
+    objChecked &&
+    objExtraBasesForReveal.length > 0 &&
+    objRevealExtra < objExtraBasesForReveal.length &&
+    objDirtySinceHint;
+
+  useEffect(() => {
+    // 「編集したらボタンが使えるようになった」ことを明示（初学者向け誘導）
+    const prev = prevObjRevealCanProceedRef.current;
+    prevObjRevealCanProceedRef.current = objRevealCanProceed;
+    if (!prev && objRevealCanProceed) {
+      setObjRevealUnlockedNotice(true);
+      const t = window.setTimeout(() => setObjRevealUnlockedNotice(false), 2500);
+      return () => window.clearTimeout(t);
+    }
+  }, [objRevealCanProceed]);
 
   // ===== パターン4（リンク不足/過剰） =====
   // 方針②：不足/過剰は「端点だけ」で判定、ラベルは別の注意(warn)で扱う
@@ -814,63 +1030,92 @@ const [classZoom, setClassZoom] = useState(1);
     };
   }, [objectAnswerPuml, objects, links]);
 
-  // 現在の診断結果（ライブ）
-  // NOTE: ここでは linkAssistView を参照しない（TDZ: 初期化前参照を防ぐ）
-  const linkAssistLiveSnap = useMemo<LinkAssistSnapshot>(() => {
-    return {
-      enabled: linkAssist.enabled,
-      requiredEndpointKeys: Array.from(linkAssist.requiredEndpointKeys),
-      presentEndpointKeys: Array.from(linkAssist.presentEndpointKeys),
-      missingPretty: linkAssist.missingPretty,
-      extraLinks: linkAssist.extraLinks,
-      labelWarnings: linkAssist.labelWarnings,
-    };
-  }, [linkAssist]);
-
-  // 「正答例と異なるリンクを見る」を押した後は、その時点の診断結果を固定する
-  const linkAssistView =
-    linkChecked && linkAssistFrozen ? linkAssistFrozen : linkAssistLiveSnap;
-
-
-  const linkRequiredCount = linkAssistView.requiredEndpointKeys.length;
-  const linkMissingCount = linkAssistView.missingPretty.length;
+  // --- リンク診断結果（スナップショット優先） ---
+  const linkRequiredCount = linkDiagnoseSnapshot
+    ? linkDiagnoseSnapshot.requiredCount
+    : linkAssist.requiredEndpointKeys.size;
+  const linkMissingCount = linkDiagnoseSnapshot
+    ? linkDiagnoseSnapshot.missingCount
+    : linkAssist.missingPretty.length;
   const linkMatchedCount = Math.max(0, linkRequiredCount - linkMissingCount);
-  const linkExtraCount = linkAssistView.extraLinks.length;
+  const linkExtraLinksForReveal = linkDiagnoseSnapshot
+    ? linkDiagnoseSnapshot.extraLinks
+    : linkAssist.extraLinks;
+  const linkExtraCount = linkExtraLinksForReveal.length;
+  const linkLabelWarningsForDisplay = linkDiagnoseSnapshot
+    ? linkDiagnoseSnapshot.labelWarnings
+    : linkAssist.labelWarnings;
 
-  const linkHasExtraNow = linkAssistView.enabled && linkExtraCount > 0;
+  const linkHasExtraNow = linkAssist.enabled && linkExtraCount > 0;
   const linkShowExtraError = linkChecked && linkHasExtraNow;
 
   const linkRevealDisabledReason = useMemo(() => {
     if (!linkChecked) return "まず「リンクを診断する」を押してください。";
-    if (linkExtraCount === 0) return "正答例と異なる候補がないため表示できません。";
-    if (linkRevealExtra >= linkExtraCount) return "候補はすべて表示済みです。";
+    if (linkExtraLinksForReveal.length === 0)
+      return "正答例と異なる候補がないため表示できません。";
+    if (linkRevealExtra >= linkExtraLinksForReveal.length)
+      return "候補はすべて表示済みです。";
     if (!linkDirtySinceHint)
-      return "次の候補を見る前に、リンク（端点/ラベル）を一度修正してください。";
+      return "次の候補を見るには、診断後にリンク（端点/ラベル）を一度修正してください（例：端点の変更、ラベル入力、不要なら削除）。";
     return null;
-  }, [linkChecked, linkExtraCount, linkRevealExtra, linkDirtySinceHint]);
+  }, [
+    linkChecked,
+    linkExtraLinksForReveal.length,
+    linkRevealExtra,
+    linkDirtySinceHint,
+  ]);
 
   const linkRevealDisabled = linkRevealDisabledReason !== null;
 
+  const linkRevealNeedsEdit =
+    linkChecked &&
+    linkExtraLinksForReveal.length > 0 &&
+    linkRevealExtra < linkExtraLinksForReveal.length &&
+    !linkDirtySinceHint;
+
+  const linkRevealCanProceed =
+    linkChecked &&
+    linkExtraLinksForReveal.length > 0 &&
+    linkRevealExtra < linkExtraLinksForReveal.length &&
+    linkDirtySinceHint;
+
+  useEffect(() => {
+    const prev = prevLinkRevealCanProceedRef.current;
+    prevLinkRevealCanProceedRef.current = linkRevealCanProceed;
+    if (!prev && linkRevealCanProceed) {
+      setLinkRevealUnlockedNotice(true);
+      const t = window.setTimeout(() => setLinkRevealUnlockedNotice(false), 2500);
+      return () => window.clearTimeout(t);
+    }
+  }, [linkRevealCanProceed]);
+
   // ===== オブジェクトアシスト操作 =====
   const handleObjDiagnose = () => {
-    // 再診断：表示固定を解除し、最新状態で再判定できるようにする
+    // 診断ボタンを押した瞬間の結果を保存し、以降はリアルタイム反映しない
     setObjChecked(true);
-    setObjAssistFrozen(null);
+
+    setObjDiagnoseSnapshot({
+      requiredCount: objAssist.requiredBases.size,
+      missingCount: objAssist.missingBases.length,
+      extraCount: objAssist.extraBases.length,
+      extraBases: [...objAssist.extraBases],
+      slotRequiredTotal: objAssist.requiredSlotKeyTotal,
+      slotMissingTotal: objAssist.missingSlotKeyTotal,
+      slotMatchedTotal: objAssist.matchedSlotKeyTotal,
+      extraSlotCount: objAssist.extraSlotKeyTotal,
+    });
+
+    // 追加開示は診断し直すたびにリセット
     setObjRevealExtra(0);
-    setObjDirtySinceHint(true); // 最初の開示はそのまま見られる
+    setObjDirtySinceHint(false);
   };
 
   const handleObjRevealNextExtra = () => {
     if (!objChecked) return alert("まず「オブジェクトを診断する」を押してください。");
-
-    // 最初に「見る」を押した時点の診断結果を固定（以降は編集してもここは動かない）
-    const snap = objAssistFrozen ?? objAssistLiveSnap;
-    if (!objAssistFrozen) setObjAssistFrozen(snap);
-
-    if (snap.extraBases.length === 0) return;
+    if (objExtraBasesForReveal.length === 0) return;
     if (!objDirtySinceHint)
       return alert("次の表示を見る前に、オブジェクト図を一度修正してください。");
-    if (objRevealExtra >= snap.extraBases.length) return;
+    if (objRevealExtra >= objExtraBasesForReveal.length) return;
 
     setObjAssistCollapsed(false);
     setObjRevealExtra((c) => c + 1);
@@ -878,32 +1123,78 @@ const [classZoom, setClassZoom] = useState(1);
     scrollObjAssistToBottom();
   };
 
+  // 学習者の要望で「編集せずに表示」も可能（ただし学習効果のため confirm を挟む）
+  const handleObjRevealNextExtraForce = () => {
+    if (!objChecked) return alert("まず「オブジェクトを診断する」を押してください。");
+    if (objExtraBasesForReveal.length === 0) return;
+    if (objRevealExtra >= objExtraBasesForReveal.length) return;
+
+    const ok = window.confirm(
+      "編集せずに次の候補を表示します。\n（学習のためには『修正→表示』をおすすめします）\n表示しますか？"
+    );
+    if (!ok) return;
+
+    setObjAssistCollapsed(false);
+    setObjRevealExtra((c) => c + 1);
+    setObjDirtySinceHint(false);
+    scrollObjAssistToBottom();
+  };
+
+
   // ===== リンクアシスト操作 =====
   const handleLinkDiagnose = () => {
-    // 再診断：表示固定を解除し、最新状態で再判定できるようにする
     setLinkChecked(true);
-    setLinkAssistFrozen(null);
+    // リンク診断結果も「押した時点」で固定表示する
+    const requiredCount = linkAssist.requiredEndpointKeys.size;
+    const missingCount = linkAssist.missingPretty.length;
+    const extraCount = linkAssist.extraLinks.length;
+
+    setLinkDiagnoseSnapshot({
+      requiredCount,
+      missingCount,
+      extraCount,
+      extraLinks: linkAssist.extraLinks,
+      labelWarnings: linkAssist.labelWarnings,
+    });
+
+    // 診断し直し＝開示状態もリセット
     setLinkRevealExtra(0);
-    setLinkDirtySinceHint(true); // 最初の開示はそのまま見られる
+    setLinkDirtySinceHint(false);
   };
 
   const handleLinkRevealNextExtra = () => {
     if (!linkChecked) return alert("まず「リンクを診断する」を押してください。");
-
-    // 最初に「見る」を押した時点の診断結果を固定（以降は編集してもここは動かない）
-    const snap = linkAssistFrozen ?? linkAssistLiveSnap;
-    if (!linkAssistFrozen) setLinkAssistFrozen(snap);
-
-    if (snap.extraLinks.length === 0) return;
+    if (linkExtraLinksForReveal.length === 0) return;
     if (!linkDirtySinceHint)
-      return alert("次の表示を見る前に、オブジェクト図を一度修正してください。");
-    if (linkRevealExtra >= snap.extraLinks.length) return;
+      return alert(
+        "次の候補を見る前に、リンク（端点/ラベル）を一度修正してください。\n\n" +
+          "このボタンは『修正→確認→次の候補』の順で、ヒントを少しずつ開示するためのものです。\n" +
+          "（すぐに見たい場合は、右の「今すぐ表示」を使えます）"
+      );
+    if (linkRevealExtra >= linkExtraLinksForReveal.length) return;
 
     setLinkAssistCollapsed(false);
     setLinkRevealExtra((c) => c + 1);
     setLinkDirtySinceHint(false);
     scrollLinkAssistToBottom();
   };
+
+  const handleLinkRevealNextExtraForce = () => {
+    if (!linkChecked) return alert("まず「リンクを診断する」を押してください。");
+    if (linkExtraLinksForReveal.length === 0) return;
+    if (linkRevealExtra >= linkExtraLinksForReveal.length) return;
+
+    const ok = window.confirm(
+      "編集せずに次の候補を表示します。\n（学習のためには『修正→表示』をおすすめします）\n表示しますか？"
+    );
+    if (!ok) return;
+
+    setLinkAssistCollapsed(false);
+    setLinkRevealExtra((c) => c + 1);
+    setLinkDirtySinceHint(false);
+    scrollLinkAssistToBottom();
+  };
+
 
   // ===== オブジェクト操作 =====
   const handleAddObject = () => {
@@ -936,6 +1227,8 @@ const [classZoom, setClassZoom] = useState(1);
       slots: [...selectedObject.slots, { key: "", value: "" }],
     };
     setObjects((prev) => prev.map((o) => (o.id === selectedObject.id ? updated : o)));
+    // スロット操作も「編集」として扱い、次のヒント解禁につなげる
+    markMeaningfulChange(true, false);
   };
 
   const handleUpdateSlot = (index: number, partial: Partial<Slot>) => {
@@ -944,6 +1237,7 @@ const [classZoom, setClassZoom] = useState(1);
     setObjects((prev) =>
       prev.map((o) => (o.id === selectedObject.id ? { ...o, slots: newSlots } : o))
     );
+    markMeaningfulChange(true, false);
   };
 
   const handleDeleteSlot = (index: number) => {
@@ -952,6 +1246,7 @@ const [classZoom, setClassZoom] = useState(1);
     setObjects((prev) =>
       prev.map((o) => (o.id === selectedObject.id ? { ...o, slots: newSlots } : o))
     );
+    markMeaningfulChange(true, false);
   };
 
   // ===== リンク操作 =====
@@ -997,6 +1292,15 @@ const [classZoom, setClassZoom] = useState(1);
       setSelectedObjectId(null);
       setSelectedLinkId(null);
       setEditingObjectId(null);
+	      // 復元直後は再診断してもらう（診断結果は固定表示のため）
+	      setObjChecked(false);
+	      setObjDiagnoseSnapshot(null);
+	      setObjRevealExtra(0);
+	      setObjDirtySinceHint(false);
+	      setLinkChecked(false);
+	      setLinkDiagnoseSnapshot(null);
+	      setLinkRevealExtra(0);
+	      setLinkDirtySinceHint(false);
       markMeaningfulChange(true, true);
       alert("保存されていた状態を復元しました。");
     } catch {
@@ -1011,6 +1315,14 @@ const [classZoom, setClassZoom] = useState(1);
     setSelectedObjectId(null);
     setSelectedLinkId(null);
     setEditingObjectId(null);
+	    setObjChecked(false);
+	    setObjDiagnoseSnapshot(null);
+	    setObjRevealExtra(0);
+	    setObjDirtySinceHint(false);
+	    setLinkChecked(false);
+	    setLinkDiagnoseSnapshot(null);
+	    setLinkRevealExtra(0);
+	    setLinkDirtySinceHint(false);
     setClassPuml("");
     setEncodedClassPuml("");
     setIssues(null);
@@ -1369,17 +1681,17 @@ const [classZoom, setClassZoom] = useState(1);
             >
               <AssistHeader
                 title="OD作成アシスト（オブジェクト）"
-                enabled={objAssistView.enabled}
+                enabled={objAssist.enabled}
                 collapsed={objAssistCollapsed}
                 onToggle={() => setObjAssistCollapsed((v) => !v)}
                 rightText={
-                  objAssistView.enabled && objChecked
+                  objAssist.enabled && objChecked
                     ? `カバー：${objMatchedCount}/${objRequiredCount}　未カバー：${objMissingCount}/${objRequiredCount}　正答例と異なる候補：${objExtraCount}`
                     : undefined
                 }
               />
 
-              {!objAssistCollapsed && objAssistView.enabled && (
+              {!objAssistCollapsed && objAssist.enabled && (
                 <div className="p-2">
                   <div className="flex flex-wrap items-center gap-2">
                     <button
@@ -1392,7 +1704,10 @@ const [classZoom, setClassZoom] = useState(1);
                     
                     <div className="relative inline-block group" title={objRevealDisabled ? (objRevealDisabledReason ?? "") : ""}>
                       <button
-                        className="px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className={
+                          "px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50 disabled:cursor-not-allowed" +
+                          (objRevealCanProceed ? " ring-2 ring-emerald-300 animate-pulse" : "")
+                        }
                         onClick={handleObjRevealNextExtra}
                         disabled={objRevealDisabled}
                         aria-describedby={
@@ -1422,6 +1737,33 @@ const [classZoom, setClassZoom] = useState(1);
                     </div>
                   </div>
 
+                  {objChecked && objExtraBasesForReveal.length > 0 && objRevealExtra < objExtraBasesForReveal.length && (
+                    <div className="mt-2 text-[11px]">
+                      {objRevealCanProceed ? (
+                        <div className="text-emerald-700">
+                          ✅ 編集を検知しました。<span className="font-semibold">「正答例と異なるオブジェクトを見る」</span>が押せます。
+                          {objRevealUnlockedNotice && (
+                            <span className="ml-2 inline-flex items-center rounded border bg-emerald-50 border-emerald-200 px-2 py-0.5 text-[10px]">
+                              ボタンが解禁されました
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="text-slate-600">
+                          🔒 次の候補を見るには、オブジェクト図を一度修正してください（例：名前/スロット名の修正、追加、削除）。
+                          <button
+                            type="button"
+                            className="ml-2 underline text-sky-700 hover:text-sky-800"
+                            onClick={handleObjRevealNextExtraForce}
+                            title="学習効果のため通常は『修正→表示』をおすすめします"
+                          >
+                            編集せずに表示
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {!objChecked ? (
                     <div className="mt-2 text-[11px] text-slate-600">
                       ※ 「オブジェクトを診断する」で、正答例に対するカバー/未カバーを確認できます
@@ -1434,15 +1776,36 @@ const [classZoom, setClassZoom] = useState(1);
                         未カバー：<span className="font-semibold">{objMissingCount}</span>/
                         {objRequiredCount}
                       </div>
-                      <div className="mt-1 text-slate-500">
-                        ※ 未カバーは「正答例にあるのに入力にない」ものの数です（具体名は表示しません）
-                      </div>
-                    </div>
+                      
+                      {objSlotRequiredTotal > 0 && (
+                        <div className="mt-1">
+                          <span className="text-slate-500">（スロット名の観点）</span>{" "}
+                          カバー：<span className="font-semibold">{objSlotMatchedTotal}</span>/
+                          {objSlotRequiredTotal}　
+                          未カバー：<span className="font-semibold">{objSlotMissingTotal}</span>/
+                          {objSlotRequiredTotal}
+                        </div>
+                      )}
+	<div className="mt-1 text-slate-500">
+	                        ※ 未カバー（オブジェクト）は「正答例にあるのに入力にない」オブジェクトの数です（具体名は表示しません）
+	                      </div>
+                    
+                      {objSlotRequiredTotal > 0 && (
+                        <div className="mt-1 text-slate-500">
+	                          ※ スロット名の診断は「オブジェクト名がカバーされているもの」だけを対象にします（未カバーオブジェクトの中身は評価しません）
+	                        </div>
+	                      )}
+	                      {objSlotRequiredTotal > 0 && (
+	                        <div className="mt-1 text-slate-500">
+                          ※ スロットは「スロット名（キー）」のみ確認します（値は見ません）
+                        </div>
+                      )}
+</div>
                   )}
 
-                  {objChecked && objMatchedCount === objRequiredCount && objExtraCount === 0 && (
+                  {objChecked && objMatchedCount === objRequiredCount && objExtraCount === 0 && (objSlotRequiredTotal === 0 || objSlotMissingTotal === 0) && (
                     <div className="mt-2 text-[11px] text-emerald-700 font-semibold">
-                      正答例と一致しています
+                      正答例と一致しています（オブジェクト名／スロット名の観点）
                     </div>
                   )}
 
@@ -1466,12 +1829,12 @@ const [classZoom, setClassZoom] = useState(1);
                   {objChecked && objRevealExtra > 0 && (
                     <div className="mt-3 text-[11px]">
                       <div className="font-semibold text-slate-700">
-                        正答例と異なる可能性
-                        {Math.min(objRevealExtra, objAssistView.extraBases.length)}/
-                        {objAssistView.extraBases.length}）
+                        正答例と異なる可能性（開示済み：
+                        {Math.min(objRevealExtra, objAssist.extraBases.length)}/
+                        {objAssist.extraBases.length}）
                       </div>
                       <div className="mt-1 flex flex-wrap gap-1">
-                        {objAssistView.extraBases.slice(0, objRevealExtra).map((b) => (
+                        {objAssist.extraBases.slice(0, objRevealExtra).map((b) => (
                           <span
                             key={b}
                             className="px-2 py-0.5 rounded border bg-white text-red-700"
@@ -1713,17 +2076,17 @@ const [classZoom, setClassZoom] = useState(1);
             >
               <AssistHeader
                 title="OD作成アシスト（リンク）"
-                enabled={linkAssistView.enabled}
+                enabled={linkAssist.enabled}
                 collapsed={linkAssistCollapsed}
                 onToggle={() => setLinkAssistCollapsed((v) => !v)}
                 rightText={
-                  linkAssistView.enabled && linkChecked
+                  linkAssist.enabled && linkChecked
                     ? `カバー：${linkMatchedCount}/${linkRequiredCount}　未カバー：${linkMissingCount}/${linkRequiredCount}　正答例と異なる候補：${linkExtraCount}`
                     : undefined
                 }
               />
 
-              {!linkAssistCollapsed && linkAssistView.enabled && (
+              {!linkAssistCollapsed && linkAssist.enabled && (
                 <div className="p-2">
                   <div className="flex flex-wrap items-center gap-2">
                     <button
@@ -1736,7 +2099,10 @@ const [classZoom, setClassZoom] = useState(1);
                     
                     <div className="relative inline-block group" title={linkRevealDisabled ? (linkRevealDisabledReason ?? "") : ""}>
                       <button
-                        className="px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className={
+                          "px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50 disabled:cursor-not-allowed" +
+                          (linkRevealCanProceed ? " ring-2 ring-emerald-300 animate-pulse" : "")
+                        }
                         onClick={handleLinkRevealNextExtra}
                         disabled={linkRevealDisabled}
                         aria-describedby={
@@ -1765,6 +2131,33 @@ const [classZoom, setClassZoom] = useState(1);
                       )}
                     </div>
                   </div>
+
+                  {linkChecked && linkExtraLinksForReveal.length > 0 && linkRevealExtra < linkExtraLinksForReveal.length && (
+                    <div className="mt-2 text-[11px]">
+                      {linkRevealCanProceed ? (
+                        <div className="text-emerald-700">
+                          ✅ 編集を検知しました。<span className="font-semibold">「正答例と異なるリンクを見る」</span>が押せます。
+                          {linkRevealUnlockedNotice && (
+                            <span className="ml-2 inline-flex items-center rounded border bg-emerald-50 border-emerald-200 px-2 py-0.5 text-[10px]">
+                              ボタンが解禁されました
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="text-slate-600">
+                          🔒 次の候補を見るには、リンク（端点/ラベル）を一度修正してください（例：端点変更、ラベル入力、削除）。
+                          <button
+                            type="button"
+                            className="ml-2 underline text-sky-700 hover:text-sky-800"
+                            onClick={handleLinkRevealNextExtraForce}
+                            title="学習効果のため通常は『修正→表示』をおすすめします"
+                          >
+                            編集せずに表示
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {!linkChecked ? (
                     <div className="mt-2 text-[11px] text-slate-600">
@@ -1811,11 +2204,11 @@ const [classZoom, setClassZoom] = useState(1);
                     <div className="mt-3 text-[11px]">
                       <div className="font-semibold text-slate-700">
                         正答例と異なる可能性（開示済み：
-                        {Math.min(linkRevealExtra, linkAssistView.extraLinks.length)}/
-                        {linkAssistView.extraLinks.length}）
+                        {Math.min(linkRevealExtra, linkExtraLinksForReveal.length)}/
+                        {linkExtraLinksForReveal.length}）
                       </div>
                       <div className="mt-1 flex flex-wrap gap-1">
-                        {linkAssistView.extraLinks.slice(0, linkRevealExtra).map((p) => (
+                        {linkExtraLinksForReveal.slice(0, linkRevealExtra).map((p) => (
                           <span
                             key={p.fullKey}
                             className="px-2 py-0.5 rounded border bg-white text-red-700"
@@ -1827,21 +2220,21 @@ const [classZoom, setClassZoom] = useState(1);
                     </div>
                   )}
 
-                  {linkChecked && linkAssistView.labelWarnings.length > 0 && (
+                  {linkChecked && linkLabelWarningsForDisplay.length > 0 && (
                     <div className="mt-3 border border-amber-300 bg-amber-50 text-amber-900 text-[11px] rounded p-2">
                       <div className="font-semibold">
                         注意：リンクラベルが正答例と異なる可能性があります
                       </div>
                       <div className="mt-1 space-y-1">
-                        {linkAssistView.labelWarnings.slice(0, 6).map((w, idx) => (
+                        {linkLabelWarningsForDisplay.slice(0, 6).map((w, idx) => (
                           <div key={idx}>
                             <span className="font-semibold">{w.pretty}</span>{" "}
                             期待：{w.expected.join(" / ")} ／ 入力：{w.actual}
                           </div>
                         ))}
-                        {linkAssistView.labelWarnings.length > 6 && (
+                        {linkLabelWarningsForDisplay.length > 6 && (
                           <div className="text-amber-800">
-                            …他 {linkAssistView.labelWarnings.length - 6} 件
+                            …他 {linkLabelWarningsForDisplay.length - 6} 件
                           </div>
                         )}
                       </div>
