@@ -20,6 +20,12 @@ type Obj = {
 
 // 「オブジェクトを診断する」を押した時点の結果を固定表示するためのスナップショット
 type ObjDiagnoseSnapshot = {
+  // 入力側（学習者が作成した要素）を基準にした見せ方（A案）
+  inputTotal: number; // 名前が入っている入力オブジェクト数
+  inputMatched: number; // 入力のうち正答例に含まれる（オブジェクト名一致）数
+  inputUnmatched: number; // 入力のうち正答例に含まれない数
+
+  // 正答側（不足）
   requiredCount: number;
   missingCount: number;
   extraCount: number;
@@ -32,6 +38,12 @@ type ObjDiagnoseSnapshot = {
 
 // 「リンクを診断する」を押した時点の結果を固定表示するためのスナップショット
 type LinkDiagnoseSnapshot = {
+  // 入力側（学習者が作成した要素）を基準にした見せ方（A案）
+  inputTotal: number; // 入力リンク数（端点が有効なもの）
+  inputMatched: number; // 入力のうち正答例に含まれる（端点一致）数
+  inputUnmatched: number; // 入力のうち正答例に含まれない数
+
+  // 正答側（不足）
   requiredCount: number;
   missingCount: number;
   extraCount: number;
@@ -103,6 +115,61 @@ const formatSlotValue = (raw: string): string => {
   if (ty === "boolean") return t.toLowerCase();
   return `"${escLabel(t)}"`;
 };
+
+
+// ===== 型（学習者向け表記） =====
+const TYPE_LEGEND_TOOLTIP =
+  "【属性型の見方】\n" +
+  "string = 文字列（例：\"佐藤\"）\n" +
+  "int = 整数（例：1001）\n" +
+  "real = 小数（例：3.14）\n" +
+  "boolean = 真偽値（true / false）\n" +
+  "型混在 = 同じ属性に複数の型が混ざっています（要確認）";
+
+const explainTypeText = (raw: string) => {
+
+  // 図やチェック結果に出る型トークンを、日本語の理解を助ける形にする
+  // ※ PlantUML自体は英語トークンでOK。ここは表示補助だけ。
+  return (raw ?? "")
+    .replace(/\bstring\b/g, "文字列")
+    .replace(/\bint\b/g, "整数")
+    .replace(/\breal\b/g, "小数")
+    .replace(/\bboolean\b/g, "真偽値");
+};
+
+const sanitizeClassPumlForLearner = (puml: string) => {
+  if (!puml) return puml;
+
+  let out = puml;
+
+  // === 型混在（<!>）の表現を「型が混在」に寄せる（型名は表示しない） ===
+  // 例）氏名: string <!>  -> 氏名: （型が混在）
+  out = out.replace(
+    /:\s*([A-Za-z_][\w]*)\s*<!>\s*$/gm,
+    ": （型が混在）"
+  );
+
+  // === 値が1つも無い（<?>）の表現を「値が未入力」に寄せる（型名は表示しない） ===
+  // 例）氏名: string <?>  -> 氏名: （値が未入力）
+  out = out.replace(
+    /:\s*([A-Za-z_][\w]*)\s*<\?>\s*$/gm,
+    ": （値が未入力）"
+  );
+  // まれに型名が無いまま<?>だけ付くケース
+  out = out.replace(/:\s*<\?>\s*$/gm, ": （値が未入力）");
+
+  // === クラスのステレオタイプを初学者向けに ===
+  out = out.replace(/<<\s*contradictory\s*>>/g, "<<型が混在>>");
+  out = out.replace(/<<\s*incomplete\s*>>/g, "<<値が未入力>>");
+
+  // 念のため、残っているマーカーは見やすい日本語に
+  out = out.replace(/<!>/g, "（型が混在）");
+  out = out.replace(/<\?>/g, "（値が未入力）");
+
+  return out;
+};
+
+
 
 // ===== OD作成アシスト（パターン1/4） =====
 const stripHtmlTags = (s: string) => s.replace(/<[^>]*>/g, "");
@@ -671,7 +738,7 @@ const [classZoom, setClassZoom] = useState(1);
       for (const s of o.slots) {
         if (!s.key && !s.value) continue;
         const val = formatSlotValue(s.value);
-        const display = val ? `${s.key}: ${val}` : s.key;
+        const display = val ? `${s.key} = ${val}` : s.key;
         lines.push(`  ${display}`);
       }
       lines.push("}");
@@ -909,6 +976,22 @@ const [classZoom, setClassZoom] = useState(1);
 
 	const objExtraBasesForReveal = objSnapshot ? objSnapshot.extraBases : objAssist.extraBases;
 
+	// ===== A案表示用（入力側を分母にする） =====
+	const objInputTotal = objSnapshot
+	  ? objSnapshot.inputTotal
+	  : objects.filter((o) => !!(o.name && o.name.trim().length > 0) && !(editingObjectId && o.id === editingObjectId)).length;
+	const objInputMatched = objSnapshot
+	  ? objSnapshot.inputMatched
+	  : objects.filter((o) => {
+		  if (editingObjectId && o.id === editingObjectId) return false;
+		  if (!o.name || o.name.trim().length === 0) return false;
+		  const base = baseNameForAssist(o.name);
+		  return !!base && objAssist.requiredBases.has(base);
+	  }).length;
+	const objInputUnmatched = objSnapshot
+	  ? objSnapshot.inputUnmatched
+	  : Math.max(0, objInputTotal - objInputMatched);
+
   const objHasExtraNow = objAssist.enabled && objExtraCount > 0;
   const objShowExtraError = objChecked && objHasExtraNow;
 
@@ -1046,6 +1129,40 @@ const [classZoom, setClassZoom] = useState(1);
     ? linkDiagnoseSnapshot.labelWarnings
     : linkAssist.labelWarnings;
 
+  // ===== A案表示用（入力側を分母にする） =====
+  const linkInputTotal = linkDiagnoseSnapshot
+    ? linkDiagnoseSnapshot.inputTotal
+    : (() => {
+        let cnt = 0;
+        for (const l of links) {
+          const fromObj = objects.find((o) => o.id === l.from);
+          const toObj = objects.find((o) => o.id === l.to);
+          if (!fromObj || !toObj) continue;
+          if (!fromObj.name?.trim() || !toObj.name?.trim()) continue;
+          cnt += 1;
+        }
+        return cnt;
+      })();
+  const linkInputMatched = linkDiagnoseSnapshot
+    ? linkDiagnoseSnapshot.inputMatched
+    : (() => {
+        let matched = 0;
+        for (const l of links) {
+          const fromObj = objects.find((o) => o.id === l.from);
+          const toObj = objects.find((o) => o.id === l.to);
+          if (!fromObj || !toObj) continue;
+          if (!fromObj.name?.trim() || !toObj.name?.trim()) continue;
+          const fromBase = baseNameForAssist(fromObj.name);
+          const toBase = baseNameForAssist(toObj.name);
+          const endpointKey = `${fromBase} -> ${toBase}`;
+          if (linkAssist.requiredEndpointKeys.has(endpointKey)) matched += 1;
+        }
+        return matched;
+      })();
+  const linkInputUnmatched = linkDiagnoseSnapshot
+    ? linkDiagnoseSnapshot.inputUnmatched
+    : Math.max(0, linkInputTotal - linkInputMatched);
+
   const linkHasExtraNow = linkAssist.enabled && linkExtraCount > 0;
   const linkShowExtraError = linkChecked && linkHasExtraNow;
 
@@ -1094,7 +1211,22 @@ const [classZoom, setClassZoom] = useState(1);
     // 診断ボタンを押した瞬間の結果を保存し、以降はリアルタイム反映しない
     setObjChecked(true);
 
+    // ===== A案：分母を「正答例の数」ではなく「入力した数」に寄せて表示する =====
+    const inputObjs = objects.filter((o) => {
+      if (editingObjectId && o.id === editingObjectId) return false;
+      return !!(o.name && o.name.trim().length > 0);
+    });
+    const inputTotal = inputObjs.length;
+    const inputMatched = inputObjs.filter((o) => {
+      const base = baseNameForAssist(o.name);
+      return objAssist.requiredBases.has(base);
+    }).length;
+    const inputUnmatched = Math.max(0, inputTotal - inputMatched);
+
     setObjDiagnoseSnapshot({
+      inputTotal,
+      inputMatched,
+      inputUnmatched,
       requiredCount: objAssist.requiredBases.size,
       missingCount: objAssist.missingBases.length,
       extraCount: objAssist.extraBases.length,
@@ -1145,11 +1277,36 @@ const [classZoom, setClassZoom] = useState(1);
   const handleLinkDiagnose = () => {
     setLinkChecked(true);
     // リンク診断結果も「押した時点」で固定表示する
+    // ===== A案：分母を「正答例の数」ではなく「入力した数」に寄せて表示する =====
+    const presentLinks: LinkSig[] = [];
+    for (const l of links) {
+      const fromObj = objects.find((o) => o.id === l.from);
+      const toObj = objects.find((o) => o.id === l.to);
+      if (!fromObj || !toObj) continue;
+      if (!fromObj.name || !toObj.name) continue;
+
+      const aBase = baseNameForAssist(fromObj.name);
+      const bBase = baseNameForAssist(toObj.name);
+      if (!aBase || !bBase) continue;
+
+      const label = normalizeLinkLabel(l.label ?? "");
+      const endpointKey = makeEndpointKey(aBase, bBase);
+      const fullKey = makeFullKey(endpointKey, label);
+      const pretty = label ? `${aBase} — ${bBase}（${label}）` : `${aBase} — ${bBase}`;
+      presentLinks.push({ a: aBase, b: bBase, label, endpointKey, fullKey, pretty });
+    }
+    const inputTotal = presentLinks.length;
+    const inputMatched = presentLinks.filter((p) => linkAssist.requiredEndpointKeys.has(p.endpointKey)).length;
+    const inputUnmatched = Math.max(0, inputTotal - inputMatched);
+
     const requiredCount = linkAssist.requiredEndpointKeys.size;
     const missingCount = linkAssist.missingPretty.length;
     const extraCount = linkAssist.extraLinks.length;
 
     setLinkDiagnoseSnapshot({
+      inputTotal,
+      inputMatched,
+      inputUnmatched,
       requiredCount,
       missingCount,
       extraCount,
@@ -1378,10 +1535,10 @@ const [classZoom, setClassZoom] = useState(1);
     // 状態（数だけ、具体名は出さない）
     parts.push("■ 現在の状態（数のみ）");
     parts.push(
-      `・オブジェクト：カバー ${objMatchedCount}/${objRequiredCount} ／ 未カバー ${objMissingCount}/${objRequiredCount} ／ 正答例と異なる候補 ${objExtraCount}`
+      `・オブジェクト：正答にある名前 ${objInputMatched}/${objInputTotal} ／ 正答にない名前 ${objInputUnmatched}/${objInputTotal} ／ 正答にあるが未入力 ${objMissingCount} ／ 正答例と異なる候補 ${objExtraCount}`
     );
     parts.push(
-      `・リンク：カバー ${linkMatchedCount}/${linkRequiredCount} ／ 未カバー ${linkMissingCount}/${linkRequiredCount} ／ 正答例と異なる候補 ${linkExtraCount}`
+      `・リンク：正答にある端点 ${linkInputMatched}/${linkInputTotal} ／ 正答にない端点 ${linkInputUnmatched}/${linkInputTotal} ／ 正答にあるが未入力 ${linkMissingCount} ／ 正答例と異なる候補 ${linkExtraCount}`
     );
     parts.push("");
 
@@ -1394,7 +1551,7 @@ const [classZoom, setClassZoom] = useState(1);
     }
     if (medium) {
       parts.push(
-        "・未カバーが残っていると、クラス図に必要なクラスや関連が欠けてしまうことがあります。"
+        "・不足が残っていると、クラス図に必要なクラスや関連が欠けてしまうことがあります。"
       );
     }
     if (weak && !strong && !medium) {
@@ -1535,16 +1692,31 @@ const [classZoom, setClassZoom] = useState(1);
     return highlightProblemByLine(text, tokens, fromName, toName);
   }, [objectProblemText, selectedObject?.name, selectedLinkFromName, selectedLinkToName]);
 
-  // ===== PlantUML サーバURL =====
+  
+  // ===== 表示用（学習者向け）クラス図PUML（型混在表記などを調整） =====
+  const displayClassPuml = useMemo(() => {
+    return sanitizeClassPumlForLearner(classPuml);
+  }, [classPuml]);
+
+  const displayEncodedClassPuml = useMemo(() => {
+    if (!displayClassPuml) return "";
+    try {
+      return plantumlEncoder.encode(displayClassPuml);
+    } catch {
+      return "";
+    }
+  }, [displayClassPuml]);
+
+// ===== PlantUML サーバURL =====
   const objectPreviewUrl = useMemo(() => {
     if (!encodedObjectPuml) return "";
     return `https://www.plantuml.com/plantuml/svg/${encodedObjectPuml}`;
   }, [encodedObjectPuml]);
 
   const classPreviewUrl = useMemo(() => {
-    if (!encodedClassPuml) return "";
-    return `https://www.plantuml.com/plantuml/svg/${encodedClassPuml}`;
-  }, [encodedClassPuml]);
+    if (!displayEncodedClassPuml) return "";
+    return `https://www.plantuml.com/plantuml/svg/${displayEncodedClassPuml}`;
+  }, [displayEncodedClassPuml]);
 
   // 「進む」ボタンは基本押せる。未入力だけは停止。
   const proceedDisabled = hasUnnamedObject;
@@ -1686,7 +1858,7 @@ const [classZoom, setClassZoom] = useState(1);
                 onToggle={() => setObjAssistCollapsed((v) => !v)}
                 rightText={
                   objAssist.enabled && objChecked
-                    ? `カバー：${objMatchedCount}/${objRequiredCount}　未カバー：${objMissingCount}/${objRequiredCount}　正答例と異なる候補：${objExtraCount}`
+                    ? `正答にある：${objInputMatched}/${objInputTotal}　正答にない：${objInputUnmatched}/${objInputTotal}　正答にあるが未入力：${objMissingCount}　正答例と異なる候補：${objExtraCount}`
                     : undefined
                 }
               />
@@ -1766,44 +1938,46 @@ const [classZoom, setClassZoom] = useState(1);
 
                   {!objChecked ? (
                     <div className="mt-2 text-[11px] text-slate-600">
-                      ※ 「オブジェクトを診断する」で、正答例に対するカバー/未カバーを確認できます
+                      ※ 「オブジェクトを診断する」で、
+                      あなたが入力したオブジェクト名が正答例に含まれるか／正答例にあるのに未入力のものがあるかを確認できます
                     </div>
                   ) : (
                     <div className="mt-2 text-[11px] text-slate-600">
                       <div>
-                        カバー：<span className="font-semibold">{objMatchedCount}</span>/
-                        {objRequiredCount}　
-                        未カバー：<span className="font-semibold">{objMissingCount}</span>/
-                        {objRequiredCount}
+                        <span className="font-semibold">あなたの入力（オブジェクト名）</span>：
+                        正答に含まれる <span className="font-semibold">{objInputMatched}</span>/{objInputTotal}　
+                        正答にない <span className="font-semibold">{objInputUnmatched}</span>/{objInputTotal}
                       </div>
-                      
+
+                      <div className="mt-1">
+                        <span className="font-semibold">正答にあるが未入力</span>：
+                        <span className="font-semibold">{objMissingCount}</span> 件
+                        <span className="text-slate-500">（具体名は表示しません）</span>
+                      </div>
+
                       {objSlotRequiredTotal > 0 && (
                         <div className="mt-1">
-                          <span className="text-slate-500">（スロット名の観点）</span>{" "}
-                          カバー：<span className="font-semibold">{objSlotMatchedTotal}</span>/
-                          {objSlotRequiredTotal}　
-                          未カバー：<span className="font-semibold">{objSlotMissingTotal}</span>/
-                          {objSlotRequiredTotal}
+                          <span className="font-semibold">必須スロット名</span>
+                          <span className="text-slate-500">（正答に含まれるオブジェクトだけ）</span>：
+                          OK <span className="font-semibold">{objSlotMatchedTotal}</span>/{objSlotRequiredTotal}　
+                          不足 <span className="font-semibold">{objSlotMissingTotal}</span>/{objSlotRequiredTotal}
                         </div>
                       )}
-	<div className="mt-1 text-slate-500">
-	                        ※ 未カバー（オブジェクト）は「正答例にあるのに入力にない」オブジェクトの数です（具体名は表示しません）
-	                      </div>
-                    
+
                       {objSlotRequiredTotal > 0 && (
                         <div className="mt-1 text-slate-500">
-	                          ※ スロット名の診断は「オブジェクト名がカバーされているもの」だけを対象にします（未カバーオブジェクトの中身は評価しません）
-	                        </div>
-	                      )}
-	                      {objSlotRequiredTotal > 0 && (
-	                        <div className="mt-1 text-slate-500">
-                          ※ スロットは「スロット名（キー）」のみ確認します（値は見ません）
+                          ※ スロット名の診断は「正答に含まれるオブジェクト」だけが対象です（未入力オブジェクトの中身は見ません）。
+                          スロットは「名前（キー）」のみ確認し、値は見ません。
                         </div>
                       )}
+
+                      <div className="mt-1 text-slate-500">
+                        ※ ここでの表示はあくまでヒントです。根拠があって正答例と異なる要素を入れているなら、そのままでもOKです。
+                      </div>
 </div>
                   )}
 
-                  {objChecked && objMatchedCount === objRequiredCount && objExtraCount === 0 && (objSlotRequiredTotal === 0 || objSlotMissingTotal === 0) && (
+                  {objChecked && objMissingCount === 0 && objExtraCount === 0 && (objSlotRequiredTotal === 0 || objSlotMissingTotal === 0) && (
                     <div className="mt-2 text-[11px] text-emerald-700 font-semibold">
                       正答例と一致しています（オブジェクト名／スロット名の観点）
                     </div>
@@ -1830,11 +2004,11 @@ const [classZoom, setClassZoom] = useState(1);
                     <div className="mt-3 text-[11px]">
                       <div className="font-semibold text-slate-700">
                         正答例と異なる可能性（開示済み：
-                        {Math.min(objRevealExtra, objAssist.extraBases.length)}/
-                        {objAssist.extraBases.length}）
+                        {Math.min(objRevealExtra, objExtraBasesForReveal.length)}/
+                        {objExtraBasesForReveal.length}）
                       </div>
                       <div className="mt-1 flex flex-wrap gap-1">
-                        {objAssist.extraBases.slice(0, objRevealExtra).map((b) => (
+                        {objExtraBasesForReveal.slice(0, objRevealExtra).map((b) => (
                           <span
                             key={b}
                             className="px-2 py-0.5 rounded border bg-white text-red-700"
@@ -2081,7 +2255,7 @@ const [classZoom, setClassZoom] = useState(1);
                 onToggle={() => setLinkAssistCollapsed((v) => !v)}
                 rightText={
                   linkAssist.enabled && linkChecked
-                    ? `カバー：${linkMatchedCount}/${linkRequiredCount}　未カバー：${linkMissingCount}/${linkRequiredCount}　正答例と異なる候補：${linkExtraCount}`
+                    ? `正答にある：${linkInputMatched}/${linkInputTotal}　正答にない：${linkInputUnmatched}/${linkInputTotal}　正答にあるが未入力：${linkMissingCount}　正答例と異なる候補：${linkExtraCount}`
                     : undefined
                 }
               />
@@ -2161,23 +2335,30 @@ const [classZoom, setClassZoom] = useState(1);
 
                   {!linkChecked ? (
                     <div className="mt-2 text-[11px] text-slate-600">
-                      ※ 「リンクを診断する」で、正答例に対するカバー/未カバーを確認できます（端点のみ）
+                      ※ 「リンクを診断する」で、
+                      あなたが入力したリンク端点が正答例に含まれるか／正答例にあるのに未入力の端点ペアがあるかを確認できます（端点のみ）
                     </div>
                   ) : (
                     <div className="mt-2 text-[11px] text-slate-600">
                       <div>
-                        カバー：<span className="font-semibold">{linkMatchedCount}</span>/
-                        {linkRequiredCount}　
-                        未カバー：<span className="font-semibold">{linkMissingCount}</span>/
-                        {linkRequiredCount}
+                        <span className="font-semibold">入力したリンク（端点）</span>：
+                        正答に含まれる <span className="font-semibold">{linkInputMatched}</span>/{linkInputTotal} ／
+                        正答にない <span className="font-semibold">{linkInputUnmatched}</span>/{linkInputTotal}
                       </div>
+
+                      <div className="mt-1">
+                        <span className="font-semibold">正答にあるが未入力</span>：
+                        <span className="font-semibold">{linkMissingCount}</span> 件
+                        <span className="text-slate-500">（具体名は表示しません）</span>
+                      </div>
+
                       <div className="mt-1 text-slate-500">
-                        ※ 未カバーは「正答例にあるのに入力にない」端点ペアの数です（具体名は表示しません）
+                        ※ 表示はあくまでヒントです。根拠があって正答例と異なるリンクを入れているなら、そのままでもOKです。
                       </div>
                     </div>
                   )}
 
-                  {linkChecked && linkMatchedCount === linkRequiredCount && linkExtraCount === 0 && (
+                  {linkChecked && linkMissingCount === 0 && linkExtraCount === 0 && (
                     <div className="mt-2 text-[11px] text-emerald-700 font-semibold">
                       正答例と一致しています（リンク端点の観点）
                     </div>
@@ -2377,6 +2558,12 @@ const [classZoom, setClassZoom] = useState(1);
 
               
               <div className="flex items-center gap-2">
+
+              <div className="flex items-center mr-2">
+                <span className="text-[11px] text-slate-500">型の見方</span>
+                <HelpBadge title={TYPE_LEGEND_TOOLTIP} />
+              </div>
+
                 <span className="text-[11px] w-12 text-center tabular-nums">
                   {Math.round(classZoom * 100)}%
                 </span>
@@ -2418,7 +2605,7 @@ const [classZoom, setClassZoom] = useState(1);
                 </div>
               )}
 
-              {!hasUnnamedObject && encodedClassPuml && (
+              {!hasUnnamedObject && displayEncodedClassPuml && (
                 <div className="flex-1 flex flex-col">
                   {classPreviewUrl && (
                     <div
@@ -2447,12 +2634,12 @@ const [classZoom, setClassZoom] = useState(1);
                           <div className="font-semibold">{c.name}</div>
                           {c.incomplete.length > 0 && (
                             <div className="text-amber-700">
-                              未入力の可能性がある属性: {c.incomplete.join(", ")}
+                              値が未入力の属性（値が1つも入っていない）: {c.incomplete.map(explainTypeText).join(", ")}
                             </div>
                           )}
                           {c.contradictory.length > 0 && (
                             <div className="text-red-700">
-                              型が混在している属性: {c.contradictory.join(", ")}
+                              型が混在している属性: {c.contradictory.map(explainTypeText).join(", ")}
                             </div>
                           )}
                         </div>
