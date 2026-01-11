@@ -116,7 +116,6 @@ const formatSlotValue = (raw: string): string => {
   return `"${escLabel(t)}"`;
 };
 
-
 // ===== 型（学習者向け表記） =====
 const TYPE_LEGEND_TOOLTIP =
   "【属性型の見方】\n" +
@@ -127,7 +126,6 @@ const TYPE_LEGEND_TOOLTIP =
   "型混在 = 同じ属性に複数の型が混ざっています（要確認）";
 
 const explainTypeText = (raw: string) => {
-
   // 図やチェック結果に出る型トークンを、日本語の理解を助ける形にする
   // ※ PlantUML自体は英語トークンでOK。ここは表示補助だけ。
   return (raw ?? "")
@@ -144,17 +142,11 @@ const sanitizeClassPumlForLearner = (puml: string) => {
 
   // === 型混在（<!>）の表現を「型が混在」に寄せる（型名は表示しない） ===
   // 例）氏名: string <!>  -> 氏名: （型が混在）
-  out = out.replace(
-    /:\s*([A-Za-z_][\w]*)\s*<!>\s*$/gm,
-    ": （型が混在）"
-  );
+  out = out.replace(/:\s*([A-Za-z_][\w]*)\s*<!>\s*$/gm, ": （型が混在）");
 
   // === 値が1つも無い（<?>）の表現を「値が未入力」に寄せる（型名は表示しない） ===
   // 例）氏名: string <?>  -> 氏名: （値が未入力）
-  out = out.replace(
-    /:\s*([A-Za-z_][\w]*)\s*<\?>\s*$/gm,
-    ": （値が未入力）"
-  );
+  out = out.replace(/:\s*([A-Za-z_][\w]*)\s*<\?>\s*$/gm, ": （値が未入力）");
   // まれに型名が無いまま<?>だけ付くケース
   out = out.replace(/:\s*<\?>\s*$/gm, ": （値が未入力）");
 
@@ -169,7 +161,56 @@ const sanitizeClassPumlForLearner = (puml: string) => {
   return out;
 };
 
+/**
+ * 推定クラス図の関連が点線(..)で出てくる場合があるため、
+ * 関連オペレータ（.. / ..> / <.. / ..|> など）だけを実線（--）系に強制変換する。
+ * ※ "0..*" 等の多重度（引用符つき）はトークン判定で除外される
+ */
+const forceSolidRelations = (puml: string) => {
+  if (!puml) return puml;
+  const lines = puml.split(/\r?\n/);
 
+  const shouldSkipLine = (t: string) => {
+    if (!t) return true;
+    if (t.startsWith("'")) return true;
+    if (
+      /^(?:@startuml|@enduml|skinparam|hide|show|title|left to right direction)\b/i.test(
+        t
+      )
+    )
+      return true;
+    return false;
+  };
+
+  const isRelationOpToken = (tok: string) => {
+    // 例: .., ..>, <.., ..|>, o.., *.., ..*, ..o など（PlantUMLの関係オペレータ想定）
+    // ※ 多重度 "0..*" は引用符が付くのでここには入らない
+    return /^[.\-o*<>()\/\\|><]+$/.test(tok) && tok.includes(".");
+  };
+
+  const out = lines.map((line) => {
+    const trimmed = line.trim();
+    if (shouldSkipLine(trimmed)) return line;
+
+    // 空白を保持したままトークン置換する（見た目を崩さない）
+    const parts = line.split(/(\s+)/); // 空白も配列要素として保持
+    let changed = false;
+
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      if (!p || /^\s+$/.test(p)) continue;
+
+      if (isRelationOpToken(p)) {
+        parts[i] = p.replace(/\./g, "-");
+        changed = true;
+      }
+    }
+
+    return changed ? parts.join("") : line;
+  });
+
+  return out.join("\n");
+};
 
 // ===== OD作成アシスト（パターン1/4） =====
 const stripHtmlTags = (s: string) => s.replace(/<[^>]*>/g, "");
@@ -213,7 +254,6 @@ const extractSlotKeyFromPumlLine = (line: string) => {
   const m = t.match(/^(.+?)\s*[:=]/);
   return (m?.[1] ?? t).trim();
 };
-
 
 // 正答PlantUMLから object ラベル抽出（{があってもなくても拾う）
 const extractObjectLabelsFromPuml = (puml: string) => {
@@ -621,16 +661,15 @@ const ExperimentPage: React.FC = () => {
   const [issues, setIssues] = useState<IssuesResponse | null>(null);
   const [relationHints, setRelationHints] = useState<RelationHint[]>([]);
 
-// --- プレビュー拡大・縮小（SVGの縦横比を崩さない） ---
-const ZOOM_MIN = 0.3;
-const ZOOM_MAX = 3.0;
-const ZOOM_STEP = 0.1;
+  // --- プレビュー拡大・縮小（SVGの縦横比を崩さない） ---
+  const ZOOM_MIN = 0.3;
+  const ZOOM_MAX = 3.0;
+  const ZOOM_STEP = 0.1;
 
-const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+  const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
 
-const [objectZoom, setObjectZoom] = useState(1);
-const [classZoom, setClassZoom] = useState(1);
-
+  const [objectZoom, setObjectZoom] = useState(1);
+  const [classZoom, setClassZoom] = useState(1);
 
   // --- 問題文の表示制御 ---
   const [showClassProblemFull, setShowClassProblemFull] = useState(false);
@@ -652,7 +691,8 @@ const [classZoom, setClassZoom] = useState(1);
 
   // 「正答例と異なる〜を見る」を“編集後に解禁”するための誘導表示
   const [objRevealUnlockedNotice, setObjRevealUnlockedNotice] = useState(false);
-  const [linkRevealUnlockedNotice, setLinkRevealUnlockedNotice] = useState(false);
+  const [linkRevealUnlockedNotice, setLinkRevealUnlockedNotice] =
+    useState(false);
 
   const prevObjRevealCanProceedRef = useRef(false);
   const prevLinkRevealCanProceedRef = useRef(false);
@@ -808,8 +848,16 @@ const [classZoom, setClassZoom] = useState(1);
         if (!res.ok) return;
 
         const data = (await res.json()) as ConvertResponse;
-        setClassPuml(data.classPuml);
-        setEncodedClassPuml(data.encodedPuml);
+
+        // ★ 点線(..)→実線(--)へ（推定クラス図の見え方を揃える）
+        const solid = forceSolidRelations(data.classPuml);
+
+        setClassPuml(solid);
+        try {
+          setEncodedClassPuml(plantumlEncoder.encode(solid));
+        } catch {
+          setEncodedClassPuml("");
+        }
         setIssues(data.issues ?? null);
         setRelationHints(data.relationHints ?? []);
       } catch (e: any) {
@@ -846,8 +894,7 @@ const [classZoom, setClassZoom] = useState(1);
     return objects.find((o) => o.id === selectedLink.to)?.name?.trim() ?? "";
   }, [selectedLink, objects]);
 
-  // ===== パターン1（オブジェクト不足/過剰） =====
-    // ===== パターン1（オブジェクト不足/過剰）＋スロット（キー）不足（方針B） =====
+  // ===== パターン1（オブジェクト不足/過剰）＋スロット（キー）不足（方針B） =====
   const objAssist = useMemo(() => {
     const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
 
@@ -952,59 +999,69 @@ const [classZoom, setClassZoom] = useState(1);
     };
   }, [objects, objectAnswerPuml, editingObjectId]);
 
-	const objSnapshot = objChecked ? objDiagnoseSnapshot : null;
+  const objSnapshot = objChecked ? objDiagnoseSnapshot : null;
 
-	const objRequiredCount = objSnapshot
-	  ? objSnapshot.requiredCount
-	  : objAssist.requiredBases.size;
-	const objMissingCount = objSnapshot
-	  ? objSnapshot.missingCount
-	  : objAssist.missingBases.length;
-	const objMatchedCount = Math.max(0, objRequiredCount - objMissingCount);
-	const objExtraCount = objSnapshot ? objSnapshot.extraCount : objAssist.extraBases.length;
+  const objRequiredCount = objSnapshot
+    ? objSnapshot.requiredCount
+    : objAssist.requiredBases.size;
+  const objMissingCount = objSnapshot
+    ? objSnapshot.missingCount
+    : objAssist.missingBases.length;
+  const objMatchedCount = Math.max(0, objRequiredCount - objMissingCount);
+  const objExtraCount = objSnapshot
+    ? objSnapshot.extraCount
+    : objAssist.extraBases.length;
 
-	const objSlotRequiredTotal = objSnapshot
-	  ? objSnapshot.slotRequiredTotal
-	  : objAssist.requiredSlotKeyTotal;
-	const objSlotMissingTotal = objSnapshot
-	  ? objSnapshot.slotMissingTotal
-	  : objAssist.missingSlotKeyTotal;
-	const objSlotMatchedTotal = objSnapshot
-	  ? objSnapshot.slotMatchedTotal
-	  : objAssist.matchedSlotKeyTotal;
-	const objExtraSlotCount = objSnapshot ? objSnapshot.extraSlotCount : objAssist.extraSlotKeyTotal;
+  const objSlotRequiredTotal = objSnapshot
+    ? objSnapshot.slotRequiredTotal
+    : objAssist.requiredSlotKeyTotal;
+  const objSlotMissingTotal = objSnapshot
+    ? objSnapshot.slotMissingTotal
+    : objAssist.missingSlotKeyTotal;
+  const objSlotMatchedTotal = objSnapshot
+    ? objSnapshot.slotMatchedTotal
+    : objAssist.matchedSlotKeyTotal;
+  const objExtraSlotCount = objSnapshot
+    ? objSnapshot.extraSlotCount
+    : objAssist.extraSlotKeyTotal;
 
-	const objExtraBasesForReveal = objSnapshot ? objSnapshot.extraBases : objAssist.extraBases;
+  const objExtraBasesForReveal = objSnapshot
+    ? objSnapshot.extraBases
+    : objAssist.extraBases;
 
-	// ===== A案表示用（入力側を分母にする） =====
-	const objInputTotal = objSnapshot
-	  ? objSnapshot.inputTotal
-	  : objects.filter((o) => !!(o.name && o.name.trim().length > 0) && !(editingObjectId && o.id === editingObjectId)).length;
-	const objInputMatched = objSnapshot
-	  ? objSnapshot.inputMatched
-	  : objects.filter((o) => {
-		  if (editingObjectId && o.id === editingObjectId) return false;
-		  if (!o.name || o.name.trim().length === 0) return false;
-		  const base = baseNameForAssist(o.name);
-		  return !!base && objAssist.requiredBases.has(base);
-	  }).length;
-	const objInputUnmatched = objSnapshot
-	  ? objSnapshot.inputUnmatched
-	  : Math.max(0, objInputTotal - objInputMatched);
+  // ===== A案表示用（入力側を分母にする） =====
+  const objInputTotal = objSnapshot
+    ? objSnapshot.inputTotal
+    : objects.filter(
+        (o) =>
+          !!(o.name && o.name.trim().length > 0) &&
+          !(editingObjectId && o.id === editingObjectId)
+      ).length;
+  const objInputMatched = objSnapshot
+    ? objSnapshot.inputMatched
+    : objects.filter((o) => {
+        if (editingObjectId && o.id === editingObjectId) return false;
+        if (!o.name || o.name.trim().length === 0) return false;
+        const base = baseNameForAssist(o.name);
+        return !!base && objAssist.requiredBases.has(base);
+      }).length;
+  const objInputUnmatched = objSnapshot
+    ? objSnapshot.inputUnmatched
+    : Math.max(0, objInputTotal - objInputMatched);
 
   const objHasExtraNow = objAssist.enabled && objExtraCount > 0;
   const objShowExtraError = objChecked && objHasExtraNow;
 
   const objRevealDisabledReason = useMemo(() => {
     if (!objChecked) return "まず「オブジェクトを診断する」を押してください。";
-	  if (objExtraBasesForReveal.length === 0)
+    if (objExtraBasesForReveal.length === 0)
       return "正答例と異なる候補がないため表示できません。";
-	  if (objRevealExtra >= objExtraBasesForReveal.length)
+    if (objRevealExtra >= objExtraBasesForReveal.length)
       return "候補はすべて表示済みです。";
     if (!objDirtySinceHint)
       return "次の候補を見るには、診断後にオブジェクト図を一度修正してください（例：オブジェクト名／スロット名の追加・修正・削除）。";
     return null;
-	}, [objChecked, objExtraBasesForReveal.length, objRevealExtra, objDirtySinceHint]);
+  }, [objChecked, objExtraBasesForReveal.length, objRevealExtra, objDirtySinceHint]);
 
   const objRevealDisabled = objRevealDisabledReason !== null;
 
@@ -1066,10 +1123,19 @@ const [classZoom, setClassZoom] = useState(1);
       const pretty = label
         ? `${aBase} — ${bBase}（${label}）`
         : `${aBase} — ${bBase}`;
-      presentLinks.push({ a: aBase, b: bBase, label, endpointKey, fullKey, pretty });
+      presentLinks.push({
+        a: aBase,
+        b: bBase,
+        label,
+        endpointKey,
+        fullKey,
+        pretty,
+      });
     }
 
-    const presentEndpointKeys = new Set<string>(presentLinks.map((p) => p.endpointKey));
+    const presentEndpointKeys = new Set<string>(
+      presentLinks.map((p) => p.endpointKey)
+    );
 
     const missingEndpoints = enabled
       ? Array.from(requiredEndpointKeys)
@@ -1146,15 +1212,19 @@ const [classZoom, setClassZoom] = useState(1);
   const linkInputMatched = linkDiagnoseSnapshot
     ? linkDiagnoseSnapshot.inputMatched
     : (() => {
+        // ★ endpointKey の形式を requiredEndpointKeys と揃える（sorted "A||B"）
         let matched = 0;
         for (const l of links) {
           const fromObj = objects.find((o) => o.id === l.from);
           const toObj = objects.find((o) => o.id === l.to);
           if (!fromObj || !toObj) continue;
           if (!fromObj.name?.trim() || !toObj.name?.trim()) continue;
+
           const fromBase = baseNameForAssist(fromObj.name);
           const toBase = baseNameForAssist(toObj.name);
-          const endpointKey = `${fromBase} -> ${toBase}`;
+          if (!fromBase || !toBase) continue;
+
+          const endpointKey = makeEndpointKey(fromBase, toBase);
           if (linkAssist.requiredEndpointKeys.has(endpointKey)) matched += 1;
         }
         return matched;
@@ -1272,7 +1342,6 @@ const [classZoom, setClassZoom] = useState(1);
     scrollObjAssistToBottom();
   };
 
-
   // ===== リンクアシスト操作 =====
   const handleLinkDiagnose = () => {
     setLinkChecked(true);
@@ -1292,11 +1361,15 @@ const [classZoom, setClassZoom] = useState(1);
       const label = normalizeLinkLabel(l.label ?? "");
       const endpointKey = makeEndpointKey(aBase, bBase);
       const fullKey = makeFullKey(endpointKey, label);
-      const pretty = label ? `${aBase} — ${bBase}（${label}）` : `${aBase} — ${bBase}`;
+      const pretty = label
+        ? `${aBase} — ${bBase}（${label}）`
+        : `${aBase} — ${bBase}`;
       presentLinks.push({ a: aBase, b: bBase, label, endpointKey, fullKey, pretty });
     }
     const inputTotal = presentLinks.length;
-    const inputMatched = presentLinks.filter((p) => linkAssist.requiredEndpointKeys.has(p.endpointKey)).length;
+    const inputMatched = presentLinks.filter((p) =>
+      linkAssist.requiredEndpointKeys.has(p.endpointKey)
+    ).length;
     const inputUnmatched = Math.max(0, inputTotal - inputMatched);
 
     const requiredCount = linkAssist.requiredEndpointKeys.size;
@@ -1352,7 +1425,6 @@ const [classZoom, setClassZoom] = useState(1);
     scrollLinkAssistToBottom();
   };
 
-
   // ===== オブジェクト操作 =====
   const handleAddObject = () => {
     const id = makeId();
@@ -1364,7 +1436,9 @@ const [classZoom, setClassZoom] = useState(1);
   };
 
   const handleUpdateObjectName = (id: string, newName: string) => {
-    setObjects((prev) => prev.map((o) => (o.id === id ? { ...o, name: newName } : o)));
+    setObjects((prev) =>
+      prev.map((o) => (o.id === id ? { ...o, name: newName } : o))
+    );
     markMeaningfulChange(true, true);
   };
 
@@ -1383,16 +1457,22 @@ const [classZoom, setClassZoom] = useState(1);
       ...selectedObject,
       slots: [...selectedObject.slots, { key: "", value: "" }],
     };
-    setObjects((prev) => prev.map((o) => (o.id === selectedObject.id ? updated : o)));
+    setObjects((prev) =>
+      prev.map((o) => (o.id === selectedObject.id ? updated : o))
+    );
     // スロット操作も「編集」として扱い、次のヒント解禁につなげる
     markMeaningfulChange(true, false);
   };
 
   const handleUpdateSlot = (index: number, partial: Partial<Slot>) => {
     if (!selectedObject) return;
-    const newSlots = selectedObject.slots.map((s, i) => (i === index ? { ...s, ...partial } : s));
+    const newSlots = selectedObject.slots.map((s, i) =>
+      i === index ? { ...s, ...partial } : s
+    );
     setObjects((prev) =>
-      prev.map((o) => (o.id === selectedObject.id ? { ...o, slots: newSlots } : o))
+      prev.map((o) =>
+        o.id === selectedObject.id ? { ...o, slots: newSlots } : o
+      )
     );
     markMeaningfulChange(true, false);
   };
@@ -1401,7 +1481,9 @@ const [classZoom, setClassZoom] = useState(1);
     if (!selectedObject) return;
     const newSlots = selectedObject.slots.filter((_, i) => i !== index);
     setObjects((prev) =>
-      prev.map((o) => (o.id === selectedObject.id ? { ...o, slots: newSlots } : o))
+      prev.map((o) =>
+        o.id === selectedObject.id ? { ...o, slots: newSlots } : o
+      )
     );
     markMeaningfulChange(true, false);
   };
@@ -1449,15 +1531,17 @@ const [classZoom, setClassZoom] = useState(1);
       setSelectedObjectId(null);
       setSelectedLinkId(null);
       setEditingObjectId(null);
-	      // 復元直後は再診断してもらう（診断結果は固定表示のため）
-	      setObjChecked(false);
-	      setObjDiagnoseSnapshot(null);
-	      setObjRevealExtra(0);
-	      setObjDirtySinceHint(false);
-	      setLinkChecked(false);
-	      setLinkDiagnoseSnapshot(null);
-	      setLinkRevealExtra(0);
-	      setLinkDirtySinceHint(false);
+
+      // 復元直後は再診断してもらう（診断結果は固定表示のため）
+      setObjChecked(false);
+      setObjDiagnoseSnapshot(null);
+      setObjRevealExtra(0);
+      setObjDirtySinceHint(false);
+      setLinkChecked(false);
+      setLinkDiagnoseSnapshot(null);
+      setLinkRevealExtra(0);
+      setLinkDirtySinceHint(false);
+
       markMeaningfulChange(true, true);
       alert("保存されていた状態を復元しました。");
     } catch {
@@ -1466,20 +1550,23 @@ const [classZoom, setClassZoom] = useState(1);
   };
 
   const handleClearAll = () => {
-    if (!window.confirm("オブジェクトとリンクをすべて削除します。よろしいですか？")) return;
+    if (!window.confirm("オブジェクトとリンクをすべて削除します。よろしいですか？"))
+      return;
     setObjects([]);
     setLinks([]);
     setSelectedObjectId(null);
     setSelectedLinkId(null);
     setEditingObjectId(null);
-	    setObjChecked(false);
-	    setObjDiagnoseSnapshot(null);
-	    setObjRevealExtra(0);
-	    setObjDirtySinceHint(false);
-	    setLinkChecked(false);
-	    setLinkDiagnoseSnapshot(null);
-	    setLinkRevealExtra(0);
-	    setLinkDirtySinceHint(false);
+
+    setObjChecked(false);
+    setObjDiagnoseSnapshot(null);
+    setObjRevealExtra(0);
+    setObjDirtySinceHint(false);
+    setLinkChecked(false);
+    setLinkDiagnoseSnapshot(null);
+    setLinkRevealExtra(0);
+    setLinkDirtySinceHint(false);
+
     setClassPuml("");
     setEncodedClassPuml("");
     setIssues(null);
@@ -1562,20 +1649,28 @@ const [classZoom, setClassZoom] = useState(1);
     // 行動誘導
     parts.push("■ まず何をすればいい？（おすすめの次の一手）");
     if (!objChecked || !linkChecked) {
-      parts.push("・「オブジェクトを診断する」「リンクを診断する」を押して、状態を確認してください。");
+      parts.push(
+        "・「オブジェクトを診断する」「リンクを診断する」を押して、状態を確認してください。"
+      );
     }
     if (objChecked && objExtraCount > 0) {
-      parts.push("・「正答例と異なるオブジェクトを見る」で、候補を根拠と照らして確認してください。");
+      parts.push(
+        "・「正答例と異なるオブジェクトを見る」で、候補を根拠と照らして確認してください。"
+      );
     }
     if (linkChecked && linkExtraCount > 0) {
-      parts.push("・「正答例と異なるリンクを見る」で、候補を根拠と照らして確認してください。");
+      parts.push(
+        "・「正答例と異なるリンクを見る」で、候補を根拠と照らして確認してください。"
+      );
     }
     parts.push("");
 
     // 注意（それでも進む場合）
     parts.push("■ それでも進む場合");
     parts.push("・根拠があって「正答例と異なる候補」を入れているなら、進んでもOKです。");
-    parts.push("・ただし次のクラス図編集で「なぜ入れたか」を説明できる状態にしておくのがおすすめです。");
+    parts.push(
+      "・ただし次のクラス図編集で「なぜ入れたか」を説明できる状態にしておくのがおすすめです。"
+    );
     parts.push("");
     parts.push("このままクラス図編集へ進みますか？");
 
@@ -1611,9 +1706,17 @@ const [classZoom, setClassZoom] = useState(1);
     let result: ConvertResponse | null = null;
 
     if (classPuml) {
+      const solid = forceSolidRelations(classPuml);
+      let encoded = "";
+      try {
+        encoded = plantumlEncoder.encode(solid);
+      } catch {
+        encoded = encodedClassPuml || "";
+      }
+
       result = {
-        classPuml,
-        encodedPuml: encodedClassPuml,
+        classPuml: solid,
+        encodedPuml: encoded,
         issues: issues ?? undefined,
         relationHints,
       };
@@ -1646,11 +1749,20 @@ const [classZoom, setClassZoom] = useState(1);
         }
 
         const data = (await res.json()) as ConvertResponse;
-        setClassPuml(data.classPuml);
-        setEncodedClassPuml(data.encodedPuml);
+
+        const solid = forceSolidRelations(data.classPuml);
+        let encoded = "";
+        try {
+          encoded = plantumlEncoder.encode(solid);
+        } catch {
+          encoded = data.encodedPuml;
+        }
+
+        setClassPuml(solid);
+        setEncodedClassPuml(encoded);
         setIssues(data.issues ?? null);
         setRelationHints(data.relationHints ?? []);
-        result = data;
+        result = { ...data, classPuml: solid, encodedPuml: encoded };
       } catch (e) {
         console.error(e);
         alert("クラス図への変換で予期しないエラーが発生しました。");
@@ -1690,12 +1802,17 @@ const [classZoom, setClassZoom] = useState(1);
     if (toName) tokens.push({ text: toName, kind: "link" });
 
     return highlightProblemByLine(text, tokens, fromName, toName);
-  }, [objectProblemText, selectedObject?.name, selectedLinkFromName, selectedLinkToName]);
+  }, [
+    objectProblemText,
+    selectedObject?.name,
+    selectedLinkFromName,
+    selectedLinkToName,
+  ]);
 
-  
   // ===== 表示用（学習者向け）クラス図PUML（型混在表記などを調整） =====
   const displayClassPuml = useMemo(() => {
-    return sanitizeClassPumlForLearner(classPuml);
+    // sanitize の前に一応実線化（保険）
+    return sanitizeClassPumlForLearner(forceSolidRelations(classPuml));
   }, [classPuml]);
 
   const displayEncodedClassPuml = useMemo(() => {
@@ -1707,7 +1824,7 @@ const [classZoom, setClassZoom] = useState(1);
     }
   }, [displayClassPuml]);
 
-// ===== PlantUML サーバURL =====
+  // ===== PlantUML サーバURL =====
   const objectPreviewUrl = useMemo(() => {
     if (!encodedObjectPuml) return "";
     return `https://www.plantuml.com/plantuml/svg/${encodedObjectPuml}`;
@@ -1873,8 +1990,10 @@ const [classZoom, setClassZoom] = useState(1);
                       オブジェクトを診断する
                     </button>
 
-                    
-                    <div className="relative inline-block group" title={objRevealDisabled ? (objRevealDisabledReason ?? "") : ""}>
+                    <div
+                      className="relative inline-block group"
+                      title={objRevealDisabled ? objRevealDisabledReason ?? "" : ""}
+                    >
                       <button
                         className={
                           "px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50 disabled:cursor-not-allowed" +
@@ -1882,19 +2001,14 @@ const [classZoom, setClassZoom] = useState(1);
                         }
                         onClick={handleObjRevealNextExtra}
                         disabled={objRevealDisabled}
-                        aria-describedby={
-                          objRevealDisabled ? "obj-reveal-disabled-tip" : undefined
-                        }
+                        aria-describedby={objRevealDisabled ? "obj-reveal-disabled-tip" : undefined}
                       >
                         正答例と異なるオブジェクトを見る
                       </button>
 
                       {objRevealDisabled && (
                         <>
-                          <span
-                            className="absolute inset-0 cursor-not-allowed"
-                            aria-hidden="true"
-                          />
+                          <span className="absolute inset-0 cursor-not-allowed" aria-hidden="true" />
                           <div
                             id="obj-reveal-disabled-tip"
                             role="tooltip"
@@ -1909,32 +2023,34 @@ const [classZoom, setClassZoom] = useState(1);
                     </div>
                   </div>
 
-                  {objChecked && objExtraBasesForReveal.length > 0 && objRevealExtra < objExtraBasesForReveal.length && (
-                    <div className="mt-2 text-[11px]">
-                      {objRevealCanProceed ? (
-                        <div className="text-emerald-700">
-                          ✅ 編集を検知しました。<span className="font-semibold">「正答例と異なるオブジェクトを見る」</span>が押せます。
-                          {objRevealUnlockedNotice && (
-                            <span className="ml-2 inline-flex items-center rounded border bg-emerald-50 border-emerald-200 px-2 py-0.5 text-[10px]">
-                              ボタンが解禁されました
-                            </span>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="text-slate-600">
-                          🔒 次の候補を見るには、オブジェクト図を一度修正してください（例：名前/スロット名の修正、追加、削除）。
-                          <button
-                            type="button"
-                            className="ml-2 underline text-sky-700 hover:text-sky-800"
-                            onClick={handleObjRevealNextExtraForce}
-                            title="学習効果のため通常は『修正→表示』をおすすめします"
-                          >
-                            編集せずに表示
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  {objChecked &&
+                    objExtraBasesForReveal.length > 0 &&
+                    objRevealExtra < objExtraBasesForReveal.length && (
+                      <div className="mt-2 text-[11px]">
+                        {objRevealCanProceed ? (
+                          <div className="text-emerald-700">
+                            ✅ 編集を検知しました。<span className="font-semibold">「正答例と異なるオブジェクトを見る」</span>が押せます。
+                            {objRevealUnlockedNotice && (
+                              <span className="ml-2 inline-flex items-center rounded border bg-emerald-50 border-emerald-200 px-2 py-0.5 text-[10px]">
+                                ボタンが解禁されました
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="text-slate-600">
+                            🔒 次の候補を見るには、オブジェクト図を一度修正してください（例：名前/スロット名の修正、追加、削除）。
+                            <button
+                              type="button"
+                              className="ml-2 underline text-sky-700 hover:text-sky-800"
+                              onClick={handleObjRevealNextExtraForce}
+                              title="学習効果のため通常は『修正→表示』をおすすめします"
+                            >
+                              編集せずに表示
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                   {!objChecked ? (
                     <div className="mt-2 text-[11px] text-slate-600">
@@ -1974,14 +2090,17 @@ const [classZoom, setClassZoom] = useState(1);
                       <div className="mt-1 text-slate-500">
                         ※ ここでの表示はあくまでヒントです。根拠があって正答例と異なる要素を入れているなら、そのままでもOKです。
                       </div>
-</div>
-                  )}
-
-                  {objChecked && objMissingCount === 0 && objExtraCount === 0 && (objSlotRequiredTotal === 0 || objSlotMissingTotal === 0) && (
-                    <div className="mt-2 text-[11px] text-emerald-700 font-semibold">
-                      正答例と一致しています（オブジェクト名／スロット名の観点）
                     </div>
                   )}
+
+                  {objChecked &&
+                    objMissingCount === 0 &&
+                    objExtraCount === 0 &&
+                    (objSlotRequiredTotal === 0 || objSlotMissingTotal === 0) && (
+                      <div className="mt-2 text-[11px] text-emerald-700 font-semibold">
+                        正答例と一致しています（オブジェクト名／スロット名の観点）
+                      </div>
+                    )}
 
                   {objChecked && objShowExtraError && (
                     <div className="mt-2 border border-red-300 bg-red-50 text-red-700 text-[11px] rounded p-2">
@@ -2009,10 +2128,7 @@ const [classZoom, setClassZoom] = useState(1);
                       </div>
                       <div className="mt-1 flex flex-wrap gap-1">
                         {objExtraBasesForReveal.slice(0, objRevealExtra).map((b) => (
-                          <span
-                            key={b}
-                            className="px-2 py-0.5 rounded border bg-white text-red-700"
-                          >
+                          <span key={b} className="px-2 py-0.5 rounded border bg-white text-red-700">
                             {b}
                           </span>
                         ))}
@@ -2038,9 +2154,7 @@ const [classZoom, setClassZoom] = useState(1);
                       key={o.id}
                       className={
                         "w-full text-left px-2 py-1 border-b flex items-center justify-between " +
-                        (isSelected
-                          ? "bg-amber-100 ring-1 ring-amber-400"
-                          : "hover:bg-slate-100")
+                        (isSelected ? "bg-amber-100 ring-1 ring-amber-400" : "hover:bg-slate-100")
                       }
                       onClick={() => {
                         setSelectedObjectId((prev) => (prev === o.id ? null : o.id));
@@ -2048,9 +2162,7 @@ const [classZoom, setClassZoom] = useState(1);
                       }}
                     >
                       <span className="truncate">{o.name || "(無名オブジェクト)"}</span>
-                      <span className="text-[10px] text-slate-500 ml-2">
-                        {o.slots.length} スロット
-                      </span>
+                      <span className="text-[10px] text-slate-500 ml-2">{o.slots.length} スロット</span>
                     </button>
                   );
                 })}
@@ -2067,10 +2179,7 @@ const [classZoom, setClassZoom] = useState(1);
                   <div className="flex flex-col gap-2">
                     <div>
                       <div className="flex items-center">
-                        <label
-                          className="block text-[11px] font-semibold mb-1"
-                          title={TOOLTIP.objectName}
-                        >
+                        <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.objectName}>
                           オブジェクト名
                         </label>
                         <HelpBadge title={TOOLTIP.objectName} />
@@ -2079,9 +2188,7 @@ const [classZoom, setClassZoom] = useState(1);
                       <input
                         className="w-full border rounded px-2 py-1 text-xs"
                         value={selectedObject.name}
-                        onChange={(e) =>
-                          handleUpdateObjectName(selectedObject.id, e.target.value)
-                        }
+                        onChange={(e) => handleUpdateObjectName(selectedObject.id, e.target.value)}
                         onFocus={() => setEditingObjectId(selectedObject.id)}
                         onBlur={() => setEditingObjectId(null)}
                         placeholder="例）学生1、授業A など"
@@ -2092,10 +2199,7 @@ const [classZoom, setClassZoom] = useState(1);
                     <div>
                       <div className="flex items-center justify-between mb-1">
                         <div className="flex items-center">
-                          <span
-                            className="text-[11px] font-semibold"
-                            title={`${TOOLTIP.slotKey}\n${TOOLTIP.slotValue}`}
-                          >
+                          <span className="text-[11px] font-semibold" title={`${TOOLTIP.slotKey}\n${TOOLTIP.slotValue}`}>
                             スロット（スロット名 と 値）
                           </span>
                           <HelpBadge title={`${TOOLTIP.slotKey}\n${TOOLTIP.slotValue}`} />
@@ -2110,24 +2214,17 @@ const [classZoom, setClassZoom] = useState(1);
                       </div>
 
                       {selectedObject.slots.length === 0 && (
-                        <div className="text-[11px] text-slate-500 mb-1">
-                          例）スロット名：年齢、値：19 など
-                        </div>
+                        <div className="text-[11px] text-slate-500 mb-1">例）スロット名：年齢、値：19 など</div>
                       )}
 
                       <div className="flex flex-col gap-1">
                         {selectedObject.slots.map((s, idx) => (
-                          <div
-                            key={idx}
-                            className="border rounded px-2 py-1 bg-white flex flex-col gap-2"
-                          >
+                          <div key={idx} className="border rounded px-2 py-1 bg-white flex flex-col gap-2">
                             <div className="flex items-center gap-2">
                               <input
                                 className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                                 value={s.key}
-                                onChange={(e) =>
-                                  handleUpdateSlot(idx, { key: e.target.value })
-                                }
+                                onChange={(e) => handleUpdateSlot(idx, { key: e.target.value })}
                                 placeholder="スロット名（例：年齢）"
                                 title={TOOLTIP.slotKey}
                               />
@@ -2135,9 +2232,7 @@ const [classZoom, setClassZoom] = useState(1);
                               <input
                                 className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                                 value={s.value}
-                                onChange={(e) =>
-                                  handleUpdateSlot(idx, { value: e.target.value })
-                                }
+                                onChange={(e) => handleUpdateSlot(idx, { value: e.target.value })}
                                 placeholder={'値（例：19、"文学" など）'}
                                 title={TOOLTIP.slotValue}
                               />
@@ -2176,7 +2271,6 @@ const [classZoom, setClassZoom] = useState(1);
             <div className="p-2 border-b bg-white flex items-center justify-between">
               <span className="font-semibold text-sm">オブジェクト図プレビュー（リアルタイム）</span>
 
-              
               <div className="flex items-center gap-2">
                 <span className="text-[11px] w-12 text-center tabular-nums">
                   {Math.round(objectZoom * 100)}%
@@ -2188,9 +2282,7 @@ const [classZoom, setClassZoom] = useState(1);
                   max={ZOOM_MAX}
                   step={ZOOM_STEP}
                   value={objectZoom}
-                  onChange={(e) =>
-                    setObjectZoom(clampZoom(parseFloat(e.currentTarget.value)))
-                  }
+                  onChange={(e) => setObjectZoom(clampZoom(parseFloat(e.currentTarget.value)))}
                   disabled={!objectPreviewUrl}
                   className="w-40"
                   title="ドラッグして倍率を変更"
@@ -2206,7 +2298,6 @@ const [classZoom, setClassZoom] = useState(1);
                 >
                   100%
                 </button>
-                
               </div>
             </div>
             <div className="flex-1 overflow-auto bg-white p-2">
@@ -2214,12 +2305,8 @@ const [classZoom, setClassZoom] = useState(1);
                 <div>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <div style={{ zoom: objectZoom }} className="inline-block origin-top-left">
-                  <img
-                    src={objectPreviewUrl}
-                    alt="オブジェクト図プレビュー"
-                    className="block max-w-none h-auto"
-                  />
-                </div>
+                    <img src={objectPreviewUrl} alt="オブジェクト図プレビュー" className="block max-w-none h-auto" />
+                  </div>
                 </div>
               )}
             </div>
@@ -2270,8 +2357,10 @@ const [classZoom, setClassZoom] = useState(1);
                       リンクを診断する
                     </button>
 
-                    
-                    <div className="relative inline-block group" title={linkRevealDisabled ? (linkRevealDisabledReason ?? "") : ""}>
+                    <div
+                      className="relative inline-block group"
+                      title={linkRevealDisabled ? linkRevealDisabledReason ?? "" : ""}
+                    >
                       <button
                         className={
                           "px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50 disabled:cursor-not-allowed" +
@@ -2279,19 +2368,14 @@ const [classZoom, setClassZoom] = useState(1);
                         }
                         onClick={handleLinkRevealNextExtra}
                         disabled={linkRevealDisabled}
-                        aria-describedby={
-                          linkRevealDisabled ? "link-reveal-disabled-tip" : undefined
-                        }
+                        aria-describedby={linkRevealDisabled ? "link-reveal-disabled-tip" : undefined}
                       >
                         正答例と異なるリンクを見る
                       </button>
 
                       {linkRevealDisabled && (
                         <>
-                          <span
-                            className="absolute inset-0 cursor-not-allowed"
-                            aria-hidden="true"
-                          />
+                          <span className="absolute inset-0 cursor-not-allowed" aria-hidden="true" />
                           <div
                             id="link-reveal-disabled-tip"
                             role="tooltip"
@@ -2306,32 +2390,34 @@ const [classZoom, setClassZoom] = useState(1);
                     </div>
                   </div>
 
-                  {linkChecked && linkExtraLinksForReveal.length > 0 && linkRevealExtra < linkExtraLinksForReveal.length && (
-                    <div className="mt-2 text-[11px]">
-                      {linkRevealCanProceed ? (
-                        <div className="text-emerald-700">
-                          ✅ 編集を検知しました。<span className="font-semibold">「正答例と異なるリンクを見る」</span>が押せます。
-                          {linkRevealUnlockedNotice && (
-                            <span className="ml-2 inline-flex items-center rounded border bg-emerald-50 border-emerald-200 px-2 py-0.5 text-[10px]">
-                              ボタンが解禁されました
-                            </span>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="text-slate-600">
-                          🔒 次の候補を見るには、リンク（端点/ラベル）を一度修正してください（例：端点変更、ラベル入力、削除）。
-                          <button
-                            type="button"
-                            className="ml-2 underline text-sky-700 hover:text-sky-800"
-                            onClick={handleLinkRevealNextExtraForce}
-                            title="学習効果のため通常は『修正→表示』をおすすめします"
-                          >
-                            編集せずに表示
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  {linkChecked &&
+                    linkExtraLinksForReveal.length > 0 &&
+                    linkRevealExtra < linkExtraLinksForReveal.length && (
+                      <div className="mt-2 text-[11px]">
+                        {linkRevealCanProceed ? (
+                          <div className="text-emerald-700">
+                            ✅ 編集を検知しました。<span className="font-semibold">「正答例と異なるリンクを見る」</span>が押せます。
+                            {linkRevealUnlockedNotice && (
+                              <span className="ml-2 inline-flex items-center rounded border bg-emerald-50 border-emerald-200 px-2 py-0.5 text-[10px]">
+                                ボタンが解禁されました
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="text-slate-600">
+                            🔒 次の候補を見るには、リンク（端点/ラベル）を一度修正してください（例：端点変更、ラベル入力、削除）。
+                            <button
+                              type="button"
+                              className="ml-2 underline text-sky-700 hover:text-sky-800"
+                              onClick={handleLinkRevealNextExtraForce}
+                              title="学習効果のため通常は『修正→表示』をおすすめします"
+                            >
+                              編集せずに表示
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                   {!linkChecked ? (
                     <div className="mt-2 text-[11px] text-slate-600">
@@ -2390,10 +2476,7 @@ const [classZoom, setClassZoom] = useState(1);
                       </div>
                       <div className="mt-1 flex flex-wrap gap-1">
                         {linkExtraLinksForReveal.slice(0, linkRevealExtra).map((p) => (
-                          <span
-                            key={p.fullKey}
-                            className="px-2 py-0.5 rounded border bg-white text-red-700"
-                          >
+                          <span key={p.fullKey} className="px-2 py-0.5 rounded border bg-white text-red-700">
                             {p.pretty}
                           </span>
                         ))}
@@ -2403,9 +2486,7 @@ const [classZoom, setClassZoom] = useState(1);
 
                   {linkChecked && linkLabelWarningsForDisplay.length > 0 && (
                     <div className="mt-3 border border-amber-300 bg-amber-50 text-amber-900 text-[11px] rounded p-2">
-                      <div className="font-semibold">
-                        注意：リンクラベルが正答例と異なる可能性があります
-                      </div>
+                      <div className="font-semibold">注意：リンクラベルが正答例と異なる可能性があります</div>
                       <div className="mt-1 space-y-1">
                         {linkLabelWarningsForDisplay.slice(0, 6).map((w, idx) => (
                           <div key={idx}>
@@ -2414,9 +2495,7 @@ const [classZoom, setClassZoom] = useState(1);
                           </div>
                         ))}
                         {linkLabelWarningsForDisplay.length > 6 && (
-                          <div className="text-amber-800">
-                            …他 {linkLabelWarningsForDisplay.length - 6} 件
-                          </div>
+                          <div className="text-amber-800">…他 {linkLabelWarningsForDisplay.length - 6} 件</div>
                         )}
                       </div>
                     </div>
@@ -2442,9 +2521,7 @@ const [classZoom, setClassZoom] = useState(1);
                       key={l.id}
                       className={
                         "w-full text-left px-2 py-1 border-b flex flex-col " +
-                        (isSelected
-                          ? "bg-rose-100 ring-1 ring-rose-400"
-                          : "hover:bg-slate-100")
+                        (isSelected ? "bg-rose-100 ring-1 ring-rose-400" : "hover:bg-slate-100")
                       }
                       onClick={() => {
                         setSelectedLinkId((prev) => (prev === l.id ? null : l.id));
@@ -2473,10 +2550,7 @@ const [classZoom, setClassZoom] = useState(1);
                   <div className="flex flex-col gap-2 text-xs">
                     <div>
                       <div className="flex items-center">
-                        <label
-                          className="block text-[11px] font-semibold mb-1"
-                          title={TOOLTIP.linkEndpoints}
-                        >
+                        <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.linkEndpoints}>
                           リンク（関係を持つオブジェクト）
                         </label>
                         <HelpBadge title={TOOLTIP.linkEndpoints} />
@@ -2486,9 +2560,7 @@ const [classZoom, setClassZoom] = useState(1);
                         <select
                           className="border rounded px-1 py-0.5 text-[11px]"
                           value={selectedLink.from}
-                          onChange={(e) =>
-                            handleUpdateLink(selectedLink.id, { from: e.target.value })
-                          }
+                          onChange={(e) => handleUpdateLink(selectedLink.id, { from: e.target.value })}
                           title={TOOLTIP.linkEndpoints}
                         >
                           {objects.map((o) => (
@@ -2501,9 +2573,7 @@ const [classZoom, setClassZoom] = useState(1);
                         <select
                           className="border rounded px-1 py-0.5 text-[11px]"
                           value={selectedLink.to}
-                          onChange={(e) =>
-                            handleUpdateLink(selectedLink.id, { to: e.target.value })
-                          }
+                          onChange={(e) => handleUpdateLink(selectedLink.id, { to: e.target.value })}
                           title={TOOLTIP.linkEndpoints}
                         >
                           {objects.map((o) => (
@@ -2517,10 +2587,7 @@ const [classZoom, setClassZoom] = useState(1);
 
                     <div>
                       <div className="flex items-center">
-                        <label
-                          className="block text-[11px] font-semibold mb-1"
-                          title={TOOLTIP.linkLabel}
-                        >
+                        <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.linkLabel}>
                           リンクラベル（関係を説明する動詞）
                         </label>
                         <HelpBadge title={TOOLTIP.linkLabel} />
@@ -2529,9 +2596,7 @@ const [classZoom, setClassZoom] = useState(1);
                       <input
                         className="w-full border rounded px-2 py-1 text-[11px]"
                         value={selectedLink.label}
-                        onChange={(e) =>
-                          handleUpdateLink(selectedLink.id, { label: e.target.value })
-                        }
+                        onChange={(e) => handleUpdateLink(selectedLink.id, { label: e.target.value })}
                         placeholder="例）履修する、担当する など"
                         title={TOOLTIP.linkLabel}
                       />
@@ -2556,13 +2621,11 @@ const [classZoom, setClassZoom] = useState(1);
             <div className="p-2 border-b bg-white flex items-center justify-between">
               <span className="font-semibold text-sm">推定クラス図プレビュー</span>
 
-              
               <div className="flex items-center gap-2">
-
-              <div className="flex items-center mr-2">
-                <span className="text-[11px] text-slate-500">型の見方</span>
-                <HelpBadge title={TYPE_LEGEND_TOOLTIP} />
-              </div>
+                <div className="flex items-center mr-2">
+                  <span className="text-[11px] text-slate-500">型の見方</span>
+                  <HelpBadge title={TYPE_LEGEND_TOOLTIP} />
+                </div>
 
                 <span className="text-[11px] w-12 text-center tabular-nums">
                   {Math.round(classZoom * 100)}%
@@ -2574,9 +2637,7 @@ const [classZoom, setClassZoom] = useState(1);
                   max={ZOOM_MAX}
                   step={ZOOM_STEP}
                   value={classZoom}
-                  onChange={(e) =>
-                    setClassZoom(clampZoom(parseFloat(e.currentTarget.value)))
-                  }
+                  onChange={(e) => setClassZoom(clampZoom(parseFloat(e.currentTarget.value)))}
                   disabled={!classPreviewUrl}
                   className="w-40"
                   title="ドラッグして倍率を変更"
@@ -2592,7 +2653,6 @@ const [classZoom, setClassZoom] = useState(1);
                 >
                   100%
                 </button>
-                
               </div>
             </div>
 
@@ -2608,16 +2668,11 @@ const [classZoom, setClassZoom] = useState(1);
               {!hasUnnamedObject && displayEncodedClassPuml && (
                 <div className="flex-1 flex flex-col">
                   {classPreviewUrl && (
-                    <div
-                    className="flex-1 overflow-auto border-b bg-white p-2">
+                    <div className="flex-1 overflow-auto border-b bg-white p-2">
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <div style={{ zoom: classZoom }} className="inline-block origin-top-left">
-                      <img
-                        src={classPreviewUrl}
-                        alt="推定クラス図"
-                        className="block max-w-none h-auto"
-                      />
-                    </div>
+                        <img src={classPreviewUrl} alt="推定クラス図" className="block max-w-none h-auto" />
+                      </div>
                     </div>
                   )}
 
@@ -2625,16 +2680,15 @@ const [classZoom, setClassZoom] = useState(1);
                     <div className="p-2 text-[11px] border-t bg-slate-50">
                       <div className="font-semibold mb-1">推定クラス図のチェック結果</div>
                       {issues.classes.length === 0 && (
-                        <div className="text-slate-500">
-                          特に未完成・矛盾のある属性は見つかりませんでした。
-                        </div>
+                        <div className="text-slate-500">特に未完成・矛盾のある属性は見つかりませんでした。</div>
                       )}
                       {issues.classes.map((c) => (
                         <div key={c.name} className="mb-1">
                           <div className="font-semibold">{c.name}</div>
                           {c.incomplete.length > 0 && (
                             <div className="text-amber-700">
-                              値が未入力の属性（値が1つも入っていない）: {c.incomplete.map(explainTypeText).join(", ")}
+                              値が未入力の属性（値が1つも入っていない）:{" "}
+                              {c.incomplete.map(explainTypeText).join(", ")}
                             </div>
                           )}
                           {c.contradictory.length > 0 && (
