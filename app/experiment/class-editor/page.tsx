@@ -46,17 +46,21 @@ type EditorPayload = {
   relationHints?: RelationHint[];
   snapshot?: { objects: Obj[]; links: Link[] };
 };
-
-type MergeSuggestion = {
-  id: string;
-  classIds: string[];
-  title: string;
-  reasons: string[];
-};
-
 // ===== 定数 =====
 const STORAGE_KEY_EDITOR_STATE = "EXPERIMENT_CLASS_EDITOR_STATE_V1";
 const STORAGE_KEY_EDITOR_INITIAL = "EXPERIMENT_CLASS_EDITOR_INITIAL";
+
+// ===== UI 小物：? ヘルプ（title で説明を表示） =====
+// - 画面を増やさずに「その場で意味が分かる」ことを優先して，ブラウザ標準の tooltip（title）を利用する
+const HelpBadge = ({ text }: { text: string }) => (
+  <span
+    className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-slate-100 text-slate-600 text-[10px] cursor-help select-none"
+    title={text}
+    aria-label={text}
+  >
+    ?
+  </span>
+);
 
 // 簡易ID生成
 const makeId = () => Math.random().toString(36).slice(2);
@@ -69,7 +73,7 @@ const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // ===== 問題文ハイライト用（部分一致の強化：末尾の識別子だけ落とす） =====
 // 例）利用者B -> 利用者 / 学生1 -> 学生
-// ※ 何でも部分一致にすると誤検出が増えるため、「末尾の識別子っぽいもの」だけを控えめに除去する
+// ※ 何でも部分一致にすると誤検出が増えるため，「末尾の識別子っぽいもの」だけを控えめに除去する
 const baseNameForProblemHighlight = (raw: string) => {
   let s = String(raw ?? "").trim();
   if (!s) return "";
@@ -132,65 +136,68 @@ const makeEndpointKey = (aBase: string, bBase: string) => {
   return `${x}||${y}`;
 };
 
-// 正答（クラス図）PlantUML からクラス名を抽出する
-// - 固定の候補語リストは使わず、教員が登録した「正答例PUML」に出てくるクラス名をそのまま候補として提示する
-// - class 定義がない場合に備えて、関連行からも補助的に拾う
-function extractClassNamesFromPuml(puml: string | undefined): string[] {
-  if (!puml) return [];
-  const names: string[] = [];
-  const add = (name: string) => {
-    const n = String(name ?? "").trim();
-    if (!n) return;
-    if (!names.includes(n)) names.push(n);
-  };
 
-  const lines = puml.split(/\r?\n/);
-  for (const raw of lines) {
-    // PlantUML のコメント（' から行末）を除去
-    const line = raw.replace(/'.*$/, "").trim();
-    if (!line) continue;
+// ===== OD（オブジェクト図）プレビュー生成（遷移前スナップショット表示用） =====
+const formatSlotValueForPuml = (raw: string) => {
+  const s = String(raw ?? "").trim();
+  if (!s) return '""';
+  // boolean
+  const low = s.toLowerCase();
+  if (low === "true" || low === "false") return low;
+  // int / real
+  if (/^[+-]?\d+$/.test(s)) return s;
+  if (/^[+-]?\d+\.\d+$/.test(s)) return s;
+  // already quoted
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) return s;
+  return `"${s.replace(/"/g, '\\"')}"`;
+};
 
-    // class 定義：class 学生 { ... } / class "学生" as S { ... } / abstract class ...
-    const mClass = line.match(/^(?:abstract\s+)?class\s+(.+?)(?:\s+<<.*?>>)?\s*(?:\{|$)/i);
-    if (mClass) {
-      let part = mClass[1].trim();
-      // "as alias" を落とす
-      part = part.replace(/\s+as\s+.+$/i, "").trim();
+const buildObjectDiagramPuml = (objs: Obj[], links: Link[]) => {
+  if (!objs || objs.length === 0) return "";
 
-      // "..." で囲まれている場合は中身
-      const q = part.match(/^\"([^\"]+)\"$/) || part.match(/^\"([^\"]+)\"\s+/);
-      if (q) {
-        add(q[1]);
-      } else {
-        // 非クォートなら先頭トークンをクラス名として扱う（空白区切り）
-        add(part.split(/\s+/)[0]);
-      }
-      continue;
-    }
+  const lines: string[] = [];
+  lines.push("@startuml");
+  lines.push("hide empty members");
+  lines.push("skinparam shadowing false");
 
-    // 関連行（クォート版）："学生" "0..*" -- "1..*" "授業" : 履修する
-    const mRelQuoted = line.match(/^\"([^\"]+)\"\s+\"[^\"]*\"\s+(?:--|\.\.)\s+\"[^\"]*\"\s+\"([^\"]+)\"/);
-    if (mRelQuoted) {
-      add(mRelQuoted[1]);
-      add(mRelQuoted[2]);
-      continue;
-    }
+  // object 定義（表示名は "..."，参照は alias）
+  const aliasById = new Map<string, string>();
+  let idx = 0;
+  for (const o of objs) {
+    const alias = `o${idx + 1}`;
+    idx += 1;
+    aliasById.set(o.id, alias);
 
-    // 関連行（非クォート版）：学生 "0..*" -- "1..*" 授業 : 履修する
-    const mRel = line.match(/^(.+?)\s+\"[^\"]*\"\s+(?:--|\.\.)\s+\"[^\"]*\"\s+(.+?)(?:\s*:|$)/);
-    if (mRel) {
-      const a = mRel[1].trim().replace(/^\"|\"$/g, "");
-      const b = mRel[2].trim().replace(/^\"|\"$/g, "");
-      // a / b が多重度っぽい文字だけの場合は除外
-      if (!/^[0-9*\.]+$/.test(a)) add(a);
-      if (!/^[0-9*\.]+$/.test(b)) add(b);
-      continue;
+    const name = String(o.name ?? "").trim() || "（未入力）";
+    const safeName = name.replace(/"/g, '\\"');
+    lines.push(`object "${safeName}" as ${alias}`);
+
+    for (const sl of o.slots ?? []) {
+      const key = String(sl.key ?? "").trim();
+      if (!key) continue;
+      const safeKey = key.replace(/"/g, '\\"');
+      const value = formatSlotValueForPuml(sl.value ?? "");
+      lines.push(`${alias} : ${safeKey} = ${value}`);
     }
   }
-  return names;
-}
 
-// ===== PlantUML からの簡易パーサ =====
+  // link 定義
+  for (const l of links ?? []) {
+    const a = aliasById.get(l.from);
+    const b = aliasById.get(l.to);
+    if (!a || !b) continue;
+    const label = stripHtmlTags(String(l.label ?? "")).trim().replace(/"/g, '\\"');
+    if (label) lines.push(`${a} -- ${b} : ${label}`);
+    else lines.push(`${a} -- ${b}`);
+  }
+
+  lines.push("@enduml");
+  return lines.join("\n");
+};
+
+// 正答（クラス図）PlantUML からクラス名を抽出する
+// - 固定の候補語リストは使わず，教員が登録した「正答例PUML」に出てくるクラス名をそのまま候補として提示する
+// - class 定義がない場合に備えて，関連行からも補助的に拾う// ===== PlantUML からの簡易パーサ =====
 function parseInitialPuml(
   puml: string | undefined
 ): {
@@ -275,50 +282,29 @@ function parseInitialPuml(
   return { classes, relations };
 }
 
-// ===== フィードバック生成（簡易） =====
+// ===== フィードバック生成（多重度のヒント中心） =====
 function makeFeedback(classes: ClassInfo[], relations: Relation[]): string[] {
-  const msgs: string[] = [];
+  // 初学者の認知負荷を上げないため，まずは「考え方の型」だけを短く提示します．
+  // 具体的な数の検討は，必要に応じて下の「OD（オブジェクト図）からの手がかり」を参照します．
+  const msgs: string[] = [
+    "多重度は『片方 1 つに対して，反対側が何個つながるか』を左右それぞれで考えます．まずは問題文の言い方（必ず / 〜することがある / 複数 / 0でもよい など）を確認しましょう．",
+    "オブジェクト図(OD)を作っているので，ODで各インスタンスが何個リンクを持っているか数えると，多重度の候補（例：1，0..1，0..*，1..*）を考えやすくなります．",
+  ];
 
-  if (classes.some((c) => c.attrs.length === 0)) {
-    msgs.push(
-      "属性が 1 つもないクラスがあります。クラスは「そのものが持つ情報」も表すので、必要なら属性（例：年齢、氏名 など）を追加してみましょう。"
-    );
-  }
-
-  // 関連を持たないクラス
-  const relatedIds = new Set<string>();
-  for (const r of relations) {
-    relatedIds.add(r.fromClassId);
-    relatedIds.add(r.toClassId);
-  }
-  const isolated = classes.filter((c) => !relatedIds.has(c.id));
-  if (isolated.length > 0) {
-    msgs.push(
-      "他のクラスとつながっていないクラスがあります。問題文で関係があるなら、関連で結んでみましょう（必要ないならそのままでもOKです）。"
-    );
-  }
-
-  // 無名の関連
-  if (relations.some((r) => !r.label.trim())) {
-    msgs.push(
-      "名前が空の関連があります。「何の関係か」が伝わるように、短い動詞（例：履修する、担当する）を付けてみましょう。"
-    );
-  }
-
-  if (msgs.length === 0) {
-    msgs.push(
-      "今のクラス図には大きな問題は見つかりませんでした。より分かりやすい名前や属性がないか、最後に見直してみましょう。"
-    );
+  // まずは作業の次の一歩だけを短く案内します．
+  if (classes.length >= 2 && relations.length === 0) {
+    msgs.push("関連がまだ無いので，関係しそうなクラス同士を 1 本つないでみましょう．");
   }
 
   return msgs;
 }
 
+
 // 問題文ハイライト用：選択語を <mark> で囲む
 type HighlightToken = {
   match: string;
   reason: string;
-  priority: number; // 同じmatchが複数ある場合に、優先して理由を出す
+  priority: number; // 同じmatchが複数ある場合に，優先して理由を出す
 };
 
 function highlightText(text: string, tokens: HighlightToken[]): ReactNode[] {
@@ -411,105 +397,7 @@ function mergeMultiplicity(a: string, b: string): string {
   return formatMultiplicity({ min, max });
 }
 
-// ===== クラス統合の候補（Explainable） =====
-function computeMergeSuggestions(classes: ClassInfo[], relations: Relation[]): MergeSuggestion[] {
-  if (classes.length < 2) return [];
-
-  // 1) 各クラスの「属性キー集合」「関連シグネチャ」を作る
-  const attrKeySig = new Map<string, string>();
-  const relSig = new Map<string, string>();
-  const relFeatures = new Map<string, { labels: Set<string>; neighbors: Set<string> }>();
-
-  const classNameById = new Map(classes.map((c) => [c.id, c.name] as const));
-
-  for (const c of classes) {
-    const keys = c.attrs
-      .map((a) => norm(a.name))
-      .filter(Boolean)
-      .sort();
-    attrKeySig.set(c.id, keys.join("|"));
-    relFeatures.set(c.id, { labels: new Set(), neighbors: new Set() });
-  }
-
-  for (const r of relations) {
-    const lbl = (r.label ?? "").trim();
-    const fromF = relFeatures.get(r.fromClassId);
-    const toF = relFeatures.get(r.toClassId);
-    if (fromF) {
-      if (lbl) fromF.labels.add(lbl);
-      fromF.neighbors.add(r.toClassId);
-    }
-    if (toF) {
-      if (lbl) toF.labels.add(lbl);
-      toF.neighbors.add(r.fromClassId);
-    }
-  }
-
-  for (const c of classes) {
-    const f = relFeatures.get(c.id)!;
-    const lbls = Array.from(f.labels).sort().join("|");
-    const neigh = Array.from(f.neighbors)
-      .map((id) => classNameById.get(id) ?? id)
-      .sort()
-      .join("|");
-    relSig.set(c.id, `${lbls}@@${neigh}`);
-  }
-
-  const suggestions: MergeSuggestion[] = [];
-
-  // 2) 強い候補：属性シグネチャ + 関連シグネチャが完全一致
-  const strongMap = new Map<string, string[]>();
-  for (const c of classes) {
-    const key = `A:${attrKeySig.get(c.id) ?? ""}|R:${relSig.get(c.id) ?? ""}`;
-    if (!strongMap.has(key)) strongMap.set(key, []);
-    strongMap.get(key)!.push(c.id);
-  }
-  for (const ids of strongMap.values()) {
-    if (ids.length < 2) continue;
-    const names = ids.map((id) => classNameById.get(id) ?? id);
-    const reasons: string[] = [];
-    const a0 = attrKeySig.get(ids[0]) ?? "";
-    if (a0) reasons.push("属性の構成が一致しています（同じ属性名の集合）");
-    const r0 = relSig.get(ids[0]) ?? "";
-    if (r0) reasons.push("関連のつながり方が一致しています（同じ関連ラベル・接続先）");
-    suggestions.push({
-      id: `strong:${ids.join(",")}`,
-      classIds: ids,
-      title: `統合候補：${names.join(" / ")}`,
-      reasons: reasons.length ? reasons : ["構造が非常に似ています"],
-    });
-  }
-
-  // 3) 中程度：関連ラベルが一致し、主な接続先も一致
-  //    （属性がない/少ない問題でも候補が出るようにする）
-  const relOnlyMap = new Map<string, string[]>();
-  for (const c of classes) {
-    const key = `R:${relSig.get(c.id) ?? ""}`;
-    if (!relOnlyMap.has(key)) relOnlyMap.set(key, []);
-    relOnlyMap.get(key)!.push(c.id);
-  }
-  for (const ids of relOnlyMap.values()) {
-    if (ids.length < 2) continue;
-    // すでに strong に含まれるグループは除外
-    const alreadyStrong = suggestions.some(
-      (s) => s.classIds.length === ids.length && s.classIds.every((id) => ids.includes(id))
-    );
-    if (alreadyStrong) continue;
-    const names = ids.map((id) => classNameById.get(id) ?? id);
-    const reasons: string[] = ["同じ関連ラベル・接続先を持っています（OD例のふるまいが近い）"];
-    suggestions.push({
-      id: `rel:${ids.join(",")}`,
-      classIds: ids,
-      title: `統合候補：${names.join(" / ")}`,
-      reasons,
-    });
-  }
-
-  // 長すぎると邪魔なので上位だけ
-  return suggestions.slice(0, 6);
-}
-
-// ===== メインコンポーネント =====
+// ===== クラス統合の候補（Explainable） =====// ===== メインコンポーネント =====
 const ClassEditorPage: React.FC = () => {
   const router = useRouter();
   const { classProblemText, classAnswerPuml } = useProblemConfig();
@@ -525,13 +413,53 @@ const ClassEditorPage: React.FC = () => {
   const [odLinks, setOdLinks] = useState<Link[]>([]);
   const [odRelationHints, setOdRelationHints] = useState<RelationHint[]>([]);
 
-  // ===== クラス統合支援（モードなし：ダイアログ方式） =====
-  const [mergeOpen, setMergeOpen] = useState(false);
-  const [mergeSelected, setMergeSelected] = useState<Record<string, boolean>>({});
-  const [mergeNewName, setMergeNewName] = useState<string>("");
-  const [mergeError, setMergeError] = useState<string>("");
 
-  // ===== 初期読み込み =====
+  // --- クラス図プレビュー拡大・縮小（experiment/page.tsx と同様） ---
+  const ZOOM_MIN = 0.3;
+  const ZOOM_MAX = 3.0;
+  const ZOOM_STEP = 0.1;
+  const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+  const [classZoom, setClassZoom] = useState(1);
+
+  // 多重度入力中は，途中の文字（例：0..）でプレビューが不安定になりやすいので，一時的にプレビューを抑制します．
+  const [isMultiplicityEditing, setIsMultiplicityEditing] = useState(false);
+  const multEditTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const markMultiplicityEditing = () => {
+    setIsMultiplicityEditing(true);
+    if (multEditTimer.current) clearTimeout(multEditTimer.current);
+    multEditTimer.current = setTimeout(() => setIsMultiplicityEditing(false), 600);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (multEditTimer.current) clearTimeout(multEditTimer.current);
+    };
+  }, []);
+
+
+
+  // プレビュー抑制：入力が未完了の間は PlantUML エラー表示で混乱しやすいため，表示を遅らせます．
+  const previewHoldReasons = useMemo(() => {
+    const reasons: string[] = [];
+    if (classes.length === 0) return reasons;
+
+    if (classes.some((c) => !String(c.name ?? "").trim())) reasons.push("クラス名");
+    if (classes.some((c) => (c.attrs ?? []).some((a) => !String(a.name ?? "").trim()))) reasons.push("属性名");
+    if (
+      relations.some(
+        (r) =>
+          !classes.some((c) => c.id === r.fromClassId) ||
+          !classes.some((c) => c.id === r.toClassId)
+      )
+    ) {
+      reasons.push("関連の端点");
+    }
+    if (isMultiplicityEditing) reasons.push("多重度（入力中）");
+    return reasons;
+  }, [classes, relations, isMultiplicityEditing]);
+
+    // ===== 初期読み込み =====
   useEffect(() => {
     // 1) 保存済み状態があればそれを優先
     try {
@@ -578,7 +506,7 @@ const ClassEditorPage: React.FC = () => {
 
   // ===== PlantUML の再生成 =====
   useEffect(() => {
-    if (classes.length === 0) {
+    if (classes.length === 0 || previewHoldReasons.length > 0) {
       setEncodedPuml("");
       return;
     }
@@ -590,7 +518,14 @@ const ClassEditorPage: React.FC = () => {
 
     const selectedRelation = relations.find((r) => r.id === selectedRelationId) ?? null;
 
-    // クラス定義：選択中クラス → 青、選択中関連の両端クラス → 赤系
+    // クラス定義：表示名は "..."，内部参照は alias を使って PlantUML のエラーを減らす
+    const aliasById = new Map<string, string>();
+    for (const cls of classes) {
+      const safe = String(cls.id ?? "").replace(/[^A-Za-z0-9_]/g, "_");
+      aliasById.set(cls.id, `C_${safe}`);
+    }
+
+    // 選択中クラス → 青，選択中関連の両端クラス → 赤系
     for (const cls of classes) {
       const isSelectedClass = cls.id === selectedClassId;
       const isEndpointOfSelectedRelation =
@@ -605,7 +540,8 @@ const ClassEditorPage: React.FC = () => {
         colorPart = " #FFCCCC"; // 薄いピンク
       }
 
-      lines.push(`class ${esc(cls.name)}${colorPart} {`);
+      const alias = aliasById.get(cls.id) ?? `C_${String(cls.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
+      lines.push(`class "${esc(cls.name)}" as ${alias}${colorPart} {`);
       for (const a of cls.attrs) {
         const ty = a.type || "string";
         lines.push(`  ${esc(a.name)}: ${ty}`);
@@ -621,11 +557,15 @@ const ClassEditorPage: React.FC = () => {
 
       const isRelSelected = r.id === selectedRelationId;
       const arrow = isRelSelected ? `-[#red]-` : "--";
-      const leftMult = r.leftMultiplicity || "";
-      const rightMult = r.rightMultiplicity || "";
+
+      const leftMult = esc(r.leftMultiplicity || "");
+      const rightMult = esc(r.rightMultiplicity || "");
       const labelPart = r.label ? ` : ${esc(r.label)}` : "";
 
-      lines.push(`${esc(from.name)} "${leftMult}" ${arrow} "${rightMult}" ${esc(to.name)}${labelPart}`);
+      const fromAlias = aliasById.get(from.id) ?? `C_${String(from.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
+      const toAlias = aliasById.get(to.id) ?? `C_${String(to.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
+
+      lines.push(`${fromAlias} "${leftMult}" ${arrow} "${rightMult}" ${toAlias}${labelPart}`);
     }
 
     lines.push("@enduml");
@@ -637,25 +577,114 @@ const ClassEditorPage: React.FC = () => {
       console.error("encode error", e);
       setEncodedPuml("");
     }
-  }, [classes, relations, selectedClassId, selectedRelationId]);
+  }, [classes, relations, selectedClassId, selectedRelationId, previewHoldReasons]);
 
   const previewUrl = useMemo(() => (encodedPuml ? `https://www.plantuml.com/plantuml/svg/${encodedPuml}` : ""), [encodedPuml]);
 
+
+  // OD（遷移前スナップショット）のプレビューURL
+  const odPuml = useMemo(() => buildObjectDiagramPuml(odObjects, odLinks), [odObjects, odLinks]);
+  const odEncodedPuml = useMemo(() => (odPuml ? plantumlEncoder.encode(odPuml) : ""), [odPuml]);
+  const odPreviewUrl = useMemo(
+    () => (odEncodedPuml ? `https://www.plantuml.com/plantuml/svg/${odEncodedPuml}` : ""),
+    [odEncodedPuml]
+  );
+
   const feedbackMessages = useMemo(() => makeFeedback(classes, relations), [classes, relations]);
-
-  const mergeSuggestions = useMemo(() => computeMergeSuggestions(classes, relations), [classes, relations]);
-
-  const mergeNameChips = useMemo(() => {
-    // 固定リストは使わず、教員が登録した「クラス図 正答例 PlantUML」からクラス名を抽出して候補として出す
-    // ※ 正答例が未設定の場合は候補を表示しない（空配列）
-    const fromAnswer = extractClassNamesFromPuml(classAnswerPuml);
-    // 学習者の現在のクラス名と完全一致するものも候補としては出してよいが、重複は除去される
-    return fromAnswer;
-  }, [classAnswerPuml]);
 
   // 選択中要素
   const selectedClass = classes.find((c) => c.id === selectedClassId) ?? null;
   const selectedRelation = relations.find((r) => r.id === selectedRelationId) ?? null;
+
+  // ===== 選択中の関連：多重度を考えるための「最小限のヒント」 =====
+  // - 初学者の認知負荷を下げるため，表示は「問い（自分→相手）」＋「4択の候補」＋（あれば）ODの一行ヒントに限定します．
+  const multiplicityAssist = useMemo(() => {
+    if (!selectedRelation) return null;
+
+    const leftClass = classes.find((c) => c.id === selectedRelation.fromClassId) ?? null;
+    const rightClass = classes.find((c) => c.id === selectedRelation.toClassId) ?? null;
+    if (!leftClass || !rightClass) return null;
+
+    const leftName = leftClass.name || "（未入力）";
+    const rightName = rightClass.name || "（未入力）";
+    const leftBase = baseNameForAssist(leftName);
+    const rightBase = baseNameForAssist(rightName);
+
+    const objById = new Map<string, Obj>(odObjects.map((o) => [o.id, o]));
+    const leftCountByObj = new Map<string, number>();
+    const rightCountByObj = new Map<string, number>();
+
+    // まず 0 で初期化（ODに存在するオブジェクトのみ）
+    for (const o of odObjects) {
+      const b = baseNameForAssist(o.name);
+      if (b && leftBase && b === leftBase) leftCountByObj.set(o.id, 0);
+      if (b && rightBase && b === rightBase) rightCountByObj.set(o.id, 0);
+    }
+
+    // リンクを数える（無向として扱う）
+    for (const l of odLinks) {
+      const aObj = objById.get(l.from);
+      const bObj = objById.get(l.to);
+      if (!aObj || !bObj) continue;
+
+      const aBase = baseNameForAssist(aObj.name);
+      const bBase = baseNameForAssist(bObj.name);
+      if (!aBase || !bBase) continue;
+
+      // left ↔ right のリンクのみ数える
+      if (leftBase && rightBase) {
+        if (aBase === leftBase && bBase === rightBase) {
+          leftCountByObj.set(aObj.id, (leftCountByObj.get(aObj.id) ?? 0) + 1);
+          rightCountByObj.set(bObj.id, (rightCountByObj.get(bObj.id) ?? 0) + 1);
+        } else if (aBase === rightBase && bBase === leftBase) {
+          rightCountByObj.set(aObj.id, (rightCountByObj.get(aObj.id) ?? 0) + 1);
+          leftCountByObj.set(bObj.id, (leftCountByObj.get(bObj.id) ?? 0) + 1);
+        }
+      }
+    }
+
+    const rangeFromCounts = (counts: number[]) => {
+      if (counts.length === 0) return null;
+      const min = Math.min(...counts);
+      const max = Math.max(...counts);
+      return { min, max };
+    };
+
+    const recommend4 = (min: number, max: number) => {
+      // 4択（1 / 0..1 / 0..* / 1..*）に丸めて「考えの足場」にする
+      if (max <= 1) return min === 0 ? "0..1" : "1";
+      return min === 0 ? "0..*" : "1..*";
+    };
+
+    const leftCounts = Array.from(leftCountByObj.values());
+    const rightCounts = Array.from(rightCountByObj.values());
+
+    const leftToRight = rangeFromCounts(leftCounts);
+    const rightToLeft = rangeFromCounts(rightCounts);
+
+    return {
+      leftName,
+      rightName,
+      // 「自分から見て相手が何個？」の観点
+      obsLeftToRight: leftToRight
+        ? {
+            min: leftToRight.min,
+            max: leftToRight.max,
+            rec: recommend4(leftToRight.min, leftToRight.max),
+            samples: leftCounts.length,
+          }
+        : null,
+      obsRightToLeft: rightToLeft
+        ? {
+            min: rightToLeft.min,
+            max: rightToLeft.max,
+            rec: recommend4(rightToLeft.min, rightToLeft.max),
+            samples: rightCounts.length,
+          }
+        : null,
+    };
+  }, [selectedRelation, classes, odObjects, odLinks]);
+
 
   // 問題文ハイライト対象（トークン）
   const problemHighlightTokens = useMemo<HighlightToken[]>(() => {
@@ -672,7 +701,7 @@ const ClassEditorPage: React.FC = () => {
         reason: `${context}「${t}」に一致`,
       });
 
-      // 例）利用者B を選んだとき、問題文の「利用者」も拾えるようにする
+      // 例）利用者B を選んだとき，問題文の「利用者」も拾えるようにする
       const base = baseNameForProblemHighlight(t);
       if (base && base !== t) {
         tokens.push({
@@ -783,7 +812,7 @@ const ClassEditorPage: React.FC = () => {
 	      .sort((x, y) => y.count - x.count || x.label.localeCompare(y.label, "ja"))
 	      .slice(0, 6);
 
-    // CD側（このページで作成中のクラス図）の関連数も、ODと比較できる形で数える
+    // CD側（このページで作成中のクラス図）の関連数も，ODと比較できる形で数える
     const cdPairs = new Set<string>();
     for (const r of relations) {
       const from = classes.find((c) => c.id === r.fromClassId);
@@ -810,7 +839,7 @@ const ClassEditorPage: React.FC = () => {
     }
 
     // OD→CD変換ヒントの「(端点ペア, ラベル)」上位
-    // 端点ペアごとの候補ラベルをフラット化して、学習の材料として見せる。
+    // 端点ペアごとの候補ラベルをフラット化して，学習の材料として見せる．
     const hintFlat = new Map<
       string,
       { pretty: string; label: string; count: number }
@@ -851,235 +880,7 @@ const ClassEditorPage: React.FC = () => {
     };
   }, [odObjects, odLinks, odRelationHints, classes, relations]);
 
-  // ===== ODリンク一覧（対応表示用） =====
-  const odLinkItems = useMemo(() => {
-    const items: {
-      id: string;
-      fromName: string;
-      toName: string;
-      fromBase: string;
-      toBase: string;
-      endpointKey: string;
-      label: string;
-      labelNorm: string;
-      pretty: string;
-    }[] = [];
-
-    const byId = new Map<string, Obj>();
-    for (const o of (odObjects ?? [])) byId.set(o.id, o);
-
-    for (const l of (odLinks ?? [])) {
-      const fromObj = byId.get(l.from);
-      const toObj = byId.get(l.to);
-      const fromName = (fromObj?.name ?? "").trim();
-      const toName = (toObj?.name ?? "").trim();
-      if (!fromName || !toName) continue;
-
-      const fromBase = baseNameForAssist(fromName);
-      const toBase = baseNameForAssist(toName);
-      if (!fromBase || !toBase) continue;
-
-      const label = (l.label ?? "").trim();
-      const labelNorm = normalizeLinkLabel(label);
-      const endpointKey = makeEndpointKey(fromBase, toBase);
-      const pretty = labelNorm
-        ? `${fromName} — ${toName}（${labelNorm}）`
-        : `${fromName} — ${toName}`;
-
-      items.push({
-        id: l.id,
-        fromName,
-        toName,
-        fromBase,
-        toBase,
-        endpointKey,
-        label,
-        labelNorm,
-        pretty,
-      });
-    }
-
-    return items;
-  }, [odObjects, odLinks]);
-
-  // ===== 選択中の関連 ← ODリンク対応（学習用） =====
-  const selectedRelationOdMapping = useMemo(() => {
-    if (!selectedRelationId) return null;
-    const rel = relations.find((r) => r.id === selectedRelationId);
-    if (!rel) return null;
-
-    const fromCls = classes.find((c) => c.id === rel.fromClassId);
-    const toCls = classes.find((c) => c.id === rel.toClassId);
-    if (!fromCls || !toCls) return null;
-
-    const a = baseNameForAssist(fromCls.name);
-    const b = baseNameForAssist(toCls.name);
-    if (!a || !b) return null;
-
-    const endpointKey = makeEndpointKey(a, b);
-    const relLabelNorm = normalizeLinkLabel(rel.label ?? "");
-
-    const hits = odLinkItems.filter((x) => x.endpointKey === endpointKey);
-
-    const strong = relLabelNorm
-      ? hits.filter((x) => x.labelNorm === relLabelNorm)
-      : [];
-
-    const labelStats = new Map<string, number>();
-    for (const h of hits) {
-      const k = h.labelNorm || "(未入力)";
-      labelStats.set(k, (labelStats.get(k) ?? 0) + 1);
-    }
-    const labelTop = Array.from(labelStats.entries())
-      .sort((x, y) => y[1] - x[1])
-      .slice(0, 3)
-      .map(([label, count]) => ({ label, count }));
-
-    const pretty = a <= b ? `${a} — ${b}` : `${b} — ${a}`;
-
-    return {
-      pretty,
-      endpointKey,
-      relationLabelNorm: relLabelNorm,
-      hits,
-      strong,
-      labelTop,
-    };
-  }, [selectedRelationId, relations, classes, odLinkItems]);
-
   // ===== ハンドラ：クラス =====
-  const openMergeDialog = (preselectIds: string[] = []) => {
-    const next: Record<string, boolean> = {};
-    for (const c of classes) next[c.id] = false;
-    for (const id of preselectIds) if (id in next) next[id] = true;
-    setMergeSelected(next);
-    setMergeNewName("");
-    setMergeError("");
-    setMergeOpen(true);
-  };
-
-  const closeMergeDialog = () => {
-    setMergeOpen(false);
-    setMergeError("");
-  };
-
-  const applySuggestionToMerge = (ids: string[]) => {
-    setMergeSelected((prev) => {
-      const next = { ...prev };
-      for (const k of Object.keys(next)) next[k] = false;
-      for (const id of ids) if (id in next) next[id] = true;
-      return next;
-    });
-    setMergeError("");
-  };
-
-  const performMerge = () => {
-    const ids = Object.entries(mergeSelected)
-      .filter(([, v]) => v)
-      .map(([k]) => k);
-    const name = mergeNewName.trim();
-
-    if (ids.length < 2) {
-      setMergeError("統合するには 2 つ以上のクラスを選択してください。");
-      return;
-    }
-    if (!name) {
-      setMergeError("統合後のクラス名を入力してください。");
-      return;
-    }
-
-    const selectedClasses = classes.filter((c) => ids.includes(c.id));
-    if (selectedClasses.length < 2) {
-      setMergeError("選択されたクラスが見つかりませんでした。");
-      return;
-    }
-
-    const newId = makeId();
-
-    // 属性は安全側に「和集合」（同名は先勝ち、型が違う場合は string に寄せる）
-    const attrMap = new Map<string, ClassAttr>();
-    for (const c of selectedClasses) {
-      for (const a of c.attrs) {
-        const key = norm(a.name);
-        if (!key) continue;
-        if (!attrMap.has(key)) {
-          attrMap.set(key, { ...a, id: makeId() });
-        } else {
-          const exist = attrMap.get(key)!;
-          if (exist.type !== a.type) {
-            exist.type = "string";
-          }
-        }
-      }
-    }
-    const mergedAttrs = Array.from(attrMap.values()).sort((x, y) => x.name.localeCompare(y.name));
-
-    const newClass: ClassInfo = {
-      id: newId,
-      name,
-      attrs: mergedAttrs,
-    };
-
-    // 1) クラス更新
-    const remainingClasses = classes.filter((c) => !ids.includes(c.id));
-    const nextClasses = [...remainingClasses, newClass];
-
-    // 2) 関連更新（参照付け替え）
-    let nextRelations = relations
-      .map((r) => {
-        const fromMerged = ids.includes(r.fromClassId);
-        const toMerged = ids.includes(r.toClassId);
-        if (!fromMerged && !toMerged) return r;
-        return {
-          ...r,
-          fromClassId: fromMerged ? newId : r.fromClassId,
-          toClassId: toMerged ? newId : r.toClassId,
-        };
-      })
-      .filter((r) => {
-        // 統合により self-loop ができるのは許容。ただし空のクラス参照は除外。
-        return !!r.fromClassId && !!r.toClassId;
-      });
-
-    // 3) 重複関連の統合（同じ端点ペア + 同じラベルをまとめる）
-    //    端点の向きが逆の場合は多重度をスワップしてから合成
-    type Agg = { base: Relation };
-    const agg = new Map<string, Agg>();
-
-    const keyOf = (a: string, b: string, label: string) => {
-      const x = a <= b ? a : b;
-      const y = a <= b ? b : a;
-      return `${x}--${y}::${label.trim()}`;
-    };
-
-    for (const r of nextRelations) {
-      const label = (r.label ?? "").trim();
-      const k = keyOf(r.fromClassId, r.toClassId, label);
-      const existing = agg.get(k);
-      if (!existing) {
-        agg.set(k, { base: { ...r } });
-        continue;
-      }
-
-      // 向き合わせ
-      const base = existing.base;
-      const sameDirection = base.fromClassId === r.fromClassId && base.toClassId === r.toClassId;
-      const left = sameDirection ? r.leftMultiplicity : r.rightMultiplicity;
-      const right = sameDirection ? r.rightMultiplicity : r.leftMultiplicity;
-
-      base.leftMultiplicity = mergeMultiplicity(base.leftMultiplicity, left);
-      base.rightMultiplicity = mergeMultiplicity(base.rightMultiplicity, right);
-      if (!base.label && label) base.label = label;
-    }
-    nextRelations = Array.from(agg.values()).map((a) => a.base);
-
-    setClasses(nextClasses);
-    setRelations(nextRelations);
-    setSelectedClassId(newId);
-    setSelectedRelationId(null);
-    closeMergeDialog();
-  };
-
   const handleAddClass = () => {
     const id = makeId();
     const newClass: ClassInfo = {
@@ -1089,7 +890,7 @@ const ClassEditorPage: React.FC = () => {
     };
     setClasses((prev) => [...prev, newClass]);
     setSelectedClassId(id);
-    // ここでは関連選択はそのままでも良いが、混乱を避けるならクリア
+    // ここでは関連選択はそのままでも良いが，混乱を避けるならクリア
     setSelectedRelationId(null);
   };
 
@@ -1164,14 +965,14 @@ const ClassEditorPage: React.FC = () => {
   const handleSaveState = () => {
     const payload = { classes, relations };
     localStorage.setItem(STORAGE_KEY_EDITOR_STATE, JSON.stringify(payload));
-    alert("現在のクラス図の状態を保存しました。");
+    alert("現在のクラス図の状態を保存しました．");
   };
 
   const handleLoadState = () => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY_EDITOR_STATE);
       if (!raw) {
-        alert("保存されている状態がありません。");
+        alert("保存されている状態がありません．");
         return;
       }
       const parsed = JSON.parse(raw) as { classes?: ClassInfo[]; relations?: Relation[] };
@@ -1179,14 +980,14 @@ const ClassEditorPage: React.FC = () => {
       setRelations(parsed.relations ?? []);
       setSelectedClassId(parsed.classes?.[0]?.id ?? null);
       setSelectedRelationId(null);
-      alert("保存されていた状態を復元しました。");
+      alert("保存されていた状態を復元しました．");
     } catch {
-      alert("状態の読み込み中にエラーが発生しました。");
+      alert("状態の読み込み中にエラーが発生しました．");
     }
   };
 
   const handleResetAll = () => {
-    if (!window.confirm("クラス図編集の状態をすべてリセットします。よろしいですか？")) {
+    if (!window.confirm("クラス図編集の状態をすべてリセットします．よろしいですか？")) {
       return;
     }
     localStorage.removeItem(STORAGE_KEY_EDITOR_STATE);
@@ -1227,21 +1028,6 @@ const ClassEditorPage: React.FC = () => {
     return Array.from(s.values());
   }, [relations]);
 
-  const mergeSelectedIds = useMemo(
-    () => Object.entries(mergeSelected).filter(([, v]) => v).map(([k]) => k),
-    [mergeSelected]
-  );
-
-  const mergeImpact = useMemo(() => {
-    const ids = new Set(mergeSelectedIds);
-    if (ids.size === 0) return { relationTouched: 0, classCount: 0 };
-    let touched = 0;
-    for (const r of relations) {
-      if (ids.has(r.fromClassId) || ids.has(r.toClassId)) touched += 1;
-    }
-    return { relationTouched: touched, classCount: ids.size };
-  }, [mergeSelectedIds, relations]);
-
   // ===== レイアウト =====
   return (
     <div className="flex flex-col h-screen bg-slate-50">
@@ -1277,26 +1063,53 @@ const ClassEditorPage: React.FC = () => {
         </div>
       </div>
 
-      {/* メイン：左 6 / 右 4 */}
+      {/* メイン：左／中央／右 */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* 左側 6 : 問題文 + 編集 */}
-        <div className="w-3/5 flex flex-col border-r overflow-hidden min-h-0">
+        {/* 左側：問題文 + 編集 */}
+        <div className="flex-1 flex flex-col border-r overflow-hidden min-h-0">
           {/* 左上：クラス図作成問題文 */}
           <div className="h-2/5 border-b bg-white flex flex-col min-h-0">
             <div className="px-3 py-2 border-b font-semibold text-sm">クラス図作成問題（本文）</div>
-            <div className="flex-1 p-3 overflow-auto text-[12px] leading-relaxed whitespace-pre-wrap">
+                        <div className="flex-1 flex min-h-0">
+              {/* 左：要求文 */}
+              <div className="flex-1 p-3 overflow-auto text-[12px] leading-relaxed whitespace-pre-wrap min-w-0">
+
               {highlightExplain && (
                 <div className="mb-2 text-[11px] text-slate-600">
                   選択中のクラス名「
                   <span className="font-semibold">{highlightExplain.name}</span>
-                  」に合わせて、要求文中の「
+                  」に合わせて，要求文中の「
                   <span className="font-semibold">{highlightExplain.base}</span>
-                  」も強調表示しています。
+                  」も強調表示しています．
                 </div>
               )}
 
               {highlightText(classProblemText, problemHighlightTokens)}
+                          </div>
+
+              {/* 右：遷移前のオブジェクト図（OD） */}
+              <div className="w-[360px] max-w-[45%] border-l bg-slate-50 p-2 flex flex-col min-h-0">
+                <div className="text-[12px] font-semibold mb-1">オブジェクト図（OD）</div>
+                <div className="border rounded bg-white flex-1 p-2 overflow-hidden">
+                  {odPreviewUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={odPreviewUrl}
+                      alt="遷移前のオブジェクト図プレビュー"
+                      className="w-full h-full object-contain"
+                    />
+                  ) : (
+                    <div className="h-full flex items-center justify-center text-[12px] text-slate-500">
+                      オブジェクト図（OD）のスナップショットが見つからないため，ここには表示できません．
+                    </div>
+                  )}
+                </div>
+                <div className="mt-1 text-[11px] text-slate-600">
+                  OD は「具体例」です．多重度や関連名を考えるときの見直し用に表示しています．
+                </div>
+              </div>
             </div>
+
           </div>
 
           {/* 左下：クラス編集＋関連編集 */}
@@ -1306,14 +1119,6 @@ const ClassEditorPage: React.FC = () => {
               <div className="px-3 py-2 border-b flex items-center justify-between bg-white">
                 <span className="font-semibold text-sm">クラスの編集</span>
                 <div className="flex items-center gap-2">
-                  <button
-                    className="px-2 py-0.5 text-xs rounded bg-slate-100 text-slate-700 hover:bg-slate-200"
-                    onClick={() => openMergeDialog()}
-                    disabled={classes.length < 2}
-                    title={classes.length < 2 ? "統合するにはクラスが 2 つ以上必要です" : "複数のクラスを 1 つに統合します"}
-                  >
-                    ⇄ クラスを統合
-                  </button>
                   <button
                     className="px-2 py-0.5 text-xs rounded bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
                     onClick={handleAddClass}
@@ -1328,7 +1133,7 @@ const ClassEditorPage: React.FC = () => {
                 <div className="w-2/5 border-r overflow-y-auto bg-slate-50 text-xs">
                   {classes.length === 0 && (
                     <div className="p-2 text-[11px] text-slate-500">
-                      まだクラスがありません。「クラスを追加」から作成してください。
+                      まだクラスがありません．「クラスを追加」から作成してください．
                     </div>
                   )}
                   {classes.map((c) => {
@@ -1354,7 +1159,7 @@ const ClassEditorPage: React.FC = () => {
                         key={c.id}
                         className={`w-full text-left px-2 py-1 border-b flex items-center justify-between transition-colors ${itemColor} ${hoverColor}`}
                         onClick={() => {
-                          // クラスの選択はトグル、関連の選択は保持したまま
+                          // クラスの選択はトグル，関連の選択は保持したまま
                           setSelectedClassId(isSelected ? null : c.id);
                         }}
                       >
@@ -1362,29 +1167,40 @@ const ClassEditorPage: React.FC = () => {
                         <span className="text-[10px] text-slate-500 ml-1">{c.attrs.length} 属性</span>
                       </button>
                     );
-                  })}
-                </div>
+              })}
+              <datalist id="multiplicity-options">
+                {multiplicityOptions.map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
+              </div>
 
                 {/* クラス詳細 */}
                 <div className="flex-1 overflow-y-auto p-2 text-xs bg-white">
                   {!selectedClass && (
-                    <div className="text-[11px] text-slate-500">左の一覧から編集したいクラスを選択してください。</div>
+                    <div className="text-[11px] text-slate-500">左の一覧から編集したいクラスを選択してください．</div>
                   )}
                   {selectedClass && (
                     <div className="flex flex-col gap-2">
                       <div>
-                        <label className="block text-[11px] font-semibold mb-1">クラス名</label>
+                        <label className="block text-[11px] font-semibold mb-1">
+                          クラス名
+                          <HelpBadge text="クラス名：似たオブジェクトをまとめた「種類」の名前です．ODで登場したオブジェクト名（末尾の番号など）を一般化して付けます．例）学生，授業，注文 など．" />
+                        </label>
                         <input
                           className="w-full border rounded px-2 py-1 text-[12px]"
                           value={selectedClass.name}
                           onChange={(e) => handleUpdateClass(selectedClass.id, { name: e.target.value })}
-                          placeholder="例）学生、授業 など"
+                          placeholder="例）学生，授業 など"
                         />
                       </div>
 
                       <div>
                         <div className="flex items-center justify-between mb-1">
-                          <span className="text-[11px] font-semibold">属性一覧</span>
+                          <span className="text-[11px] font-semibold">
+                            属性一覧
+                            <HelpBadge text="属性：クラスが持つ性質（データ）です．ODのスロット（key=value）の key が候補になります．型は値の種類（string/int/real/boolean）を選びます．" />
+                          </span>
                           <button
                             className="px-2 py-0.5 text-[11px] rounded bg-slate-100 hover:bg-slate-200"
                             onClick={() => handleAddAttr(selectedClass.id)}
@@ -1393,7 +1209,7 @@ const ClassEditorPage: React.FC = () => {
                           </button>
                         </div>
                         {selectedClass.attrs.length === 0 && (
-                          <div className="text-[11px] text-slate-500 mb-1">例）属性名：年齢、型：string など</div>
+                          <div className="text-[11px] text-slate-500 mb-1">例）属性名：年齢，型：string など</div>
                         )}
                         <div className="flex flex-col gap-1">
                           {selectedClass.attrs.map((a) => (
@@ -1416,6 +1232,7 @@ const ClassEditorPage: React.FC = () => {
                                   <option value="real">real</option>
                                   <option value="boolean">boolean</option>
                                 </select>
+                                <HelpBadge text="属性の型：値の種類を表します．string=文字列，int=整数，real=小数，boolean=true/false です．ODの値に合わせて選びます．" />
                               </div>
                               <div className="flex justify-end">
                                 <button
@@ -1447,7 +1264,13 @@ const ClassEditorPage: React.FC = () => {
             {/* 関連と多重度の編集 */}
             <div className="flex flex-col min-h-0">
               <div className="px-3 py-2 border-b flex items-center justify-between bg-white">
-                <span className="font-semibold text-sm">関連と多重度の編集</span>
+                <span className="font-semibold text-sm">
+                  関連
+                  <HelpBadge text="関連：クラス同士の関係を表します．ODで結んだリンクを一般化して，クラス間の関係として整理します．" />
+                  と多重度
+                  <HelpBadge text="多重度：片方 1 つに対して，反対側が何個つながるかを表します．例）1=必ず 1 つ，0..1=0 または 1，0..*=0 以上，1..*=1 以上です．必要なら 1..2 のように範囲も入力できます．左右はそれぞれ，相手側の数です．" />
+                  の編集
+                </span>
                 <button
                   className="px-2 py-0.5 text-xs rounded bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
                   onClick={handleAddRelation}
@@ -1459,7 +1282,7 @@ const ClassEditorPage: React.FC = () => {
               <div className="flex-1 overflow-y-auto bg-slate-50 text-xs">
                 {relations.length === 0 && (
                   <div className="p-2 text-[11px] text-slate-500">
-                    まだ関連がありません。どのクラス同士が関係しているか、矢印と多重度を追加してみましょう。
+                    まだ関連がありません．どのクラス同士が関係しているか，矢印と多重度を追加してみましょう．
                   </div>
                 )}
                 {relations.map((r) => {
@@ -1474,6 +1297,10 @@ const ClassEditorPage: React.FC = () => {
                       }
                       onClick={() => setSelectedRelationId(isSelected ? null : r.id)}
                     >
+                      <div className="flex items-center gap-2 text-[11px] text-slate-600">
+                        <span>端点と多重度</span>
+                        <HelpBadge text="多重度：片方 1 つに対して，反対側が何個つながるかを表します．例）1=必ず 1 つ，0..1=0 または 1，0..*=0 以上，1..*=1 以上です．必要なら 1..2 のように範囲も入力できます．左右はそれぞれ，相手側の数です．" />
+                      </div>
                       <div className="flex flex-wrap items-center gap-2">
                         <select
                           className="border rounded px-1 py-0.5 text-[11px]"
@@ -1487,31 +1314,29 @@ const ClassEditorPage: React.FC = () => {
                           ))}
                         </select>
 
-                        <select
-                          className="border rounded px-1 py-0.5 text-[11px]"
+                        <input
+                          className="border rounded px-1 py-0.5 text-[11px] w-[88px]"
                           value={r.leftMultiplicity}
-                          onChange={(e) => handleUpdateRelation(r.id, { leftMultiplicity: e.target.value })}
-                        >
-                          {multiplicityOptions.map((m) => (
-                            <option key={m} value={m}>
-                              {m}
-                            </option>
-                          ))}
-                        </select>
+                          onChange={(e) => {
+                            markMultiplicityEditing();
+                            handleUpdateRelation(r.id, { leftMultiplicity: e.target.value });
+                          }}
+                          placeholder="例）0..*"
+                          list="multiplicity-options"
+                        />
 
                         <span className="text-[11px]">→</span>
 
-                        <select
-                          className="border rounded px-1 py-0.5 text-[11px]"
+                        <input
+                          className="border rounded px-1 py-0.5 text-[11px] w-[88px]"
                           value={r.rightMultiplicity}
-                          onChange={(e) => handleUpdateRelation(r.id, { rightMultiplicity: e.target.value })}
-                        >
-                          {multiplicityOptions.map((m) => (
-                            <option key={m} value={m}>
-                              {m}
-                            </option>
-                          ))}
-                        </select>
+                          onChange={(e) => {
+                            markMultiplicityEditing();
+                            handleUpdateRelation(r.id, { rightMultiplicity: e.target.value });
+                          }}
+                          placeholder="例）0..*"
+                          list="multiplicity-options"
+                        />
 
                         <select
                           className="border rounded px-1 py-0.5 text-[11px]"
@@ -1527,12 +1352,16 @@ const ClassEditorPage: React.FC = () => {
                       </div>
 
                       <div className="flex items-center gap-2 mt-1">
-                        <span className="text-[11px]">関連名:</span>
+                        <span className="text-[11px]">
+                          関連名
+                          <HelpBadge text="関連名：関係の意味を表す名前です．動詞（〜する，〜を持つ，〜を担当する 等）で書くと分かりやすくなります．ODのリンクラベルを一般化したものが候補になります．" />
+                          :
+                        </span>
                         <input
                           className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                           value={r.label}
                           onChange={(e) => handleUpdateRelation(r.id, { label: e.target.value })}
-                          placeholder="例）履修する、担当する など"
+                          placeholder="例）履修する，担当する など"
                         />
                       </div>
 
@@ -1556,20 +1385,58 @@ const ClassEditorPage: React.FC = () => {
           </div>
         </div>
 
-        {/* 右側 4 : プレビュー＋フィードバック */}
-        <div className="w-2/5 flex flex-col overflow-hidden min-h-0">
+        
+        {/* 右側：プレビュー＋フィードバック */}
+        <div className="flex-1 flex flex-col overflow-hidden min-h-0">
           {/* 右上：クラス図プレビュー */}
           <div className="h-1/2 border-b bg-white flex flex-col min-h-0">
-            <div className="px-3 py-2 border-b font-semibold text-sm">あなたのクラス図（プレビュー）</div>
-            <div className="flex-1 overflow-auto">
+            <div className="px-3 py-2 border-b bg-white flex items-center justify-between">
+              <div className="font-semibold text-sm">あなたのクラス図（プレビュー）</div>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] w-12 text-center tabular-nums">{Math.round(classZoom * 100)}%</span>
+                <input
+                  type="range"
+                  min={ZOOM_MIN}
+                  max={ZOOM_MAX}
+                  step={ZOOM_STEP}
+                  value={classZoom}
+                  onChange={(e) => setClassZoom(clampZoom(parseFloat(e.currentTarget.value)))}
+                  disabled={!previewUrl}
+                  className="w-40"
+                  title="ドラッグして倍率を変更"
+                  aria-label="クラス図の倍率"
+                />
+                <button
+                  type="button"
+                  className="px-2 py-0.5 text-[11px] border rounded bg-white hover:bg-slate-100 disabled:opacity-50"
+                  onClick={() => setClassZoom(1)}
+                  disabled={!previewUrl}
+                  title="等倍（100%）"
+                >
+                  100%
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-auto bg-white p-2">
               {!previewUrl && (
                 <div className="p-3 text-[11px] text-slate-500">
-                  左側でクラスと関連を編集すると、ここにクラス図が表示されます。
+                  {classes.length === 0 ? (
+                    <>左側でクラスを追加すると，ここにクラス図が表示されます．</>
+                  ) : previewHoldReasons.length > 0 ? (
+                    <>
+                      入力がそろったら，ここにクラス図が表示されます．（入力中はPlantUMLのエラー表示を抑えています．）
+                      <div className="mt-1">保留：{previewHoldReasons.join("，")}</div>
+                    </>
+                  ) : (
+                    <>いまの内容ではプレビューを表示できませんでした．入力を確認してください．</>
+                  )}
                 </div>
               )}
               {previewUrl && (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={previewUrl} alt="あなたのクラス図プレビュー" className="w-full h-full object-contain" />
+                <div style={{ zoom: classZoom }} className="inline-block origin-top-left">
+                  <img src={previewUrl} alt="あなたのクラス図プレビュー" className="block max-w-none h-auto" />
+                </div>
               )}
             </div>
           </div>
@@ -1578,17 +1445,113 @@ const ClassEditorPage: React.FC = () => {
           <div className="flex-1 bg-slate-50 flex flex-col min-h-0">
             <div className="px-3 py-2 border-b bg-white font-semibold text-sm">フィードバック</div>
             <div className="flex-1 p-3 overflow-auto text-[11px] leading-relaxed">
-              <p className="mb-1 text-slate-600">今のクラス図の状態から、学習のヒントになりそうなポイントをまとめています。</p>
+              <p className="mb-1 text-slate-600">今のクラス図の状態から，学習のヒントになりそうなポイントをまとめています．</p>
               <ul className="list-disc pl-5 space-y-1">
                 {feedbackMessages.map((m, idx) => (
                   <li key={idx}>{m}</li>
                 ))}
+
+              {selectedRelation && (
+                <div className="mt-3 border-t pt-3">
+                  <div className="font-semibold text-slate-700 mb-1">選択中の関連の多重度ヒント</div>
+                  <div className="text-slate-600">
+                    多重度は「自分 1 つから見て，相手が何個つながるか」を考えます．その答えは，相手側（反対側）の多重度欄に入れます．
+                  </div>
+
+                  <div className="mt-2 border rounded bg-white p-2">
+                    <div className="font-semibold text-slate-700">
+                      ① {multiplicityAssist?.leftName ?? "（左）"} から見て {multiplicityAssist?.rightName ?? "（右）"} は？
+                      <span className="ml-2 text-slate-500 font-normal">（右の欄，→ の右に入ります．）</span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {["1", "0..1", "0..*", "1..*"].map((v) => (
+                        <button
+                          key={v}
+                          type="button"
+                          className="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-[11px]"
+                          onClick={() => handleUpdateRelation(selectedRelation.id, { rightMultiplicity: v })}
+                        >
+                          {v}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        className="px-2 py-0.5 rounded bg-white border hover:bg-slate-50 text-[11px]"
+                        onClick={() => handleUpdateRelation(selectedRelation.id, { rightMultiplicity: "" })}
+                      >
+                        空欄
+                      </button>
+                      <span className="ml-1 text-slate-500">
+                        いま：{selectedRelation.rightMultiplicity ? selectedRelation.rightMultiplicity : "（未入力）"}
+                      </span>
+                    </div>
+
+                    {multiplicityAssist && multiplicityAssist.obsLeftToRight && (
+                      <div className="mt-1 text-slate-600">
+                        ODの例では，
+                        {multiplicityAssist.leftName} 1つから見て {multiplicityAssist.rightName} は
+                        <span className="font-semibold">
+                          {multiplicityAssist.obsLeftToRight.min === multiplicityAssist.obsLeftToRight.max
+                            ? ` ${multiplicityAssist.obsLeftToRight.min} `
+                            : ` ${multiplicityAssist.obsLeftToRight.min}〜${multiplicityAssist.obsLeftToRight.max} `}
+                        </span>
+                        個でした．（よく使う候補なら「{multiplicityAssist.obsLeftToRight.rec}」）
+                      </div>
+                    )}
+
+                    <div className="mt-3 font-semibold text-slate-700">
+                      ② {multiplicityAssist?.rightName ?? "（右）"} から見て {multiplicityAssist?.leftName ?? "（左）"} は？
+                      <span className="ml-2 text-slate-500 font-normal">（左の欄，→ の左に入ります．）</span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {["1", "0..1", "0..*", "1..*"].map((v) => (
+                        <button
+                          key={v}
+                          type="button"
+                          className="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-[11px]"
+                          onClick={() => handleUpdateRelation(selectedRelation.id, { leftMultiplicity: v })}
+                        >
+                          {v}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        className="px-2 py-0.5 rounded bg-white border hover:bg-slate-50 text-[11px]"
+                        onClick={() => handleUpdateRelation(selectedRelation.id, { leftMultiplicity: "" })}
+                      >
+                        空欄
+                      </button>
+                      <span className="ml-1 text-slate-500">
+                        いま：{selectedRelation.leftMultiplicity ? selectedRelation.leftMultiplicity : "（未入力）"}
+                      </span>
+                    </div>
+
+                    {multiplicityAssist && multiplicityAssist.obsRightToLeft && (
+                      <div className="mt-1 text-slate-600">
+                        ODの例では，
+                        {multiplicityAssist.rightName} 1つから見て {multiplicityAssist.leftName} は
+                        <span className="font-semibold">
+                          {multiplicityAssist.obsRightToLeft.min === multiplicityAssist.obsRightToLeft.max
+                            ? ` ${multiplicityAssist.obsRightToLeft.min} `
+                            : ` ${multiplicityAssist.obsRightToLeft.min}〜${multiplicityAssist.obsRightToLeft.max} `}
+                        </span>
+                        個でした．（よく使う候補なら「{multiplicityAssist.obsRightToLeft.rec}」）
+                      </div>
+                    )}
+
+                    <div className="mt-2 text-slate-500">
+                      ※ OD は具体例なので，最終的には問題文の条件（必ず，0でもよい，複数，など）を優先してください．
+                    </div>
+                  </div>
+                </div>
+              )}
+
               </ul>
 
               {/* ===== OD→CD 連携の追加ヒント（見た目は崩さない：同じ段落/小見出し） ===== */}
               {odLinkSummary && (
                 <div className="mt-3 border-t pt-3">
-                  <div className="font-semibold text-slate-700 mb-1">OD（オブジェクト図）からの手がかり</div>
+                  <div className="mt-3 font-semibold text-slate-700 mb-1">OD（オブジェクト図）からの手がかり</div>
                   <div className="text-slate-600">
                     <div>
                       <span className="font-semibold">ODのリンク</span>：{odLinkSummary.totalValidLinks} 本（端点が有効なもの）
@@ -1606,8 +1569,7 @@ const ClassEditorPage: React.FC = () => {
                       <div className="mt-2">
                         <div className="font-semibold text-slate-700">ODリンクの集計（どの組み合わせが多いか）</div>
                         <div className="mt-1 text-[11px] text-slate-600">
-                          ODでつないだオブジェクト同士を「種類（末尾の番号などを除いた名前）」でまとめて数えています。
-                          回数が多い組み合わせは、クラス図で関連を考えるときの手がかりになります。
+                          ODでつないだオブジェクト同士を，「名前の最後につく番号や記号（A，1 など）を除いて」同じ種類としてまとめ，その組み合わせが何回出たか数えています．回数が多い組み合わせは，「その 2 種類の間に関係がありそう」と考える手がかりになります．
                         </div>
                         <ul className="list-disc pl-5 space-y-0.5 mt-1">
                           {odLinkSummary.endpointKindsTop.map((e) => {
@@ -1619,23 +1581,23 @@ const ClassEditorPage: React.FC = () => {
                                   <span className="text-slate-600"> ／ 関連名候補：{hint.labels.map((x) => x.label).join(" / ")}</span>
                                 )}
                                 {!hint && e.topLabels.length > 0 && (
-                                  <span className="text-slate-600"> ／ ODラベル例：{e.topLabels.map((x) => x.label).join(" / ")}</span>
+                                  <span className="text-slate-600"> ／ ラベル：{e.topLabels.map((x) => x.label).join(" / ")}</span>
                                 )}
                               </li>
                             );
                           })}
                         </ul>
                         <div className="mt-1 text-slate-500">
-                          ※ これは「答えの強制」ではなく、検討の材料です。根拠があってODと違う設計にするなら、そのままでもOKです。
+                          ※ これは「答えの強制」ではなく，検討の材料です．根拠があってODと違う設計にするなら，そのままでもOKです．
                         </div>
                       </div>
                     )}
 
                     {odLinkSummary.labelTop.length > 0 && (
                       <div className="mt-3">
-                        <div className="font-semibold text-slate-700">ODリンクから推定された関連ラベル（上位）</div>
+                        <div className="font-semibold text-slate-700">ODリンクから推定された関連ラベル</div>
                         <div className="mt-1 text-[11px] text-slate-600">
-                          ODで同じ意味のラベルが繰り返し出ている場合、クラス図の関連名の候補になります（そのまま使っても、言い換えてもOKです）。
+                          ODで同じ意味のラベルが繰り返し出ている場合，クラス図の関連名の候補になります（そのまま使っても，言い換えてもOKです）．
                         </div>
                         <ul className="list-disc pl-5 space-y-0.5 mt-1">
                           {odLinkSummary.labelTop.map((x) => (
@@ -1649,9 +1611,9 @@ const ClassEditorPage: React.FC = () => {
 
                     {odLinkSummary.convertHintsTop.length > 0 && (
                       <div className="mt-3">
-                        <div className="font-semibold text-slate-700">推定クラス図の関係ヒント（上位）</div>
+                        <div className="font-semibold text-slate-700">推定クラス図の関係ヒント</div>
                         <div className="mt-1 text-[11px] text-slate-600">
-                          変換結果（推定クラス図）の傾向です。「このクラス間で、この関連名が出やすい」を参考として表示します。
+                          変換結果（推定クラス図）の傾向です．「このクラス間で，この関連名が出やすい」を参考として表示します．
                         </div>
                         <ul className="list-disc pl-5 space-y-0.5 mt-1">
                           {odLinkSummary.convertHintsTop.map((x, idx) => (
@@ -1661,81 +1623,14 @@ const ClassEditorPage: React.FC = () => {
                           ))}
                         </ul>
                       </div>
-                    )}
-
-                    {odLinkItems.length > 0 && (
-                      <div className="mt-3">
-                        <div className="font-semibold text-slate-700">
-                          ODリンク ⇄ クラス図の関連（対応を見て学ぶ）
-                        </div>
-
-                        {!selectedRelationOdMapping ? (
-                          <div className="mt-1 text-[11px] text-slate-600">
-                            右側の一覧で <span className="font-semibold">関連</span> を選ぶと、その関連と
-                            端点（クラス名の組み合わせ）が一致するODリンクを表示します。
-                          </div>
-                        ) : (
-                          <div className="mt-1 text-[11px] text-slate-600">
-                            <span className="font-semibold">{selectedRelationOdMapping.pretty}</span>
-                            に対応するODリンク（端点一致）：{selectedRelationOdMapping.hits.length} 件
-                            {selectedRelationOdMapping.relationLabelNorm && (
-                              <> ／ ラベル一致：{selectedRelationOdMapping.strong.length} 件</>
-                            )}
-                          </div>
-                        )}
-
-                        {selectedRelationOdMapping && selectedRelationOdMapping.hits.length === 0 && (
-                          <div className="mt-1 text-[11px] text-slate-500">
-                            端点が一致するODリンクが見つかりませんでした（クラス名の一般化の仕方が違う可能性があります）。
-                          </div>
-                        )}
-
-                        {selectedRelationOdMapping && selectedRelationOdMapping.hits.length > 0 && (
-                          <>
-                            {selectedRelationOdMapping.labelTop.length > 0 && (
-                              <div className="mt-1 text-[11px] text-slate-500">
-                                参考：この端点ペアのODラベル（上位）：
-                                {selectedRelationOdMapping.labelTop
-                                  .map((x) => `${x.label}×${x.count}`)
-                                  .join(" / ")}
-                              </div>
-                            )}
-
-                            <div className="mt-2 rounded border bg-white p-2">
-                              <ul className="list-disc pl-5 space-y-0.5">
-                                {selectedRelationOdMapping.hits.slice(0, 8).map((l) => (
-                                  <li key={l.id}>
-                                    {l.pretty}
-                                    {selectedRelationOdMapping.relationLabelNorm &&
-                                      l.labelNorm !== selectedRelationOdMapping.relationLabelNorm && (
-                                        <span className="text-amber-700">（ラベル違い）</span>
-                                      )}
-                                  </li>
-                                ))}
-                              </ul>
-
-                              {selectedRelationOdMapping.hits.length > 8 && (
-                                <div className="mt-1 text-[11px] text-slate-500">
-                                  …他 {selectedRelationOdMapping.hits.length - 8} 件
-                                </div>
-                              )}
-                            </div>
-
-                            <div className="mt-1 text-[11px] text-slate-500">
-                              ※ クラス図では、ODの動詞ラベルをそのまま使う場合もあれば、
-                              より一般的な表現に言い換える場合もあります（完全一致しなくてもOKです）。
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    )}
+	                    )}
                   </div>
                 </div>
               )}
 
               {!odLinkSummary && (
                 <div className="mt-3 border-t pt-3 text-slate-500">
-                  ODのスナップショットが見つからなかったため、OD由来のヒントは表示していません。
+                  ODのスナップショットが見つからなかったため，OD由来のヒントは表示していません．
                 </div>
               )}
             </div>
@@ -1743,130 +1638,6 @@ const ClassEditorPage: React.FC = () => {
         </div>
       </div>
 
-      {/* ===== クラス統合ダイアログ（モードなし・支援付き） ===== */}
-      {mergeOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
-          <div className="w-full max-w-4xl rounded-lg bg-white shadow-lg overflow-hidden">
-            <div className="px-4 py-3 border-b flex items-center justify-between">
-              <div>
-                <div className="font-semibold">クラスを統合</div>
-                <div className="text-[11px] text-slate-500">
-                  どれを 1 つのクラスにまとめるか迷う場合は、左の「おすすめ候補」から選べます。
-                </div>
-              </div>
-              <button className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-sm" onClick={closeMergeDialog}>
-                ✕
-              </button>
-            </div>
-
-            <div className="grid grid-cols-2 gap-0">
-              {/* 左：おすすめ候補 */}
-              <div className="border-r p-4 min-h-[420px]">
-                <div className="font-semibold text-sm mb-2">おすすめ候補</div>
-                {mergeSuggestions.length === 0 && (
-                  <div className="text-[12px] text-slate-500">
-                    いまの状態からは強い統合候補が見つかりませんでした。右側で統合したいクラスを選んでください。
-                  </div>
-                )}
-                <div className="flex flex-col gap-2">
-                  {mergeSuggestions.map((s) => (
-                    <div key={s.id} className="border rounded p-2 bg-slate-50">
-                      <div className="text-[12px] font-semibold mb-1">{s.title}</div>
-                      <ul className="list-disc pl-5 text-[11px] text-slate-600 space-y-0.5">
-                        {s.reasons.map((r, idx) => (
-                          <li key={idx}>{r}</li>
-                        ))}
-                      </ul>
-                      <div className="mt-2 flex items-center justify-between">
-                        <span className="text-[11px] text-slate-500">{s.classIds.length} クラスを統合</span>
-                        <button
-                          className="px-2 py-1 rounded bg-sky-100 text-sky-700 text-xs font-semibold hover:bg-sky-200"
-                          onClick={() => applySuggestionToMerge(s.classIds)}
-                        >
-                          この候補を選択
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* 右：手動選択 + 名前 */}
-              <div className="p-4 min-h-[420px]">
-                <div className="font-semibold text-sm mb-2">手動で選ぶ</div>
-                <div className="border rounded h-[220px] overflow-auto">
-                  {classes.map((c) => (
-                    <label
-                      key={c.id}
-                      className="flex items-center gap-2 px-2 py-1 border-b text-[12px] hover:bg-slate-50"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={!!mergeSelected[c.id]}
-                        onChange={(e) => {
-                          const checked = e.target.checked;
-                          setMergeSelected((prev) => ({ ...prev, [c.id]: checked }));
-                          setMergeError("");
-                        }}
-                      />
-                      <span className="truncate">{c.name}</span>
-                      <span className="ml-auto text-[10px] text-slate-500">{c.attrs.length} 属性</span>
-                    </label>
-                  ))}
-                </div>
-
-                <div className="mt-3">
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-[12px] font-semibold">統合後のクラス名</label>
-                    <span className="text-[11px] text-slate-500">
-                      選択中：{mergeImpact.classCount} クラス ／ 影響する関連：{mergeImpact.relationTouched} 本
-                    </span>
-                  </div>
-                  <input
-                    className="w-full border rounded px-2 py-1 text-[12px]"
-                    placeholder="例）学生"
-                    value={mergeNewName}
-                    onChange={(e) => {
-                      setMergeNewName(e.target.value);
-                      setMergeError("");
-                    }}
-                  />
-
-                  {mergeNameChips.length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-1">
-                      {mergeNameChips.map((t) => (
-                        <button
-                          key={t}
-                          className="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-[11px]"
-                          onClick={() => setMergeNewName(t)}
-                          type="button"
-                        >
-                          {t}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {mergeError && <div className="mt-2 text-[12px] text-red-600">{mergeError}</div>}
-
-                <div className="mt-4 flex items-center justify-end gap-2">
-                  <button className="px-3 py-1 rounded bg-slate-100 hover:bg-slate-200 text-sm" onClick={closeMergeDialog}>
-                    キャンセル
-                  </button>
-                  <button
-                    className="px-3 py-1 rounded bg-emerald-100 text-emerald-800 font-semibold hover:bg-emerald-200 text-sm"
-                    onClick={performMerge}
-                    title="選択した複数クラスを 1 つにまとめます"
-                  >
-                    統合する
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
