@@ -459,37 +459,49 @@ const ClassEditorPage: React.FC = () => {
     return reasons;
   }, [classes, relations, isMultiplicityEditing]);
 
-    // ===== 初期読み込み =====
+  // ===== 初期読み込み =====
   useEffect(() => {
-    // 1) 保存済み状態があればそれを優先
+    // A) クラス図の編集状態（保存済み）があればそれを優先
     try {
       const rawSaved = localStorage.getItem(STORAGE_KEY_EDITOR_STATE);
       if (rawSaved) {
-        const parsed = JSON.parse(rawSaved) as { classes: ClassInfo[]; relations: Relation[] };
-        if (parsed.classes) setClasses(parsed.classes);
-        if (parsed.relations) setRelations(parsed.relations);
-        return;
+        const parsed = JSON.parse(rawSaved) as {
+          classes?: ClassInfo[];
+          relations?: Relation[];
+        };
+        setClasses(parsed.classes ?? []);
+        setRelations(parsed.relations ?? []);
+        setSelectedClassId(parsed.classes?.[0]?.id ?? null);
+        // ★ここで return しない（OD snapshot を別で読みたいので）
       }
     } catch {
-      // 無視
+      // ignore
     }
 
-    // 2) ODページからの初期payload
+    // B) ODページからの初期payload（OD snapshot / relationHints / 初期PUML）
     try {
       const raw = localStorage.getItem(STORAGE_KEY_EDITOR_INITIAL);
       if (!raw) return;
 
-      // 旧形式（EditorInitialPayload）/ 新形式（EditorPayload）どちらでも動くように読む
       const parsed = JSON.parse(raw) as EditorInitialPayload | EditorPayload;
 
-      const initialClassPuml = (parsed as EditorPayload).initialClassPuml ?? (parsed as EditorInitialPayload).initialClassPuml;
-      const { classes: initClasses, relations: initRelations } = parseInitialPuml(initialClassPuml);
+      // 初期PUMLは「保存状態が無いときだけ」反映（上書き事故を防ぐ）
+      const hasSaved = !!localStorage.getItem(STORAGE_KEY_EDITOR_STATE);
+      if (!hasSaved) {
+        const initialClassPuml =
+          (parsed as EditorPayload).initialClassPuml ??
+          (parsed as EditorInitialPayload).initialClassPuml;
 
-      setClasses(initClasses);
-      setRelations(initRelations);
-      if (initClasses.length > 0) setSelectedClassId(initClasses[0].id);
+        const { classes: initClasses, relations: initRelations } =
+          parseInitialPuml(initialClassPuml);
 
-      // ODスナップショット（あれば）
+        setClasses(initClasses);
+        setRelations(initRelations);
+        setSelectedClassId(initClasses[0]?.id ?? null);
+        setSelectedRelationId(null);
+      }
+
+      // ★ OD snapshot は「常に」読む（保存状態があっても表示したい）
       const payload = parsed as EditorPayload;
       if (payload.snapshot?.objects && payload.snapshot?.links) {
         setOdObjects(payload.snapshot.objects);
@@ -500,9 +512,10 @@ const ClassEditorPage: React.FC = () => {
       }
       setOdRelationHints(payload.relationHints ?? []);
     } catch {
-      // 無視
+      // ignore
     }
   }, []);
+
 
   // ===== PlantUML の再生成 =====
   useEffect(() => {

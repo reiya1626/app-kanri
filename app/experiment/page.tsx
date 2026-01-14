@@ -572,15 +572,15 @@ const highlightProblemByLine = (
 // ===== 用語説明（title用） =====
 const TOOLTIP = {
   objectName:
-    "【オブジェクト】現実世界の具体物（人・物・授業など）を表します。問題文に出てくる登場人物や対象をオブジェクトとして作成します。例：佐藤、文学",
+    "【オブジェクト】現実世界の具体物（人・物・授業など）を表します。",
   slotKey:
-    "【スロット名（属性名）】オブジェクトが持つ情報の名前です。例：年齢、科目名",
+    "【スロット名（属性名）】オブジェクトが持つ情報の名前です。",
   slotValue:
-    "【スロット値】属性の具体的な値です。数値はそのまま、文字は \"...\" として扱われます（例：19、\"文学\"）。",
+    "【スロット値】属性の具体的な値です。数値はそのまま、文字は \"...\" として扱われます。",
   linkEndpoints:
     "【リンク（関係）】オブジェクト同士の関係です。ここで「どのオブジェクトとどのオブジェクトが関係を持つか」を指定します。",
   linkLabel:
-    "【リンクラベル】関係の意味を短い言葉で表します。例：履修する、担当する",
+    "【リンクラベル】関係の意味を短い言葉で表します．行為や関係を表す表現が使われることが多い",
 } as const;
 
 // ===== ラベル用の ?（title表示の気づき誘導） =====
@@ -1059,7 +1059,7 @@ const ExperimentPage: React.FC = () => {
     if (objRevealExtra >= objExtraBasesForReveal.length)
       return "候補はすべて表示済みです。";
     if (!objDirtySinceHint)
-      return "次の候補を見るには、診断後にオブジェクト図を一度修正してください（例：オブジェクト名／スロット名の追加・修正・削除）。";
+      return "次の候補を見るには、診断後にオブジェクト図を一度修正してください。";
     return null;
   }, [objChecked, objExtraBasesForReveal.length, objRevealExtra, objDirtySinceHint]);
 
@@ -1243,7 +1243,7 @@ const ExperimentPage: React.FC = () => {
     if (linkRevealExtra >= linkExtraLinksForReveal.length)
       return "候補はすべて表示済みです。";
     if (!linkDirtySinceHint)
-      return "次の候補を見るには、診断後にリンク（端点/ラベル）を一度修正してください（例：端点の変更、ラベル入力、不要なら削除）。";
+      return "次の候補を見るには、診断後にリンク（端点/ラベル）を一度修正してください。";
     return null;
   }, [
     linkChecked,
@@ -2038,7 +2038,7 @@ const ExperimentPage: React.FC = () => {
                           </div>
                         ) : (
                           <div className="text-slate-600">
-                            🔒 次の候補を見るには、オブジェクト図を一度修正してください（例：名前/スロット名の修正、追加、削除）。
+                            🔒 次の候補を見るには、オブジェクト図を一度修正してください）。
                             <button
                               type="button"
                               className="ml-2 underline text-sky-700 hover:text-sky-800"
@@ -2191,7 +2191,7 @@ const ExperimentPage: React.FC = () => {
                         onChange={(e) => handleUpdateObjectName(selectedObject.id, e.target.value)}
                         onFocus={() => setEditingObjectId(selectedObject.id)}
                         onBlur={() => setEditingObjectId(null)}
-                        placeholder="例）学生1、授業A など"
+                        placeholder=""
                         title={TOOLTIP.objectName}
                       />
                     </div>
@@ -2214,7 +2214,7 @@ const ExperimentPage: React.FC = () => {
                       </div>
 
                       {selectedObject.slots.length === 0 && (
-                        <div className="text-[11px] text-slate-500 mb-1">例）スロット名：年齢、値：19 など</div>
+                        <div className="text-[11px] text-slate-500 mb-1"></div>
                       )}
 
                       <div className="flex flex-col gap-1">
@@ -2225,7 +2225,7 @@ const ExperimentPage: React.FC = () => {
                                 className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                                 value={s.key}
                                 onChange={(e) => handleUpdateSlot(idx, { key: e.target.value })}
-                                placeholder="スロット名（例：年齢）"
+                                placeholder="スロット名"
                                 title={TOOLTIP.slotKey}
                               />
                               <span className="text-[11px] text-slate-400">=</span>
@@ -2233,7 +2233,7 @@ const ExperimentPage: React.FC = () => {
                                 className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                                 value={s.value}
                                 onChange={(e) => handleUpdateSlot(idx, { value: e.target.value })}
-                                placeholder={'値（例：19、"文学" など）'}
+                                placeholder={''}
                                 title={TOOLTIP.slotValue}
                               />
                             </div>
@@ -2405,7 +2405,7 @@ const ExperimentPage: React.FC = () => {
                           </div>
                         ) : (
                           <div className="text-slate-600">
-                            🔒 次の候補を見るには、リンク（端点/ラベル）を一度修正してください（例：端点変更、ラベル入力、削除）。
+                            🔒 次の候補を見るには、リンク（端点/ラベル）を一度修正してください。
                             <button
                               type="button"
                               className="ml-2 underline text-sky-700 hover:text-sky-800"
@@ -2551,7 +2551,7 @@ const ExperimentPage: React.FC = () => {
                     <div>
                       <div className="flex items-center">
                         <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.linkEndpoints}>
-                          リンク（関係を持つオブジェクト）
+                          リンク
                         </label>
                         <HelpBadge title={TOOLTIP.linkEndpoints} />
                       </div>
@@ -2588,7 +2588,7 @@ const ExperimentPage: React.FC = () => {
                     <div>
                       <div className="flex items-center">
                         <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.linkLabel}>
-                          リンクラベル（関係を説明する動詞）
+                          リンクラベル
                         </label>
                         <HelpBadge title={TOOLTIP.linkLabel} />
                       </div>
@@ -2597,7 +2597,7 @@ const ExperimentPage: React.FC = () => {
                         className="w-full border rounded px-2 py-1 text-[11px]"
                         value={selectedLink.label}
                         onChange={(e) => handleUpdateLink(selectedLink.id, { label: e.target.value })}
-                        placeholder="例）履修する、担当する など"
+                        placeholder=""
                         title={TOOLTIP.linkLabel}
                       />
                     </div>
