@@ -572,7 +572,7 @@ const highlightProblemByLine = (
 // ===== 用語説明（title用） =====
 const TOOLTIP = {
   objectName:
-    "【オブジェクト】現実世界の具体物（人・物・授業など）を表します。",
+    "【インスタンス名】現実世界の具体物を識別するための名前です．。",
   slotKey:
     "【スロット名（属性名）】オブジェクトが持つ情報の名前です。",
   slotValue:
@@ -1614,7 +1614,9 @@ const ExperimentPage: React.FC = () => {
       ? "【要確認】このまま進むと、クラス化（抽象化）が崩れる可能性があります。"
       : medium
       ? "【注意】このまま進むと、クラス図に必要な情報が不足する可能性があります。"
-      : "【確認】進む前に、いちど診断して確認することをおすすめします。";
+      : weak
+      ? "【確認】進む前に、いちど診断して確認することもできます。"
+      : "";
 
     parts.push(title);
     parts.push("");
@@ -1622,10 +1624,10 @@ const ExperimentPage: React.FC = () => {
     // 状態（数だけ、具体名は出さない）
     parts.push("■ 現在の状態（数のみ）");
     parts.push(
-      `・オブジェクト：正答にある名前 ${objInputMatched}/${objInputTotal} ／ 正答にない名前 ${objInputUnmatched}/${objInputTotal} ／ 正答にあるが未入力 ${objMissingCount} ／ 正答例と異なる候補 ${objExtraCount}`
+      `・オブジェクト：正答例にある名前 ${objInputMatched}/${objInputTotal} ／ 正答例にない名前 ${objInputUnmatched}/${objInputTotal} ／ 正答例にあるが未入力 ${objMissingCount} ／ 正答例と異なる候補 ${objExtraCount}`
     );
     parts.push(
-      `・リンク：正答にある端点 ${linkInputMatched}/${linkInputTotal} ／ 正答にない端点 ${linkInputUnmatched}/${linkInputTotal} ／ 正答にあるが未入力 ${linkMissingCount} ／ 正答例と異なる候補 ${linkExtraCount}`
+      `・リンク：正答例にある端点 ${linkInputMatched}/${linkInputTotal} ／ 正答例にない端点 ${linkInputUnmatched}/${linkInputTotal} ／ 正答例にあるが未入力 ${linkMissingCount} ／ 正答例と異なる候補 ${linkExtraCount}`
     );
     parts.push("");
 
@@ -1633,7 +1635,7 @@ const ExperimentPage: React.FC = () => {
     parts.push("■ なぜ注意が必要？");
     if (strong) {
       parts.push(
-        "・正答例と異なる候補が混ざると、「何をクラスとして抽象化するか」がブレやすくなります。"
+        "・不足が残っていると、クラス図に必要なクラスや関連が欠けてしまうことがあります。"
       );
     }
     if (medium) {
@@ -1647,7 +1649,7 @@ const ExperimentPage: React.FC = () => {
     parts.push("");
 
     // 行動誘導
-    parts.push("■ まず何をすればいい？（おすすめの次の一手）");
+    parts.push("■ もし戻る場合のおすすめの行動");
     if (!objChecked || !linkChecked) {
       parts.push(
         "・「オブジェクトを診断する」「リンクを診断する」を押して、状態を確認してください。"
@@ -1669,7 +1671,7 @@ const ExperimentPage: React.FC = () => {
     parts.push("■ それでも進む場合");
     parts.push("・根拠があって「正答例と異なる候補」を入れているなら、進んでもOKです。");
     parts.push(
-      "・ただし次のクラス図編集で「なぜ入れたか」を説明できる状態にしておくのがおすすめです。"
+      "・クラス図編集ページからこちらに戻ることは可能ですが，必ず状態の保存をしてから戻ってください"
     );
     parts.push("");
     parts.push("このままクラス図編集へ進みますか？");
@@ -1682,7 +1684,7 @@ const ExperimentPage: React.FC = () => {
     // ここだけは“警告”ではなく“ブロック”のまま（PlantUML/推定CDが破綻しやすい）
     if (hasUnnamedObject) {
       alert(
-        "オブジェクト名が未入力のものがあります。\nすべてのオブジェクトに名前を入力してください。"
+        "インスタンス名が未入力のものがあります。\nすべてのオブジェクトに名前を入力してください。"
       );
       return;
     }
@@ -1840,7 +1842,7 @@ const ExperimentPage: React.FC = () => {
 
   const proceedDisabledReason = useMemo(() => {
     if (!proceedDisabled) return "";
-    return "オブジェクト名が未入力のものがあります。";
+    return "インスタンス名が未入力のものがあります。";
   }, [proceedDisabled]);
 
   const proceedHoverMessage = useMemo(() => {
@@ -2055,12 +2057,12 @@ const ExperimentPage: React.FC = () => {
                   {!objChecked ? (
                     <div className="mt-2 text-[11px] text-slate-600">
                       ※ 「オブジェクトを診断する」で、
-                      あなたが入力したオブジェクト名が正答例に含まれるか／正答例にあるのに未入力のものがあるかを確認できます
+                      あなたが入力したインスタンス名が正答例に含まれるか／正答例にあるのに未入力のものがあるかを確認できます
                     </div>
                   ) : (
                     <div className="mt-2 text-[11px] text-slate-600">
                       <div>
-                        <span className="font-semibold">あなたの入力（オブジェクト名）</span>：
+                        <span className="font-semibold">あなたの入力（インスタンス名）</span>：
                         正答に含まれる <span className="font-semibold">{objInputMatched}</span>/{objInputTotal}　
                         正答にない <span className="font-semibold">{objInputUnmatched}</span>/{objInputTotal}
                       </div>
@@ -2098,7 +2100,7 @@ const ExperimentPage: React.FC = () => {
                     objExtraCount === 0 &&
                     (objSlotRequiredTotal === 0 || objSlotMissingTotal === 0) && (
                       <div className="mt-2 text-[11px] text-emerald-700 font-semibold">
-                        正答例と一致しています（オブジェクト名／スロット名の観点）
+                        正答例と一致しています（インスタンス名／スロット名の観点）
                       </div>
                     )}
 
@@ -2180,7 +2182,7 @@ const ExperimentPage: React.FC = () => {
                     <div>
                       <div className="flex items-center">
                         <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.objectName}>
-                          オブジェクト名
+                          インスタンス名
                         </label>
                         <HelpBadge title={TOOLTIP.objectName} />
                       </div>
@@ -2660,7 +2662,7 @@ const ExperimentPage: React.FC = () => {
               {hasUnnamedObject && (
                 <div className="p-3 text-[11px] text-slate-600">
                   推定クラス図は一時停止中です。<br />
-                  <span className="font-semibold">オブジェクト名が未入力</span>のものがあるため、
+                  <span className="font-semibold">インスタンス名が未入力</span>のものがあるため、
                   すべてのオブジェクトに名前を入力してください。
                 </div>
               )}

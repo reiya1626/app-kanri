@@ -459,7 +459,7 @@ const extractLinksFromPuml = (puml: string) => {
 // ===== 用語説明（title用） =====
 const TOOLTIP = {
   objectName:
-    "【オブジェクト】現実世界の具体物（人・物・授業など）を表します．",
+    "【インスタンス名】現実世界の具体物（人・物・授業など）を識別するための名前です。",
   slotKey:
     "【スロット名（属性名）】オブジェクトが持つ情報の名前です．",
   slotValue:
@@ -877,7 +877,7 @@ const ExperimentPage: React.FC = () => {
     if (objRevealExtra >= objExtraBasesForReveal.length)
       return "候補はすべて表示済みです。";
     if (!objDirtySinceHint)
-      return "次の候補を見るには、診断後にオブジェクト図を一度修正してください（例：オブジェクト名／スロット名の追加・修正・削除）。";
+      return "次の候補を見るには、診断後にオブジェクト図を一度修正してください。";
     return null;
   }, [objChecked, objExtraBasesForReveal.length, objRevealExtra, objDirtySinceHint]);
 
@@ -1049,7 +1049,7 @@ const ExperimentPage: React.FC = () => {
     if (linkRevealExtra >= linkExtraLinksForReveal.length)
       return "候補はすべて表示済みです。";
     if (!linkDirtySinceHint)
-      return "次の候補を見るには、診断後にリンク（端点/ラベル）を一度修正してください（例：端点の変更、ラベル入力、不要なら削除）。";
+      return "次の候補を見るには、診断後にリンク（端点/ラベル）を一度修正してください。";
     return null;
   }, [
     linkChecked,
@@ -1228,7 +1228,7 @@ const ExperimentPage: React.FC = () => {
   const handleConvertAndOpenClassEditor = async () => {
     if (hasUnnamedObject) {
       alert(
-        "オブジェクト名が未入力のものがあります。\nすべてのオブジェクトに名前を入力してください。"
+        "インスタンス名が未入力のものがあります。\nすべてのオブジェクトに名前を入力してください。"
       );
       return;
     }
@@ -1349,7 +1349,7 @@ const ExperimentPage: React.FC = () => {
 
   const proceedDisabledReason = useMemo(() => {
     if (!proceedDisabled) return "";
-    return "オブジェクト名が未入力のものがあります。";
+    return "インスタンス名が未入力のものがあります。";
   }, [proceedDisabled]);
 
   const proceedHoverMessage = useMemo(() => {
@@ -1508,7 +1508,7 @@ const ExperimentPage: React.FC = () => {
                     <div>
                       <div className="flex items-center">
                         <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.objectName}>
-                          オブジェクト名
+                          インスタンス名
                         </label>
                       </div>
 
@@ -1807,7 +1807,7 @@ const ExperimentPage: React.FC = () => {
               {hasUnnamedObject && (
                 <div className="p-3 text-[11px] text-slate-600">
                   推定クラス図は一時停止中です。<br />
-                  <span className="font-semibold">オブジェクト名が未入力</span>のものがあるため、
+                  <span className="font-semibold">インスタンス名が未入力</span>のものがあるため、
                   すべてのオブジェクトに名前を入力してください。
                 </div>
               )}
