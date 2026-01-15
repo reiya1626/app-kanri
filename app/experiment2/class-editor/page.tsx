@@ -51,6 +51,9 @@ type EditorPayload = {
 const STORAGE_KEY_EDITOR_STATE = "EXPERIMENT_CLASS_EDITOR_STATE_V1";
 const STORAGE_KEY_EDITOR_INITIAL = "EXPERIMENT_CLASS_EDITOR_INITIAL";
 
+// ★ 多重度：固定4択（▼で選択する方式）
+const MULTIPLICITY_CHOICES = ["0..1", "1", "0..*", "1..*"] as const;
+
 // 簡易ID生成
 const makeId = () => Math.random().toString(36).slice(2);
 
@@ -290,8 +293,7 @@ function mergeMultiplicity(a: string, b: string): string {
   const ra = parseMultiplicity(a);
   const rb = parseMultiplicity(b);
   const min = Math.min(ra.min, rb.min);
-  const max =
-    ra.max === null || rb.max === null ? null : Math.max(ra.max, rb.max);
+  const max = ra.max === null || rb.max === null ? null : Math.max(ra.max, rb.max);
   return formatMultiplicity({ min, max });
 }
 
@@ -303,9 +305,7 @@ const ClassEditorPage: React.FC = () => {
   const [classes, setClasses] = useState<ClassInfo[]>([]);
   const [relations, setRelations] = useState<Relation[]>([]);
   const [selectedClassId, setSelectedClassId] = useState<string | null>(null);
-  const [selectedRelationId, setSelectedRelationId] = useState<string | null>(
-    null
-  );
+  const [selectedRelationId, setSelectedRelationId] = useState<string | null>(null);
   const [encodedPuml, setEncodedPuml] = useState<string>("");
 
   // ===== OD→CD 連携（ODページから渡されたスナップショット） =====
@@ -320,24 +320,8 @@ const ClassEditorPage: React.FC = () => {
   const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
   const [classZoom, setClassZoom] = useState(1);
 
-  // 多重度入力中は，途中の文字（例：0..）でプレビューが不安定になりやすいので，一時的にプレビューを抑制
-  const [isMultiplicityEditing, setIsMultiplicityEditing] = useState(false);
-  const multEditTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const markMultiplicityEditing = () => {
-    setIsMultiplicityEditing(true);
-    if (multEditTimer.current) clearTimeout(multEditTimer.current);
-    multEditTimer.current = setTimeout(
-      () => setIsMultiplicityEditing(false),
-      600
-    );
-  };
-
-  useEffect(() => {
-    return () => {
-      if (multEditTimer.current) clearTimeout(multEditTimer.current);
-    };
-  }, []);
+  // ★ select化したので「入力途中の0..」問題が起きない。互換のため state は残すが使わない。
+  const [isMultiplicityEditing] = useState(false);
 
   // プレビュー抑制：入力が未完了の間は PlantUML エラー表示で混乱しやすいため，表示を遅らせる
   const previewHoldReasons = useMemo(() => {
@@ -356,7 +340,10 @@ const ClassEditorPage: React.FC = () => {
     ) {
       reasons.push("関連の端点");
     }
+
+    // ★ select化したのでここは実質増えない（互換で残す）
     if (isMultiplicityEditing) reasons.push("多重度（入力中）");
+
     return reasons;
   }, [classes, relations, isMultiplicityEditing]);
 
@@ -393,8 +380,7 @@ const ClassEditorPage: React.FC = () => {
           (parsed as EditorPayload).initialClassPuml ??
           (parsed as EditorInitialPayload).initialClassPuml;
 
-        const { classes: initClasses, relations: initRelations } =
-          parseInitialPuml(initialClassPuml);
+        const { classes: initClasses, relations: initRelations } = parseInitialPuml(initialClassPuml);
 
         setClasses(initClasses);
         setRelations(initRelations);
@@ -441,8 +427,7 @@ const ClassEditorPage: React.FC = () => {
 
     for (const cls of classes) {
       const alias =
-        aliasById.get(cls.id) ??
-        `C_${String(cls.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
+        aliasById.get(cls.id) ?? `C_${String(cls.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
 
       // ★ 色指定（#...）を一切付けない
       lines.push(`class "${esc(cls.name)}" as ${alias} {`);
@@ -466,15 +451,11 @@ const ClassEditorPage: React.FC = () => {
       const labelPart = r.label ? ` : ${esc(r.label)}` : "";
 
       const fromAlias =
-        aliasById.get(from.id) ??
-        `C_${String(from.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
+        aliasById.get(from.id) ?? `C_${String(from.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
       const toAlias =
-        aliasById.get(to.id) ??
-        `C_${String(to.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
+        aliasById.get(to.id) ?? `C_${String(to.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
 
-      lines.push(
-        `${fromAlias} "${leftMult}" ${arrow} "${rightMult}" ${toAlias}${labelPart}`
-      );
+      lines.push(`${fromAlias} "${leftMult}" ${arrow} "${rightMult}" ${toAlias}${labelPart}`);
     }
 
     lines.push("@enduml");
@@ -530,10 +511,7 @@ const ClassEditorPage: React.FC = () => {
 
     const totalValidLinks = valid.length;
 
-    const byEndpoint = new Map<
-      string,
-      { a: string; b: string; count: number; labels: Map<string, number> }
-    >();
+    const byEndpoint = new Map<string, { a: string; b: string; count: number; labels: Map<string, number> }>();
 
     for (const v of valid) {
       const existing = byEndpoint.get(v.endpointKey);
@@ -677,8 +655,9 @@ const ClassEditorPage: React.FC = () => {
       fromClassId: classes[0].id,
       toClassId: classes[1].id,
       label: "",
-      leftMultiplicity: "1",
-      rightMultiplicity: "0..1",
+      // ★ 初期値は 0..* にする（スクショの状態）
+      leftMultiplicity: "0..*",
+      rightMultiplicity: "0..*",
     };
     setRelations((prev) => [...prev, newRel]);
     setSelectedRelationId(newRel.id);
@@ -748,7 +727,7 @@ const ClassEditorPage: React.FC = () => {
     }
   };
 
-  // 多重度候補
+  // ★ 以前の datalist 用候補は不要になったが、残っていても害はない（UI側で使わない）
   const multiplicityOptions = useMemo(() => {
     const base = ["1", "0..1", "0..*", "1..*"];
     const s = new Set(base);
@@ -870,6 +849,7 @@ const ClassEditorPage: React.FC = () => {
                     );
                   })}
 
+                  {/* ★ 以前の datalist（input 用）。select 化したのでUIでは未使用。残していてもOK */}
                   <datalist id="multiplicity-options">
                     {multiplicityOptions.map((m) => (
                       <option key={m} value={m} />
@@ -914,14 +894,18 @@ const ClassEditorPage: React.FC = () => {
                                 <input
                                   className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                                   value={a.name}
-                                  onChange={(e) => handleUpdateAttr(selectedClass.id, a.id, { name: e.target.value })}
+                                  onChange={(e) =>
+                                    handleUpdateAttr(selectedClass.id, a.id, { name: e.target.value })
+                                  }
                                   placeholder=""
                                 />
                                 <span className="text-[11px] text-slate-400">:</span>
                                 <select
                                   className="border rounded px-1 py-0.5 text-[11px]"
                                   value={a.type}
-                                  onChange={(e) => handleUpdateAttr(selectedClass.id, a.id, { type: e.target.value })}
+                                  onChange={(e) =>
+                                    handleUpdateAttr(selectedClass.id, a.id, { type: e.target.value })
+                                  }
                                 >
                                   <option value="string">string</option>
                                   <option value="int">int</option>
@@ -1002,29 +986,34 @@ const ClassEditorPage: React.FC = () => {
                           ))}
                         </select>
 
-                        <input
-                          className="border rounded px-1 py-0.5 text-[11px] w-[88px]"
-                          value={r.leftMultiplicity}
-                          onChange={(e) => {
-                            markMultiplicityEditing();
-                            handleUpdateRelation(r.id, { leftMultiplicity: e.target.value });
-                          }}
-                          placeholder=""
-                          list="multiplicity-options"
-                        />
+                        {/* ★ 多重度：input(list) → select（▼で4択選択） */}
+                        <select
+                          className="border rounded px-1 py-0.5 text-[11px] w-[64px] bg-white"
+                          value={r.leftMultiplicity || "0..*"}
+                          onChange={(e) => handleUpdateRelation(r.id, { leftMultiplicity: e.target.value })}
+                          aria-label="左側の多重度"
+                        >
+                          {MULTIPLICITY_CHOICES.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
 
                         <span className="text-[11px]">→</span>
 
-                        <input
-                          className="border rounded px-1 py-0.5 text-[11px] w-[88px]"
-                          value={r.rightMultiplicity}
-                          onChange={(e) => {
-                            markMultiplicityEditing();
-                            handleUpdateRelation(r.id, { rightMultiplicity: e.target.value });
-                          }}
-                          placeholder=""
-                          list="multiplicity-options"
-                        />
+                        <select
+                          className="border rounded px-1 py-0.5 text-[11px] w-[64px] bg-white"
+                          value={r.rightMultiplicity || "0..*"}
+                          onChange={(e) => handleUpdateRelation(r.id, { rightMultiplicity: e.target.value })}
+                          aria-label="右側の多重度"
+                        >
+                          {MULTIPLICITY_CHOICES.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
 
                         <select
                           className="border rounded px-1 py-0.5 text-[11px]"

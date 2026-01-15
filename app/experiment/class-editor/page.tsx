@@ -46,12 +46,15 @@ type EditorPayload = {
   relationHints?: RelationHint[];
   snapshot?: { objects: Obj[]; links: Link[] };
 };
+
 // ===== 定数 =====
 const STORAGE_KEY_EDITOR_STATE = "EXPERIMENT_CLASS_EDITOR_STATE_V1";
 const STORAGE_KEY_EDITOR_INITIAL = "EXPERIMENT_CLASS_EDITOR_INITIAL";
 
+// ★ 多重度は4択で確実に選択できるように固定
+const MULT4 = ["0..1", "1", "0..*", "1..*"] as const;
+
 // ===== UI 小物：? ヘルプ（title で説明を表示） =====
-// - 画面を増やさずに「その場で意味が分かる」ことを優先して，ブラウザ標準の tooltip（title）を利用する
 const HelpBadge = ({ text }: { text: string }) => (
   <span
     className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-slate-100 text-slate-600 text-[10px] cursor-help select-none"
@@ -72,8 +75,6 @@ const esc = (s: string) => s.replace(/\"/g, '\\"');
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // ===== 問題文ハイライト用（部分一致の強化：末尾の識別子だけ落とす） =====
-// 例）利用者B -> 利用者 / 学生1 -> 学生
-// ※ 何でも部分一致にすると誤検出が増えるため，「末尾の識別子っぽいもの」だけを控えめに除去する
 const baseNameForProblemHighlight = (raw: string) => {
   let s = String(raw ?? "").trim();
   if (!s) return "";
@@ -136,7 +137,6 @@ const makeEndpointKey = (aBase: string, bBase: string) => {
   return `${x}||${y}`;
 };
 
-
 // ===== OD（オブジェクト図）プレビュー生成（遷移前スナップショット表示用） =====
 const formatSlotValueForPuml = (raw: string) => {
   const s = String(raw ?? "").trim();
@@ -195,9 +195,7 @@ const buildObjectDiagramPuml = (objs: Obj[], links: Link[]) => {
   return lines.join("\n");
 };
 
-// 正答（クラス図）PlantUML からクラス名を抽出する
-// - 固定の候補語リストは使わず，教員が登録した「正答例PUML」に出てくるクラス名をそのまま候補として提示する
-// - class 定義がない場合に備えて，関連行からも補助的に拾う// ===== PlantUML からの簡易パーサ =====
+// ===== PlantUML からの簡易パーサ =====
 function parseInitialPuml(
   puml: string | undefined
 ): {
@@ -251,7 +249,9 @@ function parseInitialPuml(
 
     // 関連行
     // 例: 学生 "1" -- "0..*" 授業 : 履修する
-    const mRel = raw.match(/^(.+?)\s+\"([^\"]*)\"\s+(\.\.|--)\s+\"([^\"]*)\"\s+(.+?)(?:\s*:\s*(.+))?$/);
+    const mRel = raw.match(
+      /^(.+?)\s+\"([^\"]*)\"\s+(\.\.|--)\s+\"([^\"]*)\"\s+(.+?)(?:\s*:\s*(.+))?$/
+    );
     if (mRel) {
       const fromName = mRel[1].trim();
       const leftMult = mRel[2].trim();
@@ -284,14 +284,11 @@ function parseInitialPuml(
 
 // ===== フィードバック生成（多重度のヒント中心） =====
 function makeFeedback(classes: ClassInfo[], relations: Relation[]): string[] {
-  // 初学者の認知負荷を上げないため，まずは「考え方の型」だけを短く提示します．
-  // 具体的な数の検討は，必要に応じて下の「OD（オブジェクト図）からの手がかり」を参照します．
   const msgs: string[] = [
     "多重度は『片方 1 つに対して，反対側が何個つながるか』を左右それぞれで考えます．まずは問題文の言い方（必ず / 〜することがある / 複数 / 0でもよい など）を確認しましょう．",
     "オブジェクト図(OD)を作っているので，ODで各インスタンスが何個リンクを持っているか数えると，多重度の候補（例：1，0..1，0..*，1..*）を考えやすくなります．",
   ];
 
-  // まずは作業の次の一歩だけを短く案内します．
   if (classes.length >= 2 && relations.length === 0) {
     msgs.push("関連がまだ無いので，関係しそうなクラス同士を 1 本つないでみましょう．");
   }
@@ -299,12 +296,11 @@ function makeFeedback(classes: ClassInfo[], relations: Relation[]): string[] {
   return msgs;
 }
 
-
 // 問題文ハイライト用：選択語を <mark> で囲む
 type HighlightToken = {
   match: string;
   reason: string;
-  priority: number; // 同じmatchが複数ある場合に，優先して理由を出す
+  priority: number;
 };
 
 function highlightText(text: string, tokens: HighlightToken[]): ReactNode[] {
@@ -315,7 +311,6 @@ function highlightText(text: string, tokens: HighlightToken[]): ReactNode[] {
     .filter((t) => t.match.length > 0);
   if (cleaned.length === 0) return [text];
 
-  // 同一matchは優先度の高いものを採用（理由がぶれないように）
   const normKey = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
   const bestByMatch = new Map<string, HighlightToken>();
   for (const t of cleaned) {
@@ -324,7 +319,6 @@ function highlightText(text: string, tokens: HighlightToken[]): ReactNode[] {
     if (!prev || t.priority > prev.priority) bestByMatch.set(key, t);
   }
 
-  // 長い語を優先（部分一致の食い合いを減らす）
   const uniq = Array.from(bestByMatch.values()).sort((a, b) => {
     const len = b.match.length - a.match.length;
     if (len !== 0) return len;
@@ -337,7 +331,6 @@ function highlightText(text: string, tokens: HighlightToken[]): ReactNode[] {
   const re = new RegExp(`(${pattern})`, "gi");
   const parts = text.split(re);
 
-  // splitで返る文字列（実際の表記）→ token へのマップ
   const tokenMap = new Map<string, HighlightToken>();
   for (const t of uniq) tokenMap.set(normKey(t.match), t);
 
@@ -345,11 +338,7 @@ function highlightText(text: string, tokens: HighlightToken[]): ReactNode[] {
     const token = tokenMap.get(normKey(part));
     if (!token) return <React.Fragment key={idx}>{part}</React.Fragment>;
     return (
-      <mark
-        key={idx}
-        className="bg-yellow-200 px-0.5 rounded"
-        title={token.reason}
-      >
+      <mark key={idx} className="bg-yellow-200 px-0.5 rounded" title={token.reason}>
         {part}
       </mark>
     );
@@ -357,7 +346,7 @@ function highlightText(text: string, tokens: HighlightToken[]): ReactNode[] {
 }
 
 // ===== 多重度の合成（安全側＝広め） =====
-type MultRange = { min: number; max: number | null }; // max=null は無限(*)
+type MultRange = { min: number; max: number | null };
 
 function parseMultiplicity(m: string): MultRange {
   const t = (m ?? "").trim();
@@ -373,13 +362,11 @@ function parseMultiplicity(m: string): MultRange {
     const max = mm[2] === "*" ? null : Number(mm[2]);
     return { min, max };
   }
-  // 想定外は「断定しない」に寄せる
   return { min: 0, max: null };
 }
 
 function formatMultiplicity(r: MultRange): string {
   if (r.max === null) {
-    // 無限
     if (r.min <= 0) return "0..*";
     if (r.min == 1) return "1..*";
     return `${r.min}..*`;
@@ -397,7 +384,7 @@ function mergeMultiplicity(a: string, b: string): string {
   return formatMultiplicity({ min, max });
 }
 
-// ===== クラス統合の候補（Explainable） =====// ===== メインコンポーネント =====
+// ===== メインコンポーネント =====
 const ClassEditorPage: React.FC = () => {
   const router = useRouter();
   const { classProblemText, classAnswerPuml } = useProblemConfig();
@@ -413,15 +400,14 @@ const ClassEditorPage: React.FC = () => {
   const [odLinks, setOdLinks] = useState<Link[]>([]);
   const [odRelationHints, setOdRelationHints] = useState<RelationHint[]>([]);
 
-
-  // --- クラス図プレビュー拡大・縮小（experiment/page.tsx と同様） ---
+  // --- クラス図プレビュー拡大・縮小 ---
   const ZOOM_MIN = 0.3;
   const ZOOM_MAX = 3.0;
   const ZOOM_STEP = 0.1;
   const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
   const [classZoom, setClassZoom] = useState(1);
 
-  // 多重度入力中は，途中の文字（例：0..）でプレビューが不安定になりやすいので，一時的にプレビューを抑制します．
+  // 多重度入力中はプレビューが不安定になりやすいので一時抑制
   const [isMultiplicityEditing, setIsMultiplicityEditing] = useState(false);
   const multEditTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -437,15 +423,13 @@ const ClassEditorPage: React.FC = () => {
     };
   }, []);
 
-
-
-  // プレビュー抑制：入力が未完了の間は PlantUML エラー表示で混乱しやすいため，表示を遅らせます．
   const previewHoldReasons = useMemo(() => {
     const reasons: string[] = [];
     if (classes.length === 0) return reasons;
 
     if (classes.some((c) => !String(c.name ?? "").trim())) reasons.push("クラス名");
-    if (classes.some((c) => (c.attrs ?? []).some((a) => !String(a.name ?? "").trim()))) reasons.push("属性名");
+    if (classes.some((c) => (c.attrs ?? []).some((a) => !String(a.name ?? "").trim())))
+      reasons.push("属性名");
     if (
       relations.some(
         (r) =>
@@ -492,8 +476,7 @@ const ClassEditorPage: React.FC = () => {
           (parsed as EditorPayload).initialClassPuml ??
           (parsed as EditorInitialPayload).initialClassPuml;
 
-        const { classes: initClasses, relations: initRelations } =
-          parseInitialPuml(initialClassPuml);
+        const { classes: initClasses, relations: initRelations } = parseInitialPuml(initialClassPuml);
 
         setClasses(initClasses);
         setRelations(initRelations);
@@ -516,7 +499,6 @@ const ClassEditorPage: React.FC = () => {
     }
   }, []);
 
-
   // ===== PlantUML の再生成 =====
   useEffect(() => {
     if (classes.length === 0 || previewHoldReasons.length > 0) {
@@ -531,7 +513,7 @@ const ClassEditorPage: React.FC = () => {
 
     const selectedRelation = relations.find((r) => r.id === selectedRelationId) ?? null;
 
-    // クラス定義：表示名は "..."，内部参照は alias を使って PlantUML のエラーを減らす
+    // クラス定義：表示名は "..."，内部参照は alias
     const aliasById = new Map<string, string>();
     for (const cls of classes) {
       const safe = String(cls.id ?? "").replace(/[^A-Za-z0-9_]/g, "_");
@@ -542,15 +524,14 @@ const ClassEditorPage: React.FC = () => {
     for (const cls of classes) {
       const isSelectedClass = cls.id === selectedClassId;
       const isEndpointOfSelectedRelation =
-        selectedRelation && (selectedRelation.fromClassId === cls.id || selectedRelation.toClassId === cls.id);
+        selectedRelation &&
+        (selectedRelation.fromClassId === cls.id || selectedRelation.toClassId === cls.id);
 
       let colorPart = "";
       if (isSelectedClass) {
-        // クラス選択 → 青
-        colorPart = " #CCEEFF"; // 薄い水色
+        colorPart = " #CCEEFF";
       } else if (isEndpointOfSelectedRelation) {
-        // 選択中関連の両端 → 赤系
-        colorPart = " #FFCCCC"; // 薄いピンク
+        colorPart = " #FFCCCC";
       }
 
       const alias = aliasById.get(cls.id) ?? `C_${String(cls.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
@@ -592,8 +573,10 @@ const ClassEditorPage: React.FC = () => {
     }
   }, [classes, relations, selectedClassId, selectedRelationId, previewHoldReasons]);
 
-  const previewUrl = useMemo(() => (encodedPuml ? `https://www.plantuml.com/plantuml/svg/${encodedPuml}` : ""), [encodedPuml]);
-
+  const previewUrl = useMemo(
+    () => (encodedPuml ? `https://www.plantuml.com/plantuml/svg/${encodedPuml}` : ""),
+    [encodedPuml]
+  );
 
   // OD（遷移前スナップショット）のプレビューURL
   const odPuml = useMemo(() => buildObjectDiagramPuml(odObjects, odLinks), [odObjects, odLinks]);
@@ -609,8 +592,7 @@ const ClassEditorPage: React.FC = () => {
   const selectedClass = classes.find((c) => c.id === selectedClassId) ?? null;
   const selectedRelation = relations.find((r) => r.id === selectedRelationId) ?? null;
 
-  // ===== 選択中の関連：多重度を考えるための「最小限のヒント」 =====
-  // - 初学者の認知負荷を下げるため，表示は「問い（自分→相手）」＋「4択の候補」＋（あれば）ODの一行ヒントに限定します．
+  // ===== 選択中の関連：多重度ヒント =====
   const multiplicityAssist = useMemo(() => {
     if (!selectedRelation) return null;
 
@@ -644,7 +626,6 @@ const ClassEditorPage: React.FC = () => {
       const bBase = baseNameForAssist(bObj.name);
       if (!aBase || !bBase) continue;
 
-      // left ↔ right のリンクのみ数える
       if (leftBase && rightBase) {
         if (aBase === leftBase && bBase === rightBase) {
           leftCountByObj.set(aObj.id, (leftCountByObj.get(aObj.id) ?? 0) + 1);
@@ -664,7 +645,6 @@ const ClassEditorPage: React.FC = () => {
     };
 
     const recommend4 = (min: number, max: number) => {
-      // 4択（1 / 0..1 / 0..* / 1..*）に丸めて「考えの足場」にする
       if (max <= 1) return min === 0 ? "0..1" : "1";
       return min === 0 ? "0..*" : "1..*";
     };
@@ -678,7 +658,6 @@ const ClassEditorPage: React.FC = () => {
     return {
       leftName,
       rightName,
-      // 「自分から見て相手が何個？」の観点
       obsLeftToRight: leftToRight
         ? {
             min: leftToRight.min,
@@ -698,7 +677,6 @@ const ClassEditorPage: React.FC = () => {
     };
   }, [selectedRelation, classes, odObjects, odLinks]);
 
-
   // 問題文ハイライト対象（トークン）
   const problemHighlightTokens = useMemo<HighlightToken[]>(() => {
     const tokens: HighlightToken[] = [];
@@ -707,14 +685,12 @@ const ClassEditorPage: React.FC = () => {
       const t = String(raw ?? "").trim();
       if (!t) return;
 
-      // 完全一致（入力そのまま）
       tokens.push({
         match: t,
         priority: 2,
         reason: `${context}「${t}」に一致`,
       });
 
-      // 例）利用者B を選んだとき，問題文の「利用者」も拾えるようにする
       const base = baseNameForProblemHighlight(t);
       if (base && base !== t) {
         tokens.push({
@@ -737,7 +713,6 @@ const ClassEditorPage: React.FC = () => {
       if (to) pushWithBase(to.name, "選択中の関連の端点（クラス名）");
     }
 
-    // 重複除去（同じ match が複数ある場合は priority の高い方を残す）
     const byKey = new Map<string, HighlightToken>();
     for (const t of tokens) {
       const k = String(t.match ?? "").trim().toLowerCase();
@@ -748,7 +723,6 @@ const ClassEditorPage: React.FC = () => {
     return Array.from(byKey.values());
   }, [selectedClass, selectedRelation, classes]);
 
-  // 「部分一致でハイライトしている」ことを明示する（初学者向け）
   const highlightExplain = useMemo(() => {
     const name = (selectedClass?.name ?? "").trim();
     if (!name) return null;
@@ -780,7 +754,6 @@ const ClassEditorPage: React.FC = () => {
 
     const totalValidLinks = valid.length;
 
-    // 端点ペアごとに集計（OD上の「関係の種類」）
     const byEndpoint = new Map<
       string,
       { a: string; b: string; count: number; labels: Map<string, number> }
@@ -813,19 +786,16 @@ const ClassEditorPage: React.FC = () => {
       }))
       .sort((x, y) => y.count - x.count || x.pretty.localeCompare(y.pretty, "ja"));
 
-	    // ODリンクのラベル出現回数（上位）
-	    // ※ 端点の一致とは別に「同じラベルが何回出るか」を見せるための集計
-	    const labelCounts = new Map<string, number>();
-	    for (const v of valid) {
-	      if (!v.labelNorm) continue;
-	      labelCounts.set(v.labelNorm, (labelCounts.get(v.labelNorm) ?? 0) + 1);
-	    }
-	    const labelTop = Array.from(labelCounts.entries())
-	      .map(([label, count]) => ({ label, count }))
-	      .sort((x, y) => y.count - x.count || x.label.localeCompare(y.label, "ja"))
-	      .slice(0, 6);
+    const labelCounts = new Map<string, number>();
+    for (const v of valid) {
+      if (!v.labelNorm) continue;
+      labelCounts.set(v.labelNorm, (labelCounts.get(v.labelNorm) ?? 0) + 1);
+    }
+    const labelTop = Array.from(labelCounts.entries())
+      .map(([label, count]) => ({ label, count }))
+      .sort((x, y) => y.count - x.count || x.label.localeCompare(y.label, "ja"))
+      .slice(0, 6);
 
-    // CD側（このページで作成中のクラス図）の関連数も，ODと比較できる形で数える
     const cdPairs = new Set<string>();
     for (const r of relations) {
       const from = classes.find((c) => c.id === r.fromClassId);
@@ -837,8 +807,10 @@ const ClassEditorPage: React.FC = () => {
       cdPairs.add(makeEndpointKey(a, b));
     }
 
-    // RelationHints（OD→CD変換時のヒント）を「端点ペア」に寄せる
-    const hintsByEndpoint = new Map<string, { pretty: string; labels: { label: string; count: number }[] }>();
+    const hintsByEndpoint = new Map<
+      string,
+      { pretty: string; labels: { label: string; count: number }[] }
+    >();
     for (const h of odRelationHints ?? []) {
       const a = baseNameForAssist(h.fromClass);
       const b = baseNameForAssist(h.toClass);
@@ -851,12 +823,7 @@ const ClassEditorPage: React.FC = () => {
       });
     }
 
-    // OD→CD変換ヒントの「(端点ペア, ラベル)」上位
-    // 端点ペアごとの候補ラベルをフラット化して，学習の材料として見せる．
-    const hintFlat = new Map<
-      string,
-      { pretty: string; label: string; count: number }
-    >();
+    const hintFlat = new Map<string, { pretty: string; label: string; count: number }>();
     for (const h of odRelationHints ?? []) {
       const a = baseNameForAssist(h.fromClass);
       const b = baseNameForAssist(h.toClass);
@@ -903,7 +870,6 @@ const ClassEditorPage: React.FC = () => {
     };
     setClasses((prev) => [...prev, newClass]);
     setSelectedClassId(id);
-    // ここでは関連選択はそのままでも良いが，混乱を避けるならクリア
     setSelectedRelationId(null);
   };
 
@@ -1030,17 +996,6 @@ const ClassEditorPage: React.FC = () => {
     }
   };
 
-  // 多重度候補（既存の値も含めて選択できるようにする）
-  const multiplicityOptions = useMemo(() => {
-    const base = ["1", "0..1", "0..*", "1..*"];
-    const s = new Set(base);
-    for (const r of relations) {
-      if (r.leftMultiplicity) s.add(r.leftMultiplicity);
-      if (r.rightMultiplicity) s.add(r.rightMultiplicity);
-    }
-    return Array.from(s.values());
-  }, [relations]);
-
   // ===== レイアウト =====
   return (
     <div className="flex flex-col h-screen bg-slate-50">
@@ -1083,22 +1038,17 @@ const ClassEditorPage: React.FC = () => {
           {/* 左上：クラス図作成問題文 */}
           <div className="h-2/5 border-b bg-white flex flex-col min-h-0">
             <div className="px-3 py-2 border-b font-semibold text-sm">クラス図作成問題（本文）</div>
-                        <div className="flex-1 flex min-h-0">
+            <div className="flex-1 flex min-h-0">
               {/* 左：要求文 */}
               <div className="flex-1 p-3 overflow-auto text-[12px] leading-relaxed whitespace-pre-wrap min-w-0">
-
-              {highlightExplain && (
-                <div className="mb-2 text-[11px] text-slate-600">
-                  選択中のクラス名「
-                  <span className="font-semibold">{highlightExplain.name}</span>
-                  」に合わせて，要求文中の「
-                  <span className="font-semibold">{highlightExplain.base}</span>
-                  」も強調表示しています．
-                </div>
-              )}
-
-              {highlightText(classProblemText, problemHighlightTokens)}
-                          </div>
+                {highlightExplain && (
+                  <div className="mb-2 text-[11px] text-slate-600">
+                    選択中のクラス名「<span className="font-semibold">{highlightExplain.name}</span>」に合わせて，
+                    要求文中の「<span className="font-semibold">{highlightExplain.base}</span>」も強調表示しています．
+                  </div>
+                )}
+                {highlightText(classProblemText, problemHighlightTokens)}
+              </div>
 
               {/* 右：遷移前のオブジェクト図（OD） */}
               <div className="w-[360px] max-w-[45%] border-l bg-slate-50 p-2 flex flex-col min-h-0">
@@ -1122,7 +1072,6 @@ const ClassEditorPage: React.FC = () => {
                 </div>
               </div>
             </div>
-
           </div>
 
           {/* 左下：クラス編集＋関連編集 */}
@@ -1152,14 +1101,13 @@ const ClassEditorPage: React.FC = () => {
                   {classes.map((c) => {
                     const isSelected = selectedClassId === c.id;
                     const isEndpointOfSelectedRelation =
-                      selectedRelation && (selectedRelation.fromClassId === c.id || selectedRelation.toClassId === c.id);
+                      selectedRelation &&
+                      (selectedRelation.fromClassId === c.id || selectedRelation.toClassId === c.id);
 
                     let itemColor = "";
                     if (isSelected) {
-                      // クラス選択 → 青
                       itemColor = "bg-sky-200 border-sky-400";
                     } else if (isEndpointOfSelectedRelation) {
-                      // 選択中関連の両端 → 赤系
                       itemColor = "bg-red-50 border-red-300";
                     } else {
                       itemColor = "bg-slate-50 border-slate-200";
@@ -1172,7 +1120,6 @@ const ClassEditorPage: React.FC = () => {
                         key={c.id}
                         className={`w-full text-left px-2 py-1 border-b flex items-center justify-between transition-colors ${itemColor} ${hoverColor}`}
                         onClick={() => {
-                          // クラスの選択はトグル，関連の選択は保持したまま
                           setSelectedClassId(isSelected ? null : c.id);
                         }}
                       >
@@ -1180,18 +1127,15 @@ const ClassEditorPage: React.FC = () => {
                         <span className="text-[10px] text-slate-500 ml-1">{c.attrs.length} 属性</span>
                       </button>
                     );
-              })}
-              <datalist id="multiplicity-options">
-                {multiplicityOptions.map((m) => (
-                  <option key={m} value={m} />
-                ))}
-              </datalist>
-              </div>
+                  })}
+                </div>
 
                 {/* クラス詳細 */}
                 <div className="flex-1 overflow-y-auto p-2 text-xs bg-white">
                   {!selectedClass && (
-                    <div className="text-[11px] text-slate-500">左の一覧から編集したいクラスを選択してください．</div>
+                    <div className="text-[11px] text-slate-500">
+                      左の一覧から編集したいクラスを選択してください．
+                    </div>
                   )}
                   {selectedClass && (
                     <div className="flex flex-col gap-2">
@@ -1221,9 +1165,13 @@ const ClassEditorPage: React.FC = () => {
                             ＋ 属性を追加
                           </button>
                         </div>
+
                         {selectedClass.attrs.length === 0 && (
-                          <div className="text-[11px] text-slate-500 mb-1">例）属性名：年齢，型：string など</div>
+                          <div className="text-[11px] text-slate-500 mb-1">
+                            例）属性名：年齢，型：string など
+                          </div>
                         )}
+
                         <div className="flex flex-col gap-1">
                           {selectedClass.attrs.map((a) => (
                             <div key={a.id} className="border rounded px-2 py-1 bg-slate-50 flex flex-col gap-1">
@@ -1231,14 +1179,18 @@ const ClassEditorPage: React.FC = () => {
                                 <input
                                   className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                                   value={a.name}
-                                  onChange={(e) => handleUpdateAttr(selectedClass.id, a.id, { name: e.target.value })}
+                                  onChange={(e) =>
+                                    handleUpdateAttr(selectedClass.id, a.id, { name: e.target.value })
+                                  }
                                   placeholder="属性名（例：年齢）"
                                 />
                                 <span className="text-[11px] text-slate-400">:</span>
                                 <select
                                   className="border rounded px-1 py-0.5 text-[11px]"
                                   value={a.type}
-                                  onChange={(e) => handleUpdateAttr(selectedClass.id, a.id, { type: e.target.value })}
+                                  onChange={(e) =>
+                                    handleUpdateAttr(selectedClass.id, a.id, { type: e.target.value })
+                                  }
                                 >
                                   <option value="string">string</option>
                                   <option value="int">int</option>
@@ -1281,7 +1233,7 @@ const ClassEditorPage: React.FC = () => {
                   関連
                   <HelpBadge text="関連：クラス同士の関係を表します．ODで結んだリンクを一般化して，クラス間の関係として整理します．" />
                   と多重度
-                  <HelpBadge text="多重度：片方 1 つに対して，反対側が何個つながるかを表します．例）1=必ず 1 つ，0..1=0 または 1，0..*=0 以上，1..*=1 以上です．必要なら 1..2 のように範囲も入力できます．左右はそれぞれ，相手側の数です．" />
+                  <HelpBadge text="多重度：片方 1 つに対して，反対側が何個つながるかを表します．例）1=必ず 1 つ，0..1=0 または 1，0..*=0 以上，1..*=1 以上です．" />
                   の編集
                 </span>
                 <button
@@ -1298,6 +1250,7 @@ const ClassEditorPage: React.FC = () => {
                     まだ関連がありません．どのクラス同士が関係しているか，矢印と多重度を追加してみましょう．
                   </div>
                 )}
+
                 {relations.map((r) => {
                   const isSelected = selectedRelationId === r.id;
 
@@ -1312,8 +1265,9 @@ const ClassEditorPage: React.FC = () => {
                     >
                       <div className="flex items-center gap-2 text-[11px] text-slate-600">
                         <span>端点と多重度</span>
-                        <HelpBadge text="多重度：片方 1 つに対して，反対側が何個つながるかを表します．例）1=必ず 1 つ，0..1=0 または 1，0..*=0 以上，1..*=1 以上です．必要なら 1..2 のように範囲も入力できます．左右はそれぞれ，相手側の数です．" />
+                        <HelpBadge text="多重度：片方 1 つに対して，反対側が何個つながるかを表します．左右はそれぞれ，相手側の数です．" />
                       </div>
+
                       <div className="flex flex-wrap items-center gap-2">
                         <select
                           className="border rounded px-1 py-0.5 text-[11px]"
@@ -1327,29 +1281,39 @@ const ClassEditorPage: React.FC = () => {
                           ))}
                         </select>
 
-                        <input
+                        {/* ★ここから：多重度は input ではなく select（4択で確実に表示） */}
+                        <select
                           className="border rounded px-1 py-0.5 text-[11px] w-[88px]"
                           value={r.leftMultiplicity}
                           onChange={(e) => {
                             markMultiplicityEditing();
                             handleUpdateRelation(r.id, { leftMultiplicity: e.target.value });
                           }}
-                          placeholder="例）0..*"
-                          list="multiplicity-options"
-                        />
+                        >
+                          {MULT4.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
 
                         <span className="text-[11px]">→</span>
 
-                        <input
+                        <select
                           className="border rounded px-1 py-0.5 text-[11px] w-[88px]"
                           value={r.rightMultiplicity}
                           onChange={(e) => {
                             markMultiplicityEditing();
                             handleUpdateRelation(r.id, { rightMultiplicity: e.target.value });
                           }}
-                          placeholder="例）0..*"
-                          list="multiplicity-options"
-                        />
+                        >
+                          {MULT4.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+                        {/* ★ここまで */}
 
                         <select
                           className="border rounded px-1 py-0.5 text-[11px]"
@@ -1398,7 +1362,6 @@ const ClassEditorPage: React.FC = () => {
           </div>
         </div>
 
-        
         {/* 右側：プレビュー＋フィードバック */}
         <div className="flex-1 flex flex-col overflow-hidden min-h-0">
           {/* 右上：クラス図プレビュー */}
@@ -1458,110 +1421,89 @@ const ClassEditorPage: React.FC = () => {
           <div className="flex-1 bg-slate-50 flex flex-col min-h-0">
             <div className="px-3 py-2 border-b bg-white font-semibold text-sm">フィードバック</div>
             <div className="flex-1 p-3 overflow-auto text-[11px] leading-relaxed">
-              <p className="mb-1 text-slate-600">今のクラス図の状態から，学習のヒントになりそうなポイントをまとめています．</p>
               <ul className="list-disc pl-5 space-y-1">
                 {feedbackMessages.map((m, idx) => (
                   <li key={idx}>{m}</li>
                 ))}
 
-              {selectedRelation && (
-                <div className="mt-3 border-t pt-3">
-                  <div className="font-semibold text-slate-700 mb-1">選択中の関連の多重度ヒント</div>
-                  <div className="text-slate-600">
-                    多重度は「自分 1 つから見て，相手が何個つながるか」を考えます．その答えは，相手側（反対側）の多重度欄に入れます．
-                  </div>
+                {selectedRelation && (
+                  <div className="mt-3 border-t pt-3">
+                    <div className="font-semibold text-slate-700 mb-1">選択中の関連の多重度ヒント(ここでも多重度編集ができます)</div>
 
-                  <div className="mt-2 border rounded bg-white p-2">
-                    <div className="font-semibold text-slate-700">
-                      ① {multiplicityAssist?.leftName ?? "（左）"} から見て {multiplicityAssist?.rightName ?? "（右）"} は？
-                      <span className="ml-2 text-slate-500 font-normal">（右の欄，→ の右に入ります．）</span>
-                    </div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {["1", "0..1", "0..*", "1..*"].map((v) => (
-                        <button
-                          key={v}
-                          type="button"
-                          className="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-[11px]"
-                          onClick={() => handleUpdateRelation(selectedRelation.id, { rightMultiplicity: v })}
-                        >
-                          {v}
-                        </button>
-                      ))}
-                      <button
-                        type="button"
-                        className="px-2 py-0.5 rounded bg-white border hover:bg-slate-50 text-[11px]"
-                        onClick={() => handleUpdateRelation(selectedRelation.id, { rightMultiplicity: "" })}
-                      >
-                        空欄
-                      </button>
-                      <span className="ml-1 text-slate-500">
-                        いま：{selectedRelation.rightMultiplicity ? selectedRelation.rightMultiplicity : "（未入力）"}
-                      </span>
-                    </div>
-
-                    {multiplicityAssist && multiplicityAssist.obsLeftToRight && (
-                      <div className="mt-1 text-slate-600">
-                        ODの例では，
-                        {multiplicityAssist.leftName} 1つから見て {multiplicityAssist.rightName} は
-                        <span className="font-semibold">
-                          {multiplicityAssist.obsLeftToRight.min === multiplicityAssist.obsLeftToRight.max
-                            ? ` ${multiplicityAssist.obsLeftToRight.min} `
-                            : ` ${multiplicityAssist.obsLeftToRight.min}〜${multiplicityAssist.obsLeftToRight.max} `}
-                        </span>
-                        個でした．（よく使う候補なら「{multiplicityAssist.obsLeftToRight.rec}」）
+                    <div className="mt-2 border rounded bg-white p-2">
+                      <div className="font-semibold text-slate-700">
+                        ① {multiplicityAssist?.leftName ?? "（左）"} から見て {multiplicityAssist?.rightName ?? "（右）"} は？
+                        <span className="ml-2 text-slate-500 font-normal">（右の欄，→ の右に入ります．）</span>
                       </div>
-                    )}
-
-                    <div className="mt-3 font-semibold text-slate-700">
-                      ② {multiplicityAssist?.rightName ?? "（右）"} から見て {multiplicityAssist?.leftName ?? "（左）"} は？
-                      <span className="ml-2 text-slate-500 font-normal">（左の欄，→ の左に入ります．）</span>
-                    </div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {["1", "0..1", "0..*", "1..*"].map((v) => (
-                        <button
-                          key={v}
-                          type="button"
-                          className="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-[11px]"
-                          onClick={() => handleUpdateRelation(selectedRelation.id, { leftMultiplicity: v })}
-                        >
-                          {v}
-                        </button>
-                      ))}
-                      <button
-                        type="button"
-                        className="px-2 py-0.5 rounded bg-white border hover:bg-slate-50 text-[11px]"
-                        onClick={() => handleUpdateRelation(selectedRelation.id, { leftMultiplicity: "" })}
-                      >
-                        空欄
-                      </button>
-                      <span className="ml-1 text-slate-500">
-                        いま：{selectedRelation.leftMultiplicity ? selectedRelation.leftMultiplicity : "（未入力）"}
-                      </span>
-                    </div>
-
-                    {multiplicityAssist && multiplicityAssist.obsRightToLeft && (
-                      <div className="mt-1 text-slate-600">
-                        ODの例では，
-                        {multiplicityAssist.rightName} 1つから見て {multiplicityAssist.leftName} は
-                        <span className="font-semibold">
-                          {multiplicityAssist.obsRightToLeft.min === multiplicityAssist.obsRightToLeft.max
-                            ? ` ${multiplicityAssist.obsRightToLeft.min} `
-                            : ` ${multiplicityAssist.obsRightToLeft.min}〜${multiplicityAssist.obsRightToLeft.max} `}
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {["1", "0..1", "0..*", "1..*"].map((v) => (
+                          <button
+                            key={v}
+                            type="button"
+                            className="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-[11px]"
+                            onClick={() => handleUpdateRelation(selectedRelation.id, { rightMultiplicity: v })}
+                          >
+                            {v}
+                          </button>
+                        ))}
+                        <span className="ml-1 text-slate-500">
+                          現在選択中：{selectedRelation.rightMultiplicity ? selectedRelation.rightMultiplicity : "（未入力）"}
                         </span>
-                        個でした．（よく使う候補なら「{multiplicityAssist.obsRightToLeft.rec}」）
                       </div>
-                    )}
 
-                    <div className="mt-2 text-slate-500">
-                      ※ OD は具体例なので，最終的には問題文の条件（必ず，0でもよい，複数，など）を優先してください．
+                      {multiplicityAssist && multiplicityAssist.obsLeftToRight && (
+                        <div className="mt-1 text-slate-600">
+                          ODの例では，{multiplicityAssist.leftName} 1つから見て {multiplicityAssist.rightName} は
+                          <span className="font-semibold">
+                            {multiplicityAssist.obsLeftToRight.min === multiplicityAssist.obsLeftToRight.max
+                              ? ` ${multiplicityAssist.obsLeftToRight.min} `
+                              : ` ${multiplicityAssist.obsLeftToRight.min}〜${multiplicityAssist.obsLeftToRight.max} `}
+                          </span>
+                          個でした．（よく使う候補なら「{multiplicityAssist.obsLeftToRight.rec}」）
+                        </div>
+                      )}
+
+                      <div className="mt-3 font-semibold text-slate-700">
+                        ② {multiplicityAssist?.rightName ?? "（右）"} から見て {multiplicityAssist?.leftName ?? "（左）"} は？
+                        <span className="ml-2 text-slate-500 font-normal">（左の欄，→ の左に入ります．）</span>
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {["1", "0..1", "0..*", "1..*"].map((v) => (
+                          <button
+                            key={v}
+                            type="button"
+                            className="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-[11px]"
+                            onClick={() => handleUpdateRelation(selectedRelation.id, { leftMultiplicity: v })}
+                          >
+                            {v}
+                          </button>
+                        ))}
+                        <span className="ml-1 text-slate-500">
+                          現在選択中：{selectedRelation.leftMultiplicity ? selectedRelation.leftMultiplicity : "（未入力）"}
+                        </span>
+                      </div>
+
+                      {multiplicityAssist && multiplicityAssist.obsRightToLeft && (
+                        <div className="mt-1 text-slate-600">
+                          ODの例では，{multiplicityAssist.rightName} 1つから見て {multiplicityAssist.leftName} は
+                          <span className="font-semibold">
+                            {multiplicityAssist.obsRightToLeft.min === multiplicityAssist.obsRightToLeft.max
+                              ? ` ${multiplicityAssist.obsRightToLeft.min} `
+                              : ` ${multiplicityAssist.obsRightToLeft.min}〜${multiplicityAssist.obsRightToLeft.max} `}
+                          </span>
+                          個でした．（よく使う候補なら「{multiplicityAssist.obsRightToLeft.rec}」）
+                        </div>
+                      )}
+
+                      <div className="mt-2 text-slate-500">
+                        ※ OD は具体例なので，最終的には問題文の条件（必ず，0でもよい，複数，など）を優先してください．
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
-
+                )}
               </ul>
 
-              {/* ===== OD→CD 連携の追加ヒント（見た目は崩さない：同じ段落/小見出し） ===== */}
+              {/* ===== OD→CD 連携の追加ヒント ===== */}
               {odLinkSummary && (
                 <div className="mt-3 border-t pt-3">
                   <div className="mt-3 font-semibold text-slate-700 mb-1">OD（オブジェクト図）からの手がかり</div>
@@ -1582,7 +1524,8 @@ const ClassEditorPage: React.FC = () => {
                       <div className="mt-2">
                         <div className="font-semibold text-slate-700">ODリンクの集計（どの組み合わせが多いか）</div>
                         <div className="mt-1 text-[11px] text-slate-600">
-                          ODでつないだオブジェクト同士を，「名前の最後につく番号や記号（A，1 など）を除いて」同じ種類としてまとめ，その組み合わせが何回出たか数えています．回数が多い組み合わせは，「その 2 種類の間に関係がありそう」と考える手がかりになります．
+                          ODでつないだオブジェクト同士を，「名前の最後につく番号や記号（A，1 など）を除いて」同じ種類としてまとめ
+                          ています．頻出する組み合わせは，クラス図の関連名の候補になります．
                         </div>
                         <ul className="list-disc pl-5 space-y-0.5 mt-1">
                           {odLinkSummary.endpointKindsTop.map((e) => {
@@ -1591,17 +1534,23 @@ const ClassEditorPage: React.FC = () => {
                               <li key={e.key}>
                                 <span className="font-semibold">{e.pretty}</span>：{e.count} 回
                                 {hint && hint.labels.length > 0 && (
-                                  <span className="text-slate-600"> ／ 関連名候補：{hint.labels.map((x) => x.label).join(" / ")}</span>
+                                  <span className="text-slate-600">
+                                    {" "}
+                                    ／ 関連名候補：{hint.labels.map((x) => x.label).join(" / ")}
+                                  </span>
                                 )}
                                 {!hint && e.topLabels.length > 0 && (
-                                  <span className="text-slate-600"> ／ ラベル：{e.topLabels.map((x) => x.label).join(" / ")}</span>
+                                  <span className="text-slate-600">
+                                    {" "}
+                                    ／ ラベル：{e.topLabels.map((x) => x.label).join(" / ")}
+                                  </span>
                                 )}
                               </li>
                             );
                           })}
                         </ul>
                         <div className="mt-1 text-slate-500">
-                          ※ これは「答えの強制」ではなく，検討の材料です．根拠があってODと違う設計にするなら，そのままでもOKです．
+                          ※ これは「答えの強制」ではなく，検討の材料です．根拠があってODと違う設計にするなら，そのままでも構いません．
                         </div>
                       </div>
                     )}
@@ -1626,7 +1575,7 @@ const ClassEditorPage: React.FC = () => {
                       <div className="mt-3">
                         <div className="font-semibold text-slate-700">推定クラス図の関係ヒント</div>
                         <div className="mt-1 text-[11px] text-slate-600">
-                          変換結果（推定クラス図）の傾向です．「このクラス間で，この関連名が出やすい」を参考として表示します．
+                          変換結果（推定クラス図）の傾向です．
                         </div>
                         <ul className="list-disc pl-5 space-y-0.5 mt-1">
                           {odLinkSummary.convertHintsTop.map((x, idx) => (
@@ -1636,7 +1585,7 @@ const ClassEditorPage: React.FC = () => {
                           ))}
                         </ul>
                       </div>
-	                    )}
+                    )}
                   </div>
                 </div>
               )}
@@ -1650,7 +1599,6 @@ const ClassEditorPage: React.FC = () => {
           </div>
         </div>
       </div>
-
     </div>
   );
 };

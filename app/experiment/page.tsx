@@ -37,6 +37,7 @@ type ObjDiagnoseSnapshot = {
 };
 
 // 「リンクを診断する」を押した時点の結果を固定表示するためのスナップショット
+// ★評価基準は端点のみ（ラベルは任意）なので、期待ラベル等は一切保持しない
 type LinkDiagnoseSnapshot = {
   // 入力側（学習者が作成した要素）を基準にした見せ方（A案）
   inputTotal: number; // 入力リンク数（端点が有効なもの）
@@ -48,7 +49,6 @@ type LinkDiagnoseSnapshot = {
   missingCount: number;
   extraCount: number;
   extraLinks: LinkSig[];
-  labelWarnings: { pretty: string; expected: string[]; actual: string }[];
 };
 
 type Link = {
@@ -417,7 +417,7 @@ type LinkSig = {
   b: string; // base
   label: string; // normalized label
   endpointKey: string; // endpoints only
-  fullKey: string; // endpoints + label (for warnings)
+  fullKey: string; // endpoints + label (for warnings / uniq)
   pretty: string; // display
 };
 
@@ -1089,7 +1089,7 @@ const ExperimentPage: React.FC = () => {
   }, [objRevealCanProceed]);
 
   // ===== パターン4（リンク不足/過剰） =====
-  // 方針②：不足/過剰は「端点だけ」で判定、ラベルは別の注意(warn)で扱う
+  // 方針②：不足/過剰は「端点だけ」で判定（ラベルは任意）
   const linkAssist = useMemo(() => {
     const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
 
@@ -1097,14 +1097,6 @@ const ExperimentPage: React.FC = () => {
     const requiredEndpointKeys = new Set<string>(
       requiredLinks.map((r) => r.endpointKey)
     );
-
-    const requiredLabelsByEndpoint = new Map<string, Set<string>>();
-    for (const r of requiredLinks) {
-      if (!r.label) continue;
-      const s = requiredLabelsByEndpoint.get(r.endpointKey) ?? new Set<string>();
-      s.add(r.label);
-      requiredLabelsByEndpoint.set(r.endpointKey, s);
-    }
 
     const presentLinks: LinkSig[] = [];
     for (const l of links) {
@@ -1154,28 +1146,12 @@ const ExperimentPage: React.FC = () => {
       return `${x} — ${y}`;
     });
 
-    const labelWarnings: { pretty: string; expected: string[]; actual: string }[] = [];
-    for (const p of presentLinks) {
-      const expectedSet = requiredLabelsByEndpoint.get(p.endpointKey);
-      if (!expectedSet || expectedSet.size === 0) continue;
-      const expected = Array.from(expectedSet);
-      if (!expected.includes(p.label)) {
-        const [x, y] = p.endpointKey.split("||");
-        labelWarnings.push({
-          pretty: `${x} — ${y}`,
-          expected,
-          actual: p.label || "(未入力)",
-        });
-      }
-    }
-
     return {
       enabled,
       requiredEndpointKeys,
       presentEndpointKeys,
       missingPretty,
       extraLinks,
-      labelWarnings,
     };
   }, [objectAnswerPuml, objects, links]);
 
@@ -1191,9 +1167,6 @@ const ExperimentPage: React.FC = () => {
     ? linkDiagnoseSnapshot.extraLinks
     : linkAssist.extraLinks;
   const linkExtraCount = linkExtraLinksForReveal.length;
-  const linkLabelWarningsForDisplay = linkDiagnoseSnapshot
-    ? linkDiagnoseSnapshot.labelWarnings
-    : linkAssist.labelWarnings;
 
   // ===== A案表示用（入力側を分母にする） =====
   const linkInputTotal = linkDiagnoseSnapshot
@@ -1384,7 +1357,6 @@ const ExperimentPage: React.FC = () => {
       missingCount,
       extraCount,
       extraLinks: linkAssist.extraLinks,
-      labelWarnings: linkAssist.labelWarnings,
     });
 
     // 診断し直し＝開示状態もリセット
@@ -2235,7 +2207,7 @@ const ExperimentPage: React.FC = () => {
                                 className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                                 value={s.value}
                                 onChange={(e) => handleUpdateSlot(idx, { value: e.target.value })}
-                                placeholder={''}
+                                placeholder={""}
                                 title={TOOLTIP.slotValue}
                               />
                             </div>
@@ -2425,6 +2397,9 @@ const ExperimentPage: React.FC = () => {
                     <div className="mt-2 text-[11px] text-slate-600">
                       ※ 「リンクを診断する」で、
                       あなたが入力したリンク端点が正答例に含まれるか／正答例にあるのに未入力の端点ペアがあるかを確認できます（端点のみ）
+                      <div className="mt-1 text-slate-500">
+                        ※ リンクラベルは任意入力として扱い、診断対象にしません。
+                      </div>
                     </div>
                   ) : (
                     <div className="mt-2 text-[11px] text-slate-600">
@@ -2442,6 +2417,10 @@ const ExperimentPage: React.FC = () => {
 
                       <div className="mt-1 text-slate-500">
                         ※ 表示はあくまでヒントです。根拠があって正答例と異なるリンクを入れているなら、そのままでもOKです。
+                      </div>
+
+                      <div className="mt-1 text-slate-500">
+                        ※ リンクラベルは任意入力として扱い、診断対象にしません。
                       </div>
                     </div>
                   )}
@@ -2482,23 +2461,6 @@ const ExperimentPage: React.FC = () => {
                             {p.pretty}
                           </span>
                         ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {linkChecked && linkLabelWarningsForDisplay.length > 0 && (
-                    <div className="mt-3 border border-amber-300 bg-amber-50 text-amber-900 text-[11px] rounded p-2">
-                      <div className="font-semibold">注意：リンクラベルが正答例と異なる可能性があります</div>
-                      <div className="mt-1 space-y-1">
-                        {linkLabelWarningsForDisplay.slice(0, 6).map((w, idx) => (
-                          <div key={idx}>
-                            <span className="font-semibold">{w.pretty}</span>{" "}
-                            期待：{w.expected.join(" / ")} ／ 入力：{w.actual}
-                          </div>
-                        ))}
-                        {linkLabelWarningsForDisplay.length > 6 && (
-                          <div className="text-amber-800">…他 {linkLabelWarningsForDisplay.length - 6} 件</div>
-                        )}
                       </div>
                     </div>
                   )}
@@ -2602,6 +2564,7 @@ const ExperimentPage: React.FC = () => {
                         placeholder=""
                         title={TOOLTIP.linkLabel}
                       />
+
                     </div>
 
                     <div className="mt-3 pt-2 border-t border-dashed border-red-200 flex justify-end">
