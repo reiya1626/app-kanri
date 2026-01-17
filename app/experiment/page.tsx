@@ -34,6 +34,13 @@ type ObjDiagnoseSnapshot = {
   slotMissingTotal: number;
   slotMatchedTotal: number;
   extraSlotCount: number;
+
+  // ★ スロット名（キー）の差分（baseごと）
+  // 要望：スロット名は「正答例と異なる入力（= 入力にのみ含まれるスロット名）」だけ表示する
+  slotDiffs: {
+    base: string;
+    onlyInInput: string[]; // 入力にのみ含まれるスロット名（= 正答例と一致しない入力）
+  }[];
 };
 
 // 「リンクを診断する」を押した時点の結果を固定表示するためのスナップショット
@@ -126,8 +133,6 @@ const TYPE_LEGEND_TOOLTIP =
   "型混在 = 同じ属性に複数の型が混ざっています（要確認）";
 
 const explainTypeText = (raw: string) => {
-  // 図やチェック結果に出る型トークンを、日本語の理解を助ける形にする
-  // ※ PlantUML自体は英語トークンでOK。ここは表示補助だけ。
   return (raw ?? "")
     .replace(/\bstring\b/g, "文字列")
     .replace(/\bint\b/g, "整数")
@@ -140,21 +145,13 @@ const sanitizeClassPumlForLearner = (puml: string) => {
 
   let out = puml;
 
-  // === 型混在（<!>）の表現を「型が混在」に寄せる（型名は表示しない） ===
-  // 例）氏名: string <!>  -> 氏名: （型が混在）
   out = out.replace(/:\s*([A-Za-z_][\w]*)\s*<!>\s*$/gm, ": （型が混在）");
-
-  // === 値が1つも無い（<?>）の表現を「値が未入力」に寄せる（型名は表示しない） ===
-  // 例）氏名: string <?>  -> 氏名: （値が未入力）
   out = out.replace(/:\s*([A-Za-z_][\w]*)\s*<\?>\s*$/gm, ": （値が未入力）");
-  // まれに型名が無いまま<?>だけ付くケース
   out = out.replace(/:\s*<\?>\s*$/gm, ": （値が未入力）");
 
-  // === クラスのステレオタイプを初学者向けに ===
   out = out.replace(/<<\s*contradictory\s*>>/g, "<<型が混在>>");
   out = out.replace(/<<\s*incomplete\s*>>/g, "<<値が未入力>>");
 
-  // 念のため、残っているマーカーは見やすい日本語に
   out = out.replace(/<!>/g, "（型が混在）");
   out = out.replace(/<\?>/g, "（値が未入力）");
 
@@ -164,7 +161,6 @@ const sanitizeClassPumlForLearner = (puml: string) => {
 /**
  * 推定クラス図の関連が点線(..)で出てくる場合があるため、
  * 関連オペレータ（.. / ..> / <.. / ..|> など）だけを実線（--）系に強制変換する。
- * ※ "0..*" 等の多重度（引用符つき）はトークン判定で除外される
  */
 const forceSolidRelations = (puml: string) => {
   if (!puml) return puml;
@@ -183,8 +179,6 @@ const forceSolidRelations = (puml: string) => {
   };
 
   const isRelationOpToken = (tok: string) => {
-    // 例: .., ..>, <.., ..|>, o.., *.., ..*, ..o など（PlantUMLの関係オペレータ想定）
-    // ※ 多重度 "0..*" は引用符が付くのでここには入らない
     return /^[.\-o*<>()\/\\|><]+$/.test(tok) && tok.includes(".");
   };
 
@@ -192,8 +186,7 @@ const forceSolidRelations = (puml: string) => {
     const trimmed = line.trim();
     if (shouldSkipLine(trimmed)) return line;
 
-    // 空白を保持したままトークン置換する（見た目を崩さない）
-    const parts = line.split(/(\s+)/); // 空白も配列要素として保持
+    const parts = line.split(/(\s+)/);
     let changed = false;
 
     for (let i = 0; i < parts.length; i++) {
@@ -359,7 +352,6 @@ const extractRequiredSlotKeysByBaseFromPuml = (puml: string) => {
     if (!t) continue;
     if (t.startsWith("'")) continue;
 
-    // object 開始行
     const m1 = rawLine.match(reObjQuoted);
     const m2 = rawLine.match(reObjBare);
     if (m1?.[1] || m2?.[1]) {
@@ -372,11 +364,9 @@ const extractRequiredSlotKeysByBaseFromPuml = (puml: string) => {
         continue;
       }
 
-      // { が同じ行にあるなら直ちに開始
       if (t.includes("{")) {
         startBlock(base);
       } else {
-        // 次の行が { の場合に備える
         pendingBase = base;
         currentBase = null;
         inBlock = false;
@@ -384,7 +374,6 @@ const extractRequiredSlotKeysByBaseFromPuml = (puml: string) => {
       continue;
     }
 
-    // object の直後に { が来るケース
     if (!inBlock && pendingBase && t === "{") {
       startBlock(pendingBase);
       continue;
@@ -397,8 +386,6 @@ const extractRequiredSlotKeysByBaseFromPuml = (puml: string) => {
       }
       if (t === "{") continue;
 
-      // スロット行（例：氏名: "佐藤" / 会員番号: 1001）
-      // 値は見ない（キーだけ）
       const keyPart = extractSlotKeyFromPumlLine(t);
       const key = normalizeSlotKey(keyPart);
       if (!key) continue;
@@ -438,7 +425,6 @@ const extractLinksFromPuml = (puml: string) => {
   const aliasToBase = extractAliasToBaseFromPuml(puml);
   const lines = puml.split(/\r?\n/);
 
-  // かなり広めに拾う（--, ->, .., o-- など）
   const reRel =
     /^\s*([\w.\-ぁ-んァ-ン一-龥ー]+)\s*[-.o*<>()\/\\]+?\s*([\w.\-ぁ-んァ-ン一-龥ー]+)\s*(?::\s*(.+))?\s*$/;
 
@@ -476,7 +462,6 @@ const extractLinksFromPuml = (puml: string) => {
     out.push({ a: aBase, b: bBase, label, endpointKey, fullKey, pretty });
   }
 
-  // 重複除去：同じ endpoints+label は1つにする
   const uniq = new Map<string, LinkSig>();
   for (const l of out) {
     if (!uniq.has(l.fullKey)) uniq.set(l.fullKey, l);
@@ -638,6 +623,123 @@ const AssistHeader: React.FC<{
   );
 };
 
+// ===== ヒントUI（フラット化：省スペース） =====
+const HintCard: React.FC<{
+  title: string;
+  subtitle: string;
+  countText?: string;
+  stateBadge?: { text: string; tone: "slate" | "emerald" | "amber" | "red" };
+  primary: {
+    label: string;
+    onClick: () => void;
+    disabled: boolean;
+    disabledReason?: string;
+  };
+  // secondaryは「救済リンク」に変更（ボタンじゃなくリンク）
+  rescue?: {
+    label: string;
+    onClick: () => void;
+    disabled?: boolean;
+    title?: string;
+  };
+}> = ({ title, subtitle, countText, stateBadge, primary, rescue }) => {
+  const toneBar =
+    stateBadge?.tone === "emerald"
+      ? "bg-emerald-400"
+      : stateBadge?.tone === "amber"
+      ? "bg-amber-400"
+      : stateBadge?.tone === "red"
+      ? "bg-red-400"
+      : "bg-slate-300";
+
+  const badgeClass =
+    stateBadge?.tone === "emerald"
+      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+      : stateBadge?.tone === "amber"
+      ? "bg-amber-50 text-amber-800 border-amber-200"
+      : stateBadge?.tone === "red"
+      ? "bg-red-50 text-red-700 border-red-200"
+      : "bg-slate-50 text-slate-700 border-slate-200";
+
+  return (
+    <div className="relative">
+      {/* 仕切り線（箱ではなく区切り） */}
+      <div className="border-b border-slate-200 py-2">
+        {/* 左の色バー（省スペースで“状態感”を出す） */}
+        <div className="flex items-start gap-2">
+          <div className={"w-1.5 rounded-full mt-0.5 " + toneBar} />
+
+          <div className="flex-1 min-w-0">
+            {/* 1行目：タイトル＋バッジ＋件数 */}
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="font-semibold text-[11px] text-slate-800 truncate">
+                  {title}
+                </div>
+                {stateBadge && (
+                  <span
+                    className={
+                      "text-[10px] px-2 py-0.5 rounded border whitespace-nowrap " +
+                      badgeClass
+                    }
+                  >
+                    {stateBadge.text}
+                  </span>
+                )}
+              </div>
+              {countText && (
+                <div className="text-[10px] text-slate-600 whitespace-nowrap">
+                  {countText}
+                </div>
+              )}
+            </div>
+
+            {/* 2行目：説明（短めのまま） */}
+            <div className="mt-0.5 text-[10px] text-slate-500 leading-snug">
+              {subtitle}
+            </div>
+
+            {/* 3行目：操作（主ボタン＋救済リンク） */}
+            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <div className="relative group">
+                <button
+                  type="button"
+                  className="px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                  onClick={primary.onClick}
+                  disabled={primary.disabled}
+                >
+                  {primary.label}
+                </button>
+
+                {primary.disabled && primary.disabledReason && (
+                  <div className="pointer-events-none absolute left-0 top-full mt-1 z-20 w-[320px] rounded border bg-white px-2 py-1 text-[11px] text-slate-700 shadow
+                                  opacity-0 translate-y-1 transition
+                                  group-hover:opacity-100 group-hover:translate-y-0">
+                    {primary.disabledReason}
+                  </div>
+                )}
+              </div>
+
+              {rescue && (
+                <button
+                  type="button"
+                  className="text-[10px] text-slate-500 underline decoration-dotted hover:text-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  onClick={rescue.onClick}
+                  disabled={!!rescue.disabled}
+                  title={rescue.title}
+                >
+                  {rescue.label}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
 // ===== メイン =====
 const ExperimentPage: React.FC = () => {
   const router = useRouter();
@@ -651,7 +753,7 @@ const ExperimentPage: React.FC = () => {
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [selectedLinkId, setSelectedLinkId] = useState<string | null>(null);
 
-  // 「オブジェクト名入力中」のID（入力途中は過剰判定に含めない）
+  // 「オブジェクト名入力中」のID（入力途中は過剰判定に含まない）
   const [editingObjectId, setEditingObjectId] = useState<string | null>(null);
 
   // --- プレビュー（PlantUML） ---
@@ -661,7 +763,7 @@ const ExperimentPage: React.FC = () => {
   const [issues, setIssues] = useState<IssuesResponse | null>(null);
   const [relationHints, setRelationHints] = useState<RelationHint[]>([]);
 
-  // --- プレビュー拡大・縮小（SVGの縦横比を崩さない） ---
+  // --- プレビュー拡大・縮小 ---
   const ZOOM_MIN = 0.3;
   const ZOOM_MAX = 3.0;
   const ZOOM_STEP = 0.1;
@@ -676,37 +778,39 @@ const ExperimentPage: React.FC = () => {
   const [showObjectProblemFull, setShowObjectProblemFull] = useState(false);
 
   // ===== アシスト状態（オブジェクト） =====
-  const [objChecked, setObjChecked] = useState(false); // ← 診断済みフラグとして使う
+  const [objChecked, setObjChecked] = useState(false);
   const [objDiagnoseSnapshot, setObjDiagnoseSnapshot] =
     useState<ObjDiagnoseSnapshot | null>(null);
+
+  // 「正答例と異なるインスタンス名」表示（1回で全件）
   const [objRevealExtra, setObjRevealExtra] = useState(0);
   const [objDirtySinceHint, setObjDirtySinceHint] = useState(false);
 
+  // 「スロット名：正答例と異なる入力」表示
+  const [objRevealSlotDiff, setObjRevealSlotDiff] = useState(false);
+  const [objSlotDiffDirtySinceHint, setObjSlotDiffDirtySinceHint] =
+    useState(false);
+
   // ===== アシスト状態（リンク） =====
-  const [linkChecked, setLinkChecked] = useState(false); // ← 診断済みフラグとして使う
+  const [linkChecked, setLinkChecked] = useState(false);
   const [linkDiagnoseSnapshot, setLinkDiagnoseSnapshot] =
     useState<LinkDiagnoseSnapshot | null>(null);
   const [linkRevealExtra, setLinkRevealExtra] = useState(0);
   const [linkDirtySinceHint, setLinkDirtySinceHint] = useState(false);
 
-  // 「正答例と異なる〜を見る」を“編集後に解禁”するための誘導表示
-  const [objRevealUnlockedNotice, setObjRevealUnlockedNotice] = useState(false);
-  const [linkRevealUnlockedNotice, setLinkRevealUnlockedNotice] =
-    useState(false);
-
-  const prevObjRevealCanProceedRef = useRef(false);
-  const prevLinkRevealCanProceedRef = useRef(false);
-
-  // ===== アシスト折りたたみ =====
+  // 折りたたみ
   const [objAssistCollapsed, setObjAssistCollapsed] = useState(false);
   const [linkAssistCollapsed, setLinkAssistCollapsed] = useState(false);
 
   const markMeaningfulChange = (affectObj: boolean, affectLink: boolean) => {
-    if (affectObj) setObjDirtySinceHint(true);
+    if (affectObj) {
+      setObjDirtySinceHint(true);
+      setObjSlotDiffDirtySinceHint(true);
+    }
     if (affectLink) setLinkDirtySinceHint(true);
   };
 
-  // スクロール制御（ヒント追加時に下へ）
+  // スクロール制御
   const objAssistScrollRef = useRef<HTMLDivElement | null>(null);
   const linkAssistScrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -738,7 +842,7 @@ const ExperimentPage: React.FC = () => {
     }
   }, []);
 
-  // ===== 無名オブジェクト判定（推定クラス図を止めるため） =====
+  // ===== 無名オブジェクト判定 =====
   const hasUnnamedObject = useMemo(() => {
     return objects.some((o) => !o.name || o.name.trim().length === 0);
   }, [objects]);
@@ -849,7 +953,6 @@ const ExperimentPage: React.FC = () => {
 
         const data = (await res.json()) as ConvertResponse;
 
-        // ★ 点線(..)→実線(--)へ（推定クラス図の見え方を揃える）
         const solid = forceSolidRelations(data.classPuml);
 
         setClassPuml(solid);
@@ -883,7 +986,6 @@ const ExperimentPage: React.FC = () => {
     [links, selectedLinkId]
   );
 
-  // 選択リンクの from/to 名（問題文ハイライトに使う）
   const selectedLinkFromName = useMemo(() => {
     if (!selectedLink) return "";
     return objects.find((o) => o.id === selectedLink.from)?.name?.trim() ?? "";
@@ -894,11 +996,10 @@ const ExperimentPage: React.FC = () => {
     return objects.find((o) => o.id === selectedLink.to)?.name?.trim() ?? "";
   }, [selectedLink, objects]);
 
-  // ===== パターン1（オブジェクト不足/過剰）＋スロット（キー）不足（方針B） =====
+  // ===== パターン1（オブジェクト不一致）＋スロット（キー）不一致（方針B） =====
   const objAssist = useMemo(() => {
     const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
 
-    // --- 正答：必要オブジェクト（ベース名） ---
     const requiredBases = new Set<string>();
     if (enabled) {
       const labels = extractObjectLabelsFromPuml(objectAnswerPuml);
@@ -908,7 +1009,6 @@ const ExperimentPage: React.FC = () => {
       }
     }
 
-    // --- 入力：存在オブジェクト（ベース名） ---
     const presentBases = new Set<string>();
     for (const o of objects) {
       if (editingObjectId && o.id === editingObjectId) continue;
@@ -926,12 +1026,10 @@ const ExperimentPage: React.FC = () => {
       ? Array.from(presentBases).filter((b) => !requiredBases.has(b)).sort()
       : [];
 
-    // --- 正答：必要スロットキー（ベース名ごとに集合） ---
     const requiredSlotKeysByBase = enabled
       ? extractRequiredSlotKeysByBaseFromPuml(objectAnswerPuml)
       : new Map<string, Set<string>>();
 
-    // --- 入力：スロットキー（ベース名ごとに集合） ---
     const presentSlotKeysByBase = new Map<string, Set<string>>();
     for (const o of objects) {
       if (editingObjectId && o.id === editingObjectId) continue;
@@ -949,9 +1047,7 @@ const ExperimentPage: React.FC = () => {
       presentSlotKeysByBase.set(base, set);
     }
 
-    // --- スロット（キー）の未カバー数（具体名は出さない） ---
-    // ※初学者の混乱回避のため、ここは「オブジェクト名がカバーされているもの」だけを対象にする。
-    //   （オブジェクト名が未カバーの間は、そのオブジェクトのスロットは評価しない）
+    // 正答に含まれ、入力にも存在する base について、正答側の必須キーがあるか（件数のみ）
     let requiredSlotKeyTotal = 0;
     let missingSlotKeyTotal = 0;
 
@@ -972,7 +1068,7 @@ const ExperimentPage: React.FC = () => {
       requiredSlotKeyTotal - missingSlotKeyTotal
     );
 
-    // --- 参考：正答にないスロットキー（過剰候補：スロット名の観点） ---
+    // 入力にのみ含まれるキー（件数のみ）
     let extraSlotKeyTotal = 0;
     for (const [base, presentSet] of presentSlotKeysByBase.entries()) {
       if (!requiredBases.has(base)) continue;
@@ -1001,16 +1097,12 @@ const ExperimentPage: React.FC = () => {
 
   const objSnapshot = objChecked ? objDiagnoseSnapshot : null;
 
-  const objRequiredCount = objSnapshot
-    ? objSnapshot.requiredCount
-    : objAssist.requiredBases.size;
   const objMissingCount = objSnapshot
     ? objSnapshot.missingCount
     : objAssist.missingBases.length;
-  const objMatchedCount = Math.max(0, objRequiredCount - objMissingCount);
-  const objExtraCount = objSnapshot
-    ? objSnapshot.extraCount
-    : objAssist.extraBases.length;
+  const objExtraBasesForReveal = objSnapshot
+    ? objSnapshot.extraBases
+    : objAssist.extraBases;
 
   const objSlotRequiredTotal = objSnapshot
     ? objSnapshot.slotRequiredTotal
@@ -1021,15 +1113,8 @@ const ExperimentPage: React.FC = () => {
   const objSlotMatchedTotal = objSnapshot
     ? objSnapshot.slotMatchedTotal
     : objAssist.matchedSlotKeyTotal;
-  const objExtraSlotCount = objSnapshot
-    ? objSnapshot.extraSlotCount
-    : objAssist.extraSlotKeyTotal;
 
-  const objExtraBasesForReveal = objSnapshot
-    ? objSnapshot.extraBases
-    : objAssist.extraBases;
-
-  // ===== A案表示用（入力側を分母にする） =====
+  // 入力側基準の表示
   const objInputTotal = objSnapshot
     ? objSnapshot.inputTotal
     : objects.filter(
@@ -1037,6 +1122,7 @@ const ExperimentPage: React.FC = () => {
           !!(o.name && o.name.trim().length > 0) &&
           !(editingObjectId && o.id === editingObjectId)
       ).length;
+
   const objInputMatched = objSnapshot
     ? objSnapshot.inputMatched
     : objects.filter((o) => {
@@ -1045,51 +1131,53 @@ const ExperimentPage: React.FC = () => {
         const base = baseNameForAssist(o.name);
         return !!base && objAssist.requiredBases.has(base);
       }).length;
+
   const objInputUnmatched = objSnapshot
     ? objSnapshot.inputUnmatched
     : Math.max(0, objInputTotal - objInputMatched);
 
-  const objHasExtraNow = objAssist.enabled && objExtraCount > 0;
-  const objShowExtraError = objChecked && objHasExtraNow;
+  const objExtraCount = objSnapshot
+    ? objSnapshot.extraCount
+    : objAssist.extraBases.length;
 
-  const objRevealDisabledReason = useMemo(() => {
+  // 「ヒント：正答例と異なるインスタンス名」
+  const objExtraRevealAllShown =
+    objChecked &&
+    objExtraBasesForReveal.length > 0 &&
+    objRevealExtra >= objExtraBasesForReveal.length;
+
+  const objExtraPrimaryDisabledReason = useMemo(() => {
     if (!objChecked) return "まず「オブジェクトを診断する」を押してください。";
-    if (objExtraBasesForReveal.length === 0)
-      return "正答例と異なる候補がないため表示できません。";
-    if (objRevealExtra >= objExtraBasesForReveal.length)
-      return "候補はすべて表示済みです。";
-    if (!objDirtySinceHint)
-      return "次の候補を見るには、診断後にオブジェクト図を一度修正してください。";
-    return null;
-  }, [objChecked, objExtraBasesForReveal.length, objRevealExtra, objDirtySinceHint]);
+    if (objExtraBasesForReveal.length === 0) return "差分がありません。";
+    if (objExtraRevealAllShown) return "表示済みです。";
+    if (!objDirtySinceHint) return "診断後に修正すると表示できます。";
+    return "";
+  }, [
+    objChecked,
+    objExtraBasesForReveal.length,
+    objExtraRevealAllShown,
+    objDirtySinceHint,
+  ]);
 
-  const objRevealDisabled = objRevealDisabledReason !== null;
+  // 「ヒント：スロット名（正答例と異なる入力）」
+  const slotDiffsForShow = objSnapshot?.slotDiffs ?? [];
+  const slotDiffHasAny = slotDiffsForShow.length > 0;
 
-  const objRevealNeedsEdit =
-    objChecked &&
-    objExtraBasesForReveal.length > 0 &&
-    objRevealExtra < objExtraBasesForReveal.length &&
-    !objDirtySinceHint;
+  const slotDiffTotalKeys = useMemo(() => {
+    let sum = 0;
+    for (const d of slotDiffsForShow) sum += d.onlyInInput.length;
+    return sum;
+  }, [slotDiffsForShow]);
 
-  const objRevealCanProceed =
-    objChecked &&
-    objExtraBasesForReveal.length > 0 &&
-    objRevealExtra < objExtraBasesForReveal.length &&
-    objDirtySinceHint;
+  const objSlotPrimaryDisabledReason = useMemo(() => {
+    if (!objChecked) return "まず「オブジェクトを診断する」を押してください。";
+    if (!slotDiffHasAny) return "差分がありません。";
+    if (objRevealSlotDiff) return "表示済みです。";
+    if (!objSlotDiffDirtySinceHint) return "診断後に修正すると表示できます。";
+    return "";
+  }, [objChecked, slotDiffHasAny, objRevealSlotDiff, objSlotDiffDirtySinceHint]);
 
-  useEffect(() => {
-    // 「編集したらボタンが使えるようになった」ことを明示（初学者向け誘導）
-    const prev = prevObjRevealCanProceedRef.current;
-    prevObjRevealCanProceedRef.current = objRevealCanProceed;
-    if (!prev && objRevealCanProceed) {
-      setObjRevealUnlockedNotice(true);
-      const t = window.setTimeout(() => setObjRevealUnlockedNotice(false), 2500);
-      return () => window.clearTimeout(t);
-    }
-  }, [objRevealCanProceed]);
-
-  // ===== パターン4（リンク不足/過剰） =====
-  // 方針②：不足/過剰は「端点だけ」で判定（ラベルは任意）
+  // ===== パターン4（リンク不一致） =====
   const linkAssist = useMemo(() => {
     const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
 
@@ -1155,20 +1243,15 @@ const ExperimentPage: React.FC = () => {
     };
   }, [objectAnswerPuml, objects, links]);
 
-  // --- リンク診断結果（スナップショット優先） ---
-  const linkRequiredCount = linkDiagnoseSnapshot
-    ? linkDiagnoseSnapshot.requiredCount
-    : linkAssist.requiredEndpointKeys.size;
-  const linkMissingCount = linkDiagnoseSnapshot
-    ? linkDiagnoseSnapshot.missingCount
-    : linkAssist.missingPretty.length;
-  const linkMatchedCount = Math.max(0, linkRequiredCount - linkMissingCount);
   const linkExtraLinksForReveal = linkDiagnoseSnapshot
     ? linkDiagnoseSnapshot.extraLinks
     : linkAssist.extraLinks;
-  const linkExtraCount = linkExtraLinksForReveal.length;
 
-  // ===== A案表示用（入力側を分母にする） =====
+  const linkExtraCount = linkExtraLinksForReveal.length;
+  const linkMissingCount = linkDiagnoseSnapshot
+    ? linkDiagnoseSnapshot.missingCount
+    : linkAssist.missingPretty.length;
+
   const linkInputTotal = linkDiagnoseSnapshot
     ? linkDiagnoseSnapshot.inputTotal
     : (() => {
@@ -1182,10 +1265,10 @@ const ExperimentPage: React.FC = () => {
         }
         return cnt;
       })();
+
   const linkInputMatched = linkDiagnoseSnapshot
     ? linkDiagnoseSnapshot.inputMatched
     : (() => {
-        // ★ endpointKey の形式を requiredEndpointKeys と揃える（sorted "A||B"）
         let matched = 0;
         for (const l of links) {
           const fromObj = objects.find((o) => o.id === l.from);
@@ -1202,59 +1285,15 @@ const ExperimentPage: React.FC = () => {
         }
         return matched;
       })();
+
   const linkInputUnmatched = linkDiagnoseSnapshot
     ? linkDiagnoseSnapshot.inputUnmatched
     : Math.max(0, linkInputTotal - linkInputMatched);
 
-  const linkHasExtraNow = linkAssist.enabled && linkExtraCount > 0;
-  const linkShowExtraError = linkChecked && linkHasExtraNow;
-
-  const linkRevealDisabledReason = useMemo(() => {
-    if (!linkChecked) return "まず「リンクを診断する」を押してください。";
-    if (linkExtraLinksForReveal.length === 0)
-      return "正答例と異なる候補がないため表示できません。";
-    if (linkRevealExtra >= linkExtraLinksForReveal.length)
-      return "候補はすべて表示済みです。";
-    if (!linkDirtySinceHint)
-      return "次の候補を見るには、診断後にリンク（端点/ラベル）を一度修正してください。";
-    return null;
-  }, [
-    linkChecked,
-    linkExtraLinksForReveal.length,
-    linkRevealExtra,
-    linkDirtySinceHint,
-  ]);
-
-  const linkRevealDisabled = linkRevealDisabledReason !== null;
-
-  const linkRevealNeedsEdit =
-    linkChecked &&
-    linkExtraLinksForReveal.length > 0 &&
-    linkRevealExtra < linkExtraLinksForReveal.length &&
-    !linkDirtySinceHint;
-
-  const linkRevealCanProceed =
-    linkChecked &&
-    linkExtraLinksForReveal.length > 0 &&
-    linkRevealExtra < linkExtraLinksForReveal.length &&
-    linkDirtySinceHint;
-
-  useEffect(() => {
-    const prev = prevLinkRevealCanProceedRef.current;
-    prevLinkRevealCanProceedRef.current = linkRevealCanProceed;
-    if (!prev && linkRevealCanProceed) {
-      setLinkRevealUnlockedNotice(true);
-      const t = window.setTimeout(() => setLinkRevealUnlockedNotice(false), 2500);
-      return () => window.clearTimeout(t);
-    }
-  }, [linkRevealCanProceed]);
-
   // ===== オブジェクトアシスト操作 =====
   const handleObjDiagnose = () => {
-    // 診断ボタンを押した瞬間の結果を保存し、以降はリアルタイム反映しない
     setObjChecked(true);
 
-    // ===== A案：分母を「正答例の数」ではなく「入力した数」に寄せて表示する =====
     const inputObjs = objects.filter((o) => {
       if (editingObjectId && o.id === editingObjectId) return false;
       return !!(o.name && o.name.trim().length > 0);
@@ -1265,6 +1304,28 @@ const ExperimentPage: React.FC = () => {
       return objAssist.requiredBases.has(base);
     }).length;
     const inputUnmatched = Math.max(0, inputTotal - inputMatched);
+
+    // ★ スロット差分：要望に合わせて「入力にのみ含まれる（正答例と一致しない入力）」だけ収集
+    const slotDiffs: { base: string; onlyInInput: string[] }[] = [];
+
+    const bases = Array.from(objAssist.requiredBases).sort((a, b) =>
+      a.localeCompare(b, "ja")
+    );
+
+    for (const base of bases) {
+      if (!objAssist.presentBases.has(base)) continue;
+
+      const req = objAssist.requiredSlotKeysByBase.get(base) ?? new Set<string>();
+      const pres = objAssist.presentSlotKeysByBase.get(base) ?? new Set<string>();
+
+      const onlyInInput = Array.from(pres)
+        .filter((k) => !req.has(k))
+        .sort((a, b) => a.localeCompare(b, "ja"));
+
+      if (onlyInInput.length > 0) {
+        slotDiffs.push({ base, onlyInInput });
+      }
+    }
 
     setObjDiagnoseSnapshot({
       inputTotal,
@@ -1278,48 +1339,87 @@ const ExperimentPage: React.FC = () => {
       slotMissingTotal: objAssist.missingSlotKeyTotal,
       slotMatchedTotal: objAssist.matchedSlotKeyTotal,
       extraSlotCount: objAssist.extraSlotKeyTotal,
+      slotDiffs,
     });
 
-    // 追加開示は診断し直すたびにリセット
+    // 診断し直し = 表示状態リセット
     setObjRevealExtra(0);
     setObjDirtySinceHint(false);
+
+    setObjRevealSlotDiff(false);
+    setObjSlotDiffDirtySinceHint(false);
   };
 
-  const handleObjRevealNextExtra = () => {
-    if (!objChecked) return alert("まず「オブジェクトを診断する」を押してください。");
+  // 「正答例と異なるインスタンス名」：修正後に表示（通常ルート）
+  const handleObjRevealExtraAfterEdit = () => {
+    if (!objChecked)
+      return alert("まず「オブジェクトを診断する」を押してください。");
     if (objExtraBasesForReveal.length === 0) return;
-    if (!objDirtySinceHint)
-      return alert("次の表示を見る前に、オブジェクト図を一度修正してください。");
     if (objRevealExtra >= objExtraBasesForReveal.length) return;
+    if (!objDirtySinceHint) return;
 
     setObjAssistCollapsed(false);
-    setObjRevealExtra((c) => c + 1);
+    setObjRevealExtra(objExtraBasesForReveal.length);
     setObjDirtySinceHint(false);
     scrollObjAssistToBottom();
   };
 
-  // 学習者の要望で「編集せずに表示」も可能（ただし学習効果のため confirm を挟む）
-  const handleObjRevealNextExtraForce = () => {
-    if (!objChecked) return alert("まず「オブジェクトを診断する」を押してください。");
+  // 「正答例と異なるインスタンス名」：救済リンク（confirm）
+  const handleObjRevealExtraNow = () => {
+    if (!objChecked)
+      return alert("まず「オブジェクトを診断する」を押してください。");
     if (objExtraBasesForReveal.length === 0) return;
     if (objRevealExtra >= objExtraBasesForReveal.length) return;
 
     const ok = window.confirm(
-      "編集せずに次の候補を表示します。\n（学習のためには『修正→表示』をおすすめします）\n表示しますか？"
+      "差分を先に表示します。まずは自分で見直したい場合はキャンセルしてください。\n表示しますか？"
     );
     if (!ok) return;
 
     setObjAssistCollapsed(false);
-    setObjRevealExtra((c) => c + 1);
+    setObjRevealExtra(objExtraBasesForReveal.length);
     setObjDirtySinceHint(false);
+    scrollObjAssistToBottom();
+  };
+
+  // 「スロット名（正答例と異なる入力）」：修正後に表示（通常ルート）
+  const handleObjRevealSlotDiffAfterEdit = () => {
+    if (!objChecked)
+      return alert("まず「オブジェクトを診断する」を押してください。");
+    if (!objDiagnoseSnapshot) return;
+    if ((objDiagnoseSnapshot.slotDiffs?.length ?? 0) === 0) return;
+    if (objRevealSlotDiff) return;
+    if (!objSlotDiffDirtySinceHint) return;
+
+    setObjAssistCollapsed(false);
+    setObjRevealSlotDiff(true);
+    setObjSlotDiffDirtySinceHint(false);
+    scrollObjAssistToBottom();
+  };
+
+  // 「スロット名（正答例と異なる入力）」：救済リンク（confirm）
+  const handleObjRevealSlotDiffNow = () => {
+    if (!objChecked)
+      return alert("まず「オブジェクトを診断する」を押してください。");
+    if (!objDiagnoseSnapshot) return;
+    if ((objDiagnoseSnapshot.slotDiffs?.length ?? 0) === 0) return;
+    if (objRevealSlotDiff) return;
+
+    const ok = window.confirm(
+      "差分を先に表示します。まずは自分で見直したい場合はキャンセルしてください。\n表示しますか？"
+    );
+    if (!ok) return;
+
+    setObjAssistCollapsed(false);
+    setObjRevealSlotDiff(true);
+    setObjSlotDiffDirtySinceHint(false);
     scrollObjAssistToBottom();
   };
 
   // ===== リンクアシスト操作 =====
   const handleLinkDiagnose = () => {
     setLinkChecked(true);
-    // リンク診断結果も「押した時点」で固定表示する
-    // ===== A案：分母を「正答例の数」ではなく「入力した数」に寄せて表示する =====
+
     const presentLinks: LinkSig[] = [];
     for (const l of links) {
       const fromObj = objects.find((o) => o.id === l.from);
@@ -1337,7 +1437,14 @@ const ExperimentPage: React.FC = () => {
       const pretty = label
         ? `${aBase} — ${bBase}（${label}）`
         : `${aBase} — ${bBase}`;
-      presentLinks.push({ a: aBase, b: bBase, label, endpointKey, fullKey, pretty });
+      presentLinks.push({
+        a: aBase,
+        b: bBase,
+        label,
+        endpointKey,
+        fullKey,
+        pretty,
+      });
     }
     const inputTotal = presentLinks.length;
     const inputMatched = presentLinks.filter((p) =>
@@ -1359,40 +1466,36 @@ const ExperimentPage: React.FC = () => {
       extraLinks: linkAssist.extraLinks,
     });
 
-    // 診断し直し＝開示状態もリセット
     setLinkRevealExtra(0);
     setLinkDirtySinceHint(false);
   };
 
+  // リンク：修正後に差分表示（通常ルート）
   const handleLinkRevealNextExtra = () => {
     if (!linkChecked) return alert("まず「リンクを診断する」を押してください。");
     if (linkExtraLinksForReveal.length === 0) return;
-    if (!linkDirtySinceHint)
-      return alert(
-        "次の候補を見る前に、リンク（端点/ラベル）を一度修正してください。\n\n" +
-          "このボタンは『修正→確認→次の候補』の順で、ヒントを少しずつ開示するためのものです。\n" +
-          "（すぐに見たい場合は、右の「今すぐ表示」を使えます）"
-      );
+    if (!linkDirtySinceHint) return;
     if (linkRevealExtra >= linkExtraLinksForReveal.length) return;
 
     setLinkAssistCollapsed(false);
-    setLinkRevealExtra((c) => c + 1);
+    setLinkRevealExtra(linkExtraLinksForReveal.length);
     setLinkDirtySinceHint(false);
     scrollLinkAssistToBottom();
   };
 
+  // リンク：救済リンク（confirm）
   const handleLinkRevealNextExtraForce = () => {
     if (!linkChecked) return alert("まず「リンクを診断する」を押してください。");
     if (linkExtraLinksForReveal.length === 0) return;
     if (linkRevealExtra >= linkExtraLinksForReveal.length) return;
 
     const ok = window.confirm(
-      "編集せずに次の候補を表示します。\n（学習のためには『修正→表示』をおすすめします）\n表示しますか？"
+      "差分を先に表示します。まずは自分で見直したい場合はキャンセルしてください。\n表示しますか？"
     );
     if (!ok) return;
 
     setLinkAssistCollapsed(false);
-    setLinkRevealExtra((c) => c + 1);
+    setLinkRevealExtra(linkExtraLinksForReveal.length);
     setLinkDirtySinceHint(false);
     scrollLinkAssistToBottom();
   };
@@ -1432,7 +1535,6 @@ const ExperimentPage: React.FC = () => {
     setObjects((prev) =>
       prev.map((o) => (o.id === selectedObject.id ? updated : o))
     );
-    // スロット操作も「編集」として扱い、次のヒント解禁につなげる
     markMeaningfulChange(true, false);
   };
 
@@ -1477,7 +1579,9 @@ const ExperimentPage: React.FC = () => {
   };
 
   const handleUpdateLink = (id: string, partial: Partial<Link>) => {
-    setLinks((prev) => prev.map((l) => (l.id === id ? { ...l, ...partial } : l)));
+    setLinks((prev) =>
+      prev.map((l) => (l.id === id ? { ...l, ...partial } : l))
+    );
     markMeaningfulChange(false, true);
   };
 
@@ -1504,11 +1608,14 @@ const ExperimentPage: React.FC = () => {
       setSelectedLinkId(null);
       setEditingObjectId(null);
 
-      // 復元直後は再診断してもらう（診断結果は固定表示のため）
       setObjChecked(false);
       setObjDiagnoseSnapshot(null);
       setObjRevealExtra(0);
       setObjDirtySinceHint(false);
+
+      setObjRevealSlotDiff(false);
+      setObjSlotDiffDirtySinceHint(false);
+
       setLinkChecked(false);
       setLinkDiagnoseSnapshot(null);
       setLinkRevealExtra(0);
@@ -1534,6 +1641,10 @@ const ExperimentPage: React.FC = () => {
     setObjDiagnoseSnapshot(null);
     setObjRevealExtra(0);
     setObjDirtySinceHint(false);
+
+    setObjRevealSlotDiff(false);
+    setObjSlotDiffDirtySinceHint(false);
+
     setLinkChecked(false);
     setLinkDiagnoseSnapshot(null);
     setLinkRevealExtra(0);
@@ -1546,15 +1657,9 @@ const ExperimentPage: React.FC = () => {
     markMeaningfulChange(true, true);
   };
 
-  // ===== 進む前の警告（学習者向け最適化） =====
-  // レベル感：
-  // - 強：診断済みで「正答例と異なる候補」が残っている（過剰候補）
-  // - 中：診断済みで「未カバー」が残っている（具体名は出さない）
-  // - 弱：未診断のまま（まず診断を促す）
+  // ===== 進む前の警告（学習者向け） =====
   const buildProceedWarningMessage = () => {
     const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
-
-    // 正答例が無いなら警告は出さない（このツールの学習設計上はOK）
     if (!enabled) return { needsConfirm: false, message: "" };
 
     const parts: string[] = [];
@@ -1562,7 +1667,6 @@ const ExperimentPage: React.FC = () => {
     let medium = false;
     let weak = false;
 
-    // --- オブジェクト ---
     if (!objChecked) {
       if (objMissingCount > 0 || objExtraCount > 0) weak = true;
     } else {
@@ -1570,7 +1674,6 @@ const ExperimentPage: React.FC = () => {
       if (objMissingCount > 0) medium = true;
     }
 
-    // --- リンク ---
     if (!linkChecked) {
       if (linkMissingCount > 0 || linkExtraCount > 0) weak = true;
     } else {
@@ -1578,82 +1681,30 @@ const ExperimentPage: React.FC = () => {
       if (linkMissingCount > 0) medium = true;
     }
 
-    // 何もなければ警告なし
     if (!strong && !medium && !weak) return { needsConfirm: false, message: "" };
 
-    // タイトル（強いもの優先）
     const title = strong
       ? "【要確認】このまま進むと、クラス化（抽象化）が崩れる可能性があります。"
       : medium
       ? "【注意】このまま進むと、クラス図に必要な情報が不足する可能性があります。"
-      : weak
-      ? "【確認】進む前に、いちど診断して確認することもできます。"
-      : "";
+      : "【確認】進む前に、いちど診断して確認することもできます。";
 
     parts.push(title);
     parts.push("");
-
-    // 状態（数だけ、具体名は出さない）
     parts.push("■ 現在の状態（数のみ）");
     parts.push(
-      `・オブジェクト：正答例にある名前 ${objInputMatched}/${objInputTotal} ／ 正答例にない名前 ${objInputUnmatched}/${objInputTotal} ／ 正答例にあるが未入力 ${objMissingCount} ／ 正答例と異なる候補 ${objExtraCount}`
+      `・オブジェクト：正答に含まれる ${objInputMatched}/${objInputTotal} ／ 正答にない ${objInputUnmatched}/${objInputTotal} ／ 正答にあるが未入力 ${objMissingCount} ／ 正答例と一致しない候補 ${objExtraCount}`
     );
     parts.push(
-      `・リンク：正答例にある端点 ${linkInputMatched}/${linkInputTotal} ／ 正答例にない端点 ${linkInputUnmatched}/${linkInputTotal} ／ 正答例にあるが未入力 ${linkMissingCount} ／ 正答例と異なる候補 ${linkExtraCount}`
-    );
-    parts.push("");
-
-    // 理由
-    parts.push("■ なぜ注意が必要？");
-    if (strong) {
-      parts.push(
-        "・不足が残っていると、クラス図に必要なクラスや関連が欠けてしまうことがあります。"
-      );
-    }
-    if (medium) {
-      parts.push(
-        "・不足が残っていると、クラス図に必要なクラスや関連が欠けてしまうことがあります。"
-      );
-    }
-    if (weak && !strong && !medium) {
-      parts.push("・未診断のままだと、見落としに気づきにくいです。");
-    }
-    parts.push("");
-
-    // 行動誘導
-    parts.push("■ もし戻る場合のおすすめの行動");
-    if (!objChecked || !linkChecked) {
-      parts.push(
-        "・「オブジェクトを診断する」「リンクを診断する」を押して、状態を確認してください。"
-      );
-    }
-    if (objChecked && objExtraCount > 0) {
-      parts.push(
-        "・「正答例と異なるオブジェクトを見る」で、候補を根拠と照らして確認してください。"
-      );
-    }
-    if (linkChecked && linkExtraCount > 0) {
-      parts.push(
-        "・「正答例と異なるリンクを見る」で、候補を根拠と照らして確認してください。"
-      );
-    }
-    parts.push("");
-
-    // 注意（それでも進む場合）
-    parts.push("■ それでも進む場合");
-    parts.push("・根拠があって「正答例と異なる候補」を入れているなら、進んでもOKです。");
-    parts.push(
-      "・クラス図編集ページからこちらに戻ることは可能ですが，必ず状態の保存をしてから戻ってください"
+      `・リンク：正答に含まれる ${linkInputMatched}/${linkInputTotal} ／ 正答にない ${linkInputUnmatched}/${linkInputTotal} ／ 正答にあるが未入力 ${linkMissingCount} ／ 正答例と一致しない候補 ${linkExtraCount}`
     );
     parts.push("");
     parts.push("このままクラス図編集へ進みますか？");
-
     return { needsConfirm: true, message: parts.join("\n") };
   };
 
   // ===== クラス図編集ページへ遷移（警告＋保存） =====
   const handleConvertAndOpenClassEditor = async () => {
-    // ここだけは“警告”ではなく“ブロック”のまま（PlantUML/推定CDが破綻しやすい）
     if (hasUnnamedObject) {
       alert(
         "インスタンス名が未入力のものがあります。\nすべてのオブジェクトに名前を入力してください。"
@@ -1661,22 +1712,18 @@ const ExperimentPage: React.FC = () => {
       return;
     }
 
-    // まず「状態を保存」してから、警告→遷移の流れにする
-    // （OKで進んでも、キャンセルでも保存はされる＝やり直しや比較がしやすい）
     try {
       localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify({ objects, links }));
     } catch {
-      // 失敗しても致命ではないので続行
+      // ignore
     }
 
-    // 警告（confirm）
     const warn = buildProceedWarningMessage();
     if (warn.needsConfirm) {
       const ok = window.confirm(warn.message);
       if (!ok) return;
     }
 
-    // convert（必要なら取得）
     let result: ConvertResponse | null = null;
 
     if (classPuml) {
@@ -1746,14 +1793,16 @@ const ExperimentPage: React.FC = () => {
 
     if (!result) return;
 
-    // 遷移時にも“編集用payload”を保存
     const editorPayload: EditorPayload = {
       initialClassPuml: result.classPuml,
       relationHints: result.relationHints ?? [],
       snapshot: { objects, links },
     };
     try {
-      localStorage.setItem(STORAGE_KEY_EDITOR_INITIAL, JSON.stringify(editorPayload));
+      localStorage.setItem(
+        STORAGE_KEY_EDITOR_INITIAL,
+        JSON.stringify(editorPayload)
+      );
     } catch {
       // ignore
     }
@@ -1783,9 +1832,8 @@ const ExperimentPage: React.FC = () => {
     selectedLinkToName,
   ]);
 
-  // ===== 表示用（学習者向け）クラス図PUML（型混在表記などを調整） =====
+  // ===== 表示用クラス図PUML =====
   const displayClassPuml = useMemo(() => {
-    // sanitize の前に一応実線化（保険）
     return sanitizeClassPumlForLearner(forceSolidRelations(classPuml));
   }, [classPuml]);
 
@@ -1809,9 +1857,7 @@ const ExperimentPage: React.FC = () => {
     return `https://www.plantuml.com/plantuml/svg/${displayEncodedClassPuml}`;
   }, [displayEncodedClassPuml]);
 
-  // 「進む」ボタンは基本押せる。未入力だけは停止。
   const proceedDisabled = hasUnnamedObject;
-
   const proceedDisabledReason = useMemo(() => {
     if (!proceedDisabled) return "";
     return "インスタンス名が未入力のものがあります。";
@@ -1821,6 +1867,53 @@ const ExperimentPage: React.FC = () => {
     if (!proceedDisabled) return "";
     return `理由：${proceedDisabledReason}`;
   }, [proceedDisabled, proceedDisabledReason]);
+
+  // ===== ヒントカード用の状態バッジ（統一） =====
+  const badgeForExtra = useMemo(() => {
+    if (!objChecked) return { text: "未診断", tone: "slate" as const };
+    if (objExtraBasesForReveal.length === 0)
+      return { text: "差分なし", tone: "emerald" as const };
+    if (objExtraRevealAllShown)
+      return { text: "表示済み", tone: "emerald" as const };
+    if (objDirtySinceHint)
+      return { text: "修正検知", tone: "emerald" as const };
+    return { text: "編集待ち", tone: "amber" as const };
+  }, [objChecked, objExtraBasesForReveal.length, objExtraRevealAllShown, objDirtySinceHint]);
+
+  const badgeForSlot = useMemo(() => {
+    if (!objChecked) return { text: "未診断", tone: "slate" as const };
+    if (!slotDiffHasAny)
+      return { text: "差分なし", tone: "emerald" as const };
+    if (objRevealSlotDiff)
+      return { text: "表示済み", tone: "emerald" as const };
+    if (objSlotDiffDirtySinceHint)
+      return { text: "修正検知", tone: "emerald" as const };
+    return { text: "編集待ち", tone: "amber" as const };
+  }, [objChecked, slotDiffHasAny, objRevealSlotDiff, objSlotDiffDirtySinceHint]);
+
+  const linkExtraAllShown =
+    linkChecked &&
+    linkExtraLinksForReveal.length > 0 &&
+    linkRevealExtra >= linkExtraLinksForReveal.length;
+
+  const badgeForLinkExtra = useMemo(() => {
+    if (!linkChecked) return { text: "未診断", tone: "slate" as const };
+    if (linkExtraLinksForReveal.length === 0)
+      return { text: "差分なし", tone: "emerald" as const };
+    if (linkExtraAllShown)
+      return { text: "表示済み", tone: "emerald" as const };
+    if (linkDirtySinceHint)
+      return { text: "修正検知", tone: "emerald" as const };
+    return { text: "編集待ち", tone: "amber" as const };
+  }, [linkChecked, linkExtraLinksForReveal.length, linkExtraAllShown, linkDirtySinceHint]);
+
+  const linkPrimaryDisabledReason = useMemo(() => {
+    if (!linkChecked) return "まず「リンクを診断する」を押してください。";
+    if (linkExtraLinksForReveal.length === 0) return "差分がありません。";
+    if (linkExtraAllShown) return "表示済みです。";
+    if (!linkDirtySinceHint) return "診断後に修正すると表示できます。";
+    return "";
+  }, [linkChecked, linkExtraLinksForReveal.length, linkExtraAllShown, linkDirtySinceHint]);
 
   return (
     <div className="flex flex-col h-screen bg-slate-50">
@@ -1849,7 +1942,11 @@ const ExperimentPage: React.FC = () => {
 
         <div className="flex-1" />
 
-        <div className={"relative group " + (proceedDisabled ? "cursor-not-allowed" : "")}>
+        <div
+          className={
+            "relative group " + (proceedDisabled ? "cursor-not-allowed" : "")
+          }
+        >
           <button
             className={
               "px-4 py-1.5 rounded text-sm font-semibold " +
@@ -1934,7 +2031,7 @@ const ExperimentPage: React.FC = () => {
               </button>
             </div>
 
-            {/* ===== オブジェクトアシスト（折りたたみ＋スクロール） ===== */}
+            {/* ===== オブジェクトアシスト ===== */}
             <div
               ref={objAssistScrollRef}
               className={
@@ -1949,13 +2046,13 @@ const ExperimentPage: React.FC = () => {
                 onToggle={() => setObjAssistCollapsed((v) => !v)}
                 rightText={
                   objAssist.enabled && objChecked
-                    ? `正答にある：${objInputMatched}/${objInputTotal}　正答にない：${objInputUnmatched}/${objInputTotal}　正答にあるが未入力：${objMissingCount}　正答例と異なる候補：${objExtraCount}`
+                    ? `正答に含まれる：${objInputMatched}/${objInputTotal}　正答にない：${objInputUnmatched}/${objInputTotal}　正答にあるが未入力：${objMissingCount}　正答例と一致しない候補：${objExtraCount}`
                     : undefined
                 }
               />
 
               {!objAssistCollapsed && objAssist.enabled && (
-                <div className="p-2">
+                <div className="p-2 space-y-2">
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       className="px-3 py-1 text-[11px] rounded bg-slate-100 hover:bg-slate-200"
@@ -1964,148 +2061,167 @@ const ExperimentPage: React.FC = () => {
                       オブジェクトを診断する
                     </button>
 
-                    <div
-                      className="relative inline-block group"
-                      title={objRevealDisabled ? objRevealDisabledReason ?? "" : ""}
-                    >
-                      <button
-                        className={
-                          "px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50 disabled:cursor-not-allowed" +
-                          (objRevealCanProceed ? " ring-2 ring-emerald-300 animate-pulse" : "")
-                        }
-                        onClick={handleObjRevealNextExtra}
-                        disabled={objRevealDisabled}
-                        aria-describedby={objRevealDisabled ? "obj-reveal-disabled-tip" : undefined}
-                      >
-                        正答例と異なるオブジェクトを見る
-                      </button>
-
-                      {objRevealDisabled && (
-                        <>
-                          <span className="absolute inset-0 cursor-not-allowed" aria-hidden="true" />
-                          <div
-                            id="obj-reveal-disabled-tip"
-                            role="tooltip"
-                            className="pointer-events-none absolute left-0 top-full mt-1 z-20 w-[280px] rounded border bg-white px-2 py-1 text-[11px] text-slate-700 shadow
-                                       opacity-0 translate-y-1 transition
-                                       group-hover:opacity-100 group-hover:translate-y-0"
-                          >
-                            {objRevealDisabledReason}
-                          </div>
-                        </>
-                      )}
+                    <div className="text-[10px] text-slate-500">
+                      基本は「診断 → 修正 → 差分表示」です（詰まったら下のリンクから差分を先に表示できます）
                     </div>
                   </div>
 
-                  {objChecked &&
-                    objExtraBasesForReveal.length > 0 &&
-                    objRevealExtra < objExtraBasesForReveal.length && (
-                      <div className="mt-2 text-[11px]">
-                        {objRevealCanProceed ? (
-                          <div className="text-emerald-700">
-                            ✅ 編集を検知しました。<span className="font-semibold">「正答例と異なるオブジェクトを見る」</span>が押せます。
-                            {objRevealUnlockedNotice && (
-                              <span className="ml-2 inline-flex items-center rounded border bg-emerald-50 border-emerald-200 px-2 py-0.5 text-[10px]">
-                                ボタンが解禁されました
-                              </span>
-                            )}
-                          </div>
-                        ) : (
-                          <div className="text-slate-600">
-                            🔒 次の候補を見るには、オブジェクト図を一度修正してください）。
-                            <button
-                              type="button"
-                              className="ml-2 underline text-sky-700 hover:text-sky-800"
-                              onClick={handleObjRevealNextExtraForce}
-                              title="学習効果のため通常は『修正→表示』をおすすめします"
-                            >
-                              編集せずに表示
-                            </button>
-                          </div>
-                        )}
+                  {/* ★ 見やすいヒントカード 2枚 */}
+                  <HintCard
+                    title="正答例と異なるインスタンス名（候補）"
+                    subtitle="あなたの入力に含まれるインスタンス名のうち、正答例に含まれない可能性があるものを表示します。"
+                    countText={
+                      objChecked
+                        ? `候補：${objExtraBasesForReveal.length}`
+                        : undefined
+                    }
+                    stateBadge={badgeForExtra}
+                    primary={{
+                      label: "差分を表示",
+                      onClick: handleObjRevealExtraAfterEdit,
+                      disabled:
+                        !objChecked ||
+                        objExtraBasesForReveal.length === 0 ||
+                        objExtraRevealAllShown ||
+                        !objDirtySinceHint,
+                      disabledReason: objExtraPrimaryDisabledReason || undefined,
+                    }}
+                    rescue={{
+                      label: "どこが異なるかわからない場合はこちら",
+                      onClick: handleObjRevealExtraNow,
+                      disabled:
+                        !objChecked ||
+                        objExtraBasesForReveal.length === 0 ||
+                        objExtraRevealAllShown,
+                      title: "表示前に確認が出ます（救済ルート）",
+                    }}
+                  />
+                  {objChecked && objRevealExtra > 0 && (
+                    <div className="mt-2 ml-3 border-l-2 border-red-200 pl-3 text-[11px]">
+                      <div className="font-semibold text-slate-700">
+                        正答例と異なるインスタンス名（候補）
                       </div>
-                    )}
 
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {objExtraBasesForReveal.slice(0, objRevealExtra).map((b) => (
+                          <span
+                            key={b}
+                            className="px-2 py-0.5 rounded border bg-white text-red-700"
+                          >
+                            {b}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <HintCard
+                    title="スロット名（正答例と異なる入力）"
+                    subtitle="正答例にも入力にも存在するインスタンス名について、入力にのみ含まれるスロット名を表示します。"
+                    countText={
+                      objChecked
+                        ? `一致しないスロット名：${slotDiffTotalKeys}`
+                        : undefined
+                    }
+                    stateBadge={badgeForSlot}
+                    primary={{
+                      label: "差分を表示",
+                      onClick: handleObjRevealSlotDiffAfterEdit,
+                      disabled:
+                        !objChecked ||
+                        !slotDiffHasAny ||
+                        objRevealSlotDiff ||
+                        !objSlotDiffDirtySinceHint,
+                      disabledReason: objSlotPrimaryDisabledReason || undefined,
+                    }}
+                    rescue={{
+                      label: "どこが異なるかわからない場合はこちら",
+                      onClick: handleObjRevealSlotDiffNow,
+                      disabled: !objChecked || !slotDiffHasAny || objRevealSlotDiff,
+                      title: "表示前に確認が出ます（救済ルート）",
+                    }}
+                  />
+                  {objChecked && objDiagnoseSnapshot && objRevealSlotDiff && (
+                    <div className="mt-2 ml-3 border-l-2 border-slate-200 pl-3 text-[11px]">
+                      <div className="font-semibold text-slate-700">
+                        スロット名（正答例と異なる入力）
+                      </div>
+
+                      {(objDiagnoseSnapshot.slotDiffs?.length ?? 0) === 0 ? (
+                        <div className="mt-1 text-slate-500">
+                          一致しないスロット名は見つかりませんでした。
+                        </div>
+                      ) : (
+                        <div className="mt-2 space-y-2">
+                          {objDiagnoseSnapshot.slotDiffs.map((d) => (
+                            <div key={d.base} className="rounded border bg-white p-2">
+                              <div className="font-semibold text-slate-700">{d.base}</div>
+
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {d.onlyInInput.map((k) => (
+                                  <span
+                                    key={`${d.base}-${k}`}
+                                    className="px-2 py-0.5 rounded border bg-slate-50 border-slate-200 text-slate-700"
+                                  >
+                                    {k}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="mt-2 text-slate-500">
+                        ※ これは「スロット名（キー）」のみの差分です（値は評価しません）。
+                      </div>
+                    </div>
+                  )}
+                  {/* 診断サマリ */}
                   {!objChecked ? (
-                    <div className="mt-2 text-[11px] text-slate-600">
-                      ※ 「オブジェクトを診断する」で、
-                      あなたが入力したインスタンス名が正答例に含まれるか／正答例にあるのに未入力のものがあるかを確認できます
+                    <div className="text-[11px] text-slate-600">
+                      ※ 「オブジェクトを診断する」で、入力したインスタンス名が正答例に含まれるかどうかを確認できます。
                     </div>
                   ) : (
-                    <div className="mt-2 text-[11px] text-slate-600">
+                    <div className="text-[11px] text-slate-600">
                       <div>
-                        <span className="font-semibold">あなたの入力（インスタンス名）</span>：
-                        正答に含まれる <span className="font-semibold">{objInputMatched}</span>/{objInputTotal}　
-                        正答にない <span className="font-semibold">{objInputUnmatched}</span>/{objInputTotal}
+                        <span className="font-semibold">入力（インスタンス名）</span>：
+                        正答に含まれる{" "}
+                        <span className="font-semibold">{objInputMatched}</span>/
+                        {objInputTotal}　 正答にない{" "}
+                        <span className="font-semibold">{objInputUnmatched}</span>/
+                        {objInputTotal}
                       </div>
 
                       <div className="mt-1">
                         <span className="font-semibold">正答にあるが未入力</span>：
-                        <span className="font-semibold">{objMissingCount}</span> 件
-                        <span className="text-slate-500">（具体名は表示しません）</span>
+                        <span className="font-semibold">{objMissingCount}</span>{" "}
+                        件{" "}
+                        <span className="text-slate-500">
+                          （具体名は表示しません）
+                        </span>
                       </div>
 
                       {objSlotRequiredTotal > 0 && (
                         <div className="mt-1">
-                          <span className="font-semibold">必須スロット名</span>
-                          <span className="text-slate-500">（正答に含まれるオブジェクトだけ）</span>：
-                          OK <span className="font-semibold">{objSlotMatchedTotal}</span>/{objSlotRequiredTotal}　
-                          不足 <span className="font-semibold">{objSlotMissingTotal}</span>/{objSlotRequiredTotal}
-                        </div>
-                      )}
-
-                      {objSlotRequiredTotal > 0 && (
-                        <div className="mt-1 text-slate-500">
-                          ※ スロット名の診断は「正答に含まれるオブジェクト」だけが対象です（未入力オブジェクトの中身は見ません）。
-                          スロットは「名前（キー）」のみ確認し、値は見ません。
+                          <span className="font-semibold">スロット名</span>{" "}
+                          <span className="text-slate-500">
+                            （正答に含まれるインスタンスだけ）
+                          </span>
+                          ： 一致{" "}
+                          <span className="font-semibold">
+                            {objSlotMatchedTotal}
+                          </span>
+                          /{objSlotRequiredTotal}　 一致しない{" "}
+                          <span className="font-semibold">
+                            {objSlotMissingTotal}
+                          </span>
+                          /{objSlotRequiredTotal}
                         </div>
                       )}
 
                       <div className="mt-1 text-slate-500">
-                        ※ ここでの表示はあくまでヒントです。根拠があって正答例と異なる要素を入れているなら、そのままでもOKです。
-                      </div>
-                    </div>
-                  )}
-
-                  {objChecked &&
-                    objMissingCount === 0 &&
-                    objExtraCount === 0 &&
-                    (objSlotRequiredTotal === 0 || objSlotMissingTotal === 0) && (
-                      <div className="mt-2 text-[11px] text-emerald-700 font-semibold">
-                        正答例と一致しています（インスタンス名／スロット名の観点）
-                      </div>
-                    )}
-
-                  {objChecked && objShowExtraError && (
-                    <div className="mt-2 border border-red-300 bg-red-50 text-red-700 text-[11px] rounded p-2">
-                      <div className="font-semibold">
-                        要確認：正答例にない可能性のあるオブジェクトがあります（候補：{objExtraCount}）
-                      </div>
-                      <ul className="mt-1 list-disc pl-5 space-y-0.5">
-                        <li>これは「間違い確定」ではありません。</li>
-                        <li>
-                          ただし、根拠がないままクラス図に進むと、抽象化（クラス化）が崩れやすくなります。
-                        </li>
-                        <li>
-                          「正答例と異なるオブジェクトを見る」で候補を確認し、根拠がなければ削除/修正してください。
-                        </li>
-                      </ul>
-                    </div>
-                  )}
-
-                  {objChecked && objRevealExtra > 0 && (
-                    <div className="mt-3 text-[11px]">
-                      <div className="font-semibold text-slate-700">
-                        正答例と異なる可能性（開示済み：
-                        {Math.min(objRevealExtra, objExtraBasesForReveal.length)}/
-                        {objExtraBasesForReveal.length}）
-                      </div>
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {objExtraBasesForReveal.slice(0, objRevealExtra).map((b) => (
-                          <span key={b} className="px-2 py-0.5 rounded border bg-white text-red-700">
-                            {b}
-                          </span>
-                        ))}
+                        ※ 表示はあくまでヒントです。根拠があって正答例と異なる要素を入れているなら、そのままでもOKです。
                       </div>
                     </div>
                   )}
@@ -2128,15 +2244,23 @@ const ExperimentPage: React.FC = () => {
                       key={o.id}
                       className={
                         "w-full text-left px-2 py-1 border-b flex items-center justify-between " +
-                        (isSelected ? "bg-amber-100 ring-1 ring-amber-400" : "hover:bg-slate-100")
+                        (isSelected
+                          ? "bg-amber-100 ring-1 ring-amber-400"
+                          : "hover:bg-slate-100")
                       }
                       onClick={() => {
-                        setSelectedObjectId((prev) => (prev === o.id ? null : o.id));
+                        setSelectedObjectId((prev) =>
+                          prev === o.id ? null : o.id
+                        );
                         setSelectedLinkId(null);
                       }}
                     >
-                      <span className="truncate">{o.name || "(無名オブジェクト)"}</span>
-                      <span className="text-[10px] text-slate-500 ml-2">{o.slots.length} スロット</span>
+                      <span className="truncate">
+                        {o.name || "(無名オブジェクト)"}
+                      </span>
+                      <span className="text-[10px] text-slate-500 ml-2">
+                        {o.slots.length} スロット
+                      </span>
                     </button>
                   );
                 })}
@@ -2153,7 +2277,10 @@ const ExperimentPage: React.FC = () => {
                   <div className="flex flex-col gap-2">
                     <div>
                       <div className="flex items-center">
-                        <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.objectName}>
+                        <label
+                          className="block text-[11px] font-semibold mb-1"
+                          title={TOOLTIP.objectName}
+                        >
                           インスタンス名
                         </label>
                         <HelpBadge title={TOOLTIP.objectName} />
@@ -2162,7 +2289,12 @@ const ExperimentPage: React.FC = () => {
                       <input
                         className="w-full border rounded px-2 py-1 text-xs"
                         value={selectedObject.name}
-                        onChange={(e) => handleUpdateObjectName(selectedObject.id, e.target.value)}
+                        onChange={(e) =>
+                          handleUpdateObjectName(
+                            selectedObject.id,
+                            e.target.value
+                          )
+                        }
                         onFocus={() => setEditingObjectId(selectedObject.id)}
                         onBlur={() => setEditingObjectId(null)}
                         placeholder=""
@@ -2173,10 +2305,15 @@ const ExperimentPage: React.FC = () => {
                     <div>
                       <div className="flex items-center justify-between mb-1">
                         <div className="flex items-center">
-                          <span className="text-[11px] font-semibold" title={`${TOOLTIP.slotKey}\n${TOOLTIP.slotValue}`}>
+                          <span
+                            className="text-[11px] font-semibold"
+                            title={`${TOOLTIP.slotKey}\n${TOOLTIP.slotValue}`}
+                          >
                             スロット（スロット名 と 値）
                           </span>
-                          <HelpBadge title={`${TOOLTIP.slotKey}\n${TOOLTIP.slotValue}`} />
+                          <HelpBadge
+                            title={`${TOOLTIP.slotKey}\n${TOOLTIP.slotValue}`}
+                          />
                         </div>
 
                         <button
@@ -2187,26 +2324,33 @@ const ExperimentPage: React.FC = () => {
                         </button>
                       </div>
 
-                      {selectedObject.slots.length === 0 && (
-                        <div className="text-[11px] text-slate-500 mb-1"></div>
-                      )}
-
                       <div className="flex flex-col gap-1">
                         {selectedObject.slots.map((s, idx) => (
-                          <div key={idx} className="border rounded px-2 py-1 bg-white flex flex-col gap-2">
+                          <div
+                            key={idx}
+                            className="border rounded px-2 py-1 bg-white flex flex-col gap-2"
+                          >
                             <div className="flex items-center gap-2">
                               <input
                                 className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                                 value={s.key}
-                                onChange={(e) => handleUpdateSlot(idx, { key: e.target.value })}
+                                onChange={(e) =>
+                                  handleUpdateSlot(idx, { key: e.target.value })
+                                }
                                 placeholder="スロット名"
                                 title={TOOLTIP.slotKey}
                               />
-                              <span className="text-[11px] text-slate-400">=</span>
+                              <span className="text-[11px] text-slate-400">
+                                =
+                              </span>
                               <input
                                 className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                                 value={s.value}
-                                onChange={(e) => handleUpdateSlot(idx, { value: e.target.value })}
+                                onChange={(e) =>
+                                  handleUpdateSlot(idx, {
+                                    value: e.target.value,
+                                  })
+                                }
                                 placeholder={""}
                                 title={TOOLTIP.slotValue}
                               />
@@ -2243,7 +2387,9 @@ const ExperimentPage: React.FC = () => {
           {/* オブジェクト図プレビュー */}
           <div className="flex-1 flex flex-col">
             <div className="p-2 border-b bg-white flex items-center justify-between">
-              <span className="font-semibold text-sm">オブジェクト図プレビュー（リアルタイム）</span>
+              <span className="font-semibold text-sm">
+                オブジェクト図プレビュー（リアルタイム）
+              </span>
 
               <div className="flex items-center gap-2">
                 <span className="text-[11px] w-12 text-center tabular-nums">
@@ -2256,7 +2402,9 @@ const ExperimentPage: React.FC = () => {
                   max={ZOOM_MAX}
                   step={ZOOM_STEP}
                   value={objectZoom}
-                  onChange={(e) => setObjectZoom(clampZoom(parseFloat(e.currentTarget.value)))}
+                  onChange={(e) =>
+                    setObjectZoom(clampZoom(parseFloat(e.currentTarget.value)))
+                  }
                   disabled={!objectPreviewUrl}
                   className="w-40"
                   title="ドラッグして倍率を変更"
@@ -2277,9 +2425,16 @@ const ExperimentPage: React.FC = () => {
             <div className="flex-1 overflow-auto bg-white p-2">
               {objectPreviewUrl && (
                 <div>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <div style={{ zoom: objectZoom }} className="inline-block origin-top-left">
-                    <img src={objectPreviewUrl} alt="オブジェクト図プレビュー" className="block max-w-none h-auto" />
+                  <div
+                    style={{ zoom: objectZoom }}
+                    className="inline-block origin-top-left"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={objectPreviewUrl}
+                      alt="オブジェクト図プレビュー"
+                      className="block max-w-none h-auto"
+                    />
                   </div>
                 </div>
               )}
@@ -2301,7 +2456,7 @@ const ExperimentPage: React.FC = () => {
               </button>
             </div>
 
-            {/* ===== リンクアシスト（折りたたみ＋スクロール） ===== */}
+            {/* ===== リンクアシスト ===== */}
             <div
               ref={linkAssistScrollRef}
               className={
@@ -2316,13 +2471,13 @@ const ExperimentPage: React.FC = () => {
                 onToggle={() => setLinkAssistCollapsed((v) => !v)}
                 rightText={
                   linkAssist.enabled && linkChecked
-                    ? `正答にある：${linkInputMatched}/${linkInputTotal}　正答にない：${linkInputUnmatched}/${linkInputTotal}　正答にあるが未入力：${linkMissingCount}　正答例と異なる候補：${linkExtraCount}`
+                    ? `正答に含まれる：${linkInputMatched}/${linkInputTotal}　正答にない：${linkInputUnmatched}/${linkInputTotal}　正答にあるが未入力：${linkMissingCount}　正答例と一致しない候補：${linkExtraCount}`
                     : undefined
                 }
               />
 
               {!linkAssistCollapsed && linkAssist.enabled && (
-                <div className="p-2">
+                <div className="p-2 space-y-2">
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       className="px-3 py-1 text-[11px] rounded bg-slate-100 hover:bg-slate-200"
@@ -2331,136 +2486,58 @@ const ExperimentPage: React.FC = () => {
                       リンクを診断する
                     </button>
 
-                    <div
-                      className="relative inline-block group"
-                      title={linkRevealDisabled ? linkRevealDisabledReason ?? "" : ""}
-                    >
-                      <button
-                        className={
-                          "px-3 py-1 text-[11px] rounded bg-sky-100 text-sky-700 hover:bg-sky-200 disabled:opacity-50 disabled:cursor-not-allowed" +
-                          (linkRevealCanProceed ? " ring-2 ring-emerald-300 animate-pulse" : "")
-                        }
-                        onClick={handleLinkRevealNextExtra}
-                        disabled={linkRevealDisabled}
-                        aria-describedby={linkRevealDisabled ? "link-reveal-disabled-tip" : undefined}
-                      >
-                        正答例と異なるリンクを見る
-                      </button>
-
-                      {linkRevealDisabled && (
-                        <>
-                          <span className="absolute inset-0 cursor-not-allowed" aria-hidden="true" />
-                          <div
-                            id="link-reveal-disabled-tip"
-                            role="tooltip"
-                            className="pointer-events-none absolute left-0 top-full mt-1 z-20 w-[320px] rounded border bg-white px-2 py-1 text-[11px] text-slate-700 shadow
-                                       opacity-0 translate-y-1 transition
-                                       group-hover:opacity-100 group-hover:translate-y-0"
-                          >
-                            {linkRevealDisabledReason}
-                          </div>
-                        </>
-                      )}
+                    <div className="text-[10px] text-slate-500">
+                      基本は「診断 → 修正 → 差分表示」です（詰まったら下のリンクから差分を先に表示できます）
                     </div>
                   </div>
 
-                  {linkChecked &&
-                    linkExtraLinksForReveal.length > 0 &&
-                    linkRevealExtra < linkExtraLinksForReveal.length && (
-                      <div className="mt-2 text-[11px]">
-                        {linkRevealCanProceed ? (
-                          <div className="text-emerald-700">
-                            ✅ 編集を検知しました。<span className="font-semibold">「正答例と異なるリンクを見る」</span>が押せます。
-                            {linkRevealUnlockedNotice && (
-                              <span className="ml-2 inline-flex items-center rounded border bg-emerald-50 border-emerald-200 px-2 py-0.5 text-[10px]">
-                                ボタンが解禁されました
-                              </span>
-                            )}
-                          </div>
-                        ) : (
-                          <div className="text-slate-600">
-                            🔒 次の候補を見るには、リンク（端点/ラベル）を一度修正してください。
-                            <button
-                              type="button"
-                              className="ml-2 underline text-sky-700 hover:text-sky-800"
-                              onClick={handleLinkRevealNextExtraForce}
-                              title="学習効果のため通常は『修正→表示』をおすすめします"
-                            >
-                              編集せずに表示
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                  {!linkChecked ? (
-                    <div className="mt-2 text-[11px] text-slate-600">
-                      ※ 「リンクを診断する」で、
-                      あなたが入力したリンク端点が正答例に含まれるか／正答例にあるのに未入力の端点ペアがあるかを確認できます（端点のみ）
-                      <div className="mt-1 text-slate-500">
-                        ※ リンクラベルは任意入力として扱い、診断対象にしません。
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="mt-2 text-[11px] text-slate-600">
-                      <div>
-                        <span className="font-semibold">入力したリンク（端点）</span>：
-                        正答に含まれる <span className="font-semibold">{linkInputMatched}</span>/{linkInputTotal} ／
-                        正答にない <span className="font-semibold">{linkInputUnmatched}</span>/{linkInputTotal}
-                      </div>
-
-                      <div className="mt-1">
-                        <span className="font-semibold">正答にあるが未入力</span>：
-                        <span className="font-semibold">{linkMissingCount}</span> 件
-                        <span className="text-slate-500">（具体名は表示しません）</span>
-                      </div>
-
-                      <div className="mt-1 text-slate-500">
-                        ※ 表示はあくまでヒントです。根拠があって正答例と異なるリンクを入れているなら、そのままでもOKです。
-                      </div>
-
-                      <div className="mt-1 text-slate-500">
-                        ※ リンクラベルは任意入力として扱い、診断対象にしません。
-                      </div>
-                    </div>
-                  )}
-
-                  {linkChecked && linkMissingCount === 0 && linkExtraCount === 0 && (
-                    <div className="mt-2 text-[11px] text-emerald-700 font-semibold">
-                      正答例と一致しています（リンク端点の観点）
-                    </div>
-                  )}
-
-                  {linkChecked && linkShowExtraError && (
-                    <div className="mt-2 border border-red-300 bg-red-50 text-red-700 text-[11px] rounded p-2">
-                      <div className="font-semibold">
-                        要確認：正答例にない可能性のあるリンク（端点）があります（候補：{linkExtraCount}）
-                      </div>
-                      <ul className="mt-1 list-disc pl-5 space-y-0.5">
-                        <li>これは「間違い確定」ではありません。</li>
-                        <li>
-                          ただし、根拠がないままクラス図に進むと、抽象化（クラス化）が崩れやすくなります。
-                        </li>
-                        <li>
-                          「正答例と異なるリンクを見る」で候補を確認し、根拠がなければ削除/修正してください。
-                        </li>
-                      </ul>
-                    </div>
-                  )}
+                  <HintCard
+                    title="正答例と異なるリンク（候補）"
+                    subtitle="あなたの入力に含まれるリンクのうち、正答例に含まれない可能性があるものを表示します（端点のみ判定／ラベルは任意）。"
+                    countText={
+                      linkChecked ? `候補：${linkExtraLinksForReveal.length}` : undefined
+                    }
+                    stateBadge={badgeForLinkExtra}
+                    primary={{
+                      label: "差分を表示",
+                      onClick: handleLinkRevealNextExtra,
+                      disabled:
+                        !linkChecked ||
+                        linkExtraLinksForReveal.length === 0 ||
+                        linkExtraAllShown ||
+                        !linkDirtySinceHint,
+                      disabledReason: linkPrimaryDisabledReason || undefined,
+                    }}
+                    rescue={{
+                      label: "どこが異なるかわからない場合はこちら",
+                      onClick: handleLinkRevealNextExtraForce,
+                      disabled:
+                        !linkChecked ||
+                        linkExtraLinksForReveal.length === 0 ||
+                        linkExtraAllShown,
+                      title: "表示前に確認が出ます（救済ルート）",
+                    }}
+                  />
 
                   {linkChecked && linkRevealExtra > 0 && (
-                    <div className="mt-3 text-[11px]">
+                    <div className="text-[11px]">
                       <div className="font-semibold text-slate-700">
-                        正答例と異なる可能性（開示済み：
-                        {Math.min(linkRevealExtra, linkExtraLinksForReveal.length)}/
-                        {linkExtraLinksForReveal.length}）
+                        正答例と一致しない可能性（候補：{linkExtraLinksForReveal.length}）
                       </div>
                       <div className="mt-1 flex flex-wrap gap-1">
-                        {linkExtraLinksForReveal.slice(0, linkRevealExtra).map((p) => (
-                          <span key={p.fullKey} className="px-2 py-0.5 rounded border bg-white text-red-700">
-                            {p.pretty}
-                          </span>
-                        ))}
+                        {linkExtraLinksForReveal
+                          .slice(0, linkRevealExtra)
+                          .map((p) => (
+                            <span
+                              key={p.fullKey}
+                              className="px-2 py-0.5 rounded border bg-white text-red-700"
+                            >
+                              {p.pretty}
+                            </span>
+                          ))}
+                      </div>
+                      <div className="mt-2 text-slate-500">
+                        ※ リンクラベルは任意入力として扱い、診断対象にしません（端点のみ）。
                       </div>
                     </div>
                   )}
@@ -2485,7 +2562,9 @@ const ExperimentPage: React.FC = () => {
                       key={l.id}
                       className={
                         "w-full text-left px-2 py-1 border-b flex flex-col " +
-                        (isSelected ? "bg-rose-100 ring-1 ring-rose-400" : "hover:bg-slate-100")
+                        (isSelected
+                          ? "bg-rose-100 ring-1 ring-rose-400"
+                          : "hover:bg-slate-100")
                       }
                       onClick={() => {
                         setSelectedLinkId((prev) => (prev === l.id ? null : l.id));
@@ -2497,7 +2576,9 @@ const ExperimentPage: React.FC = () => {
                           {from?.name || "(未設定)"} → {to?.name || "(未設定)"}
                         </span>
                       </div>
-                      {l.label && <div className="text-[10px] text-slate-500">{l.label}</div>}
+                      {l.label && (
+                        <div className="text-[10px] text-slate-500">{l.label}</div>
+                      )}
                     </button>
                   );
                 })}
@@ -2514,7 +2595,10 @@ const ExperimentPage: React.FC = () => {
                   <div className="flex flex-col gap-2 text-xs">
                     <div>
                       <div className="flex items-center">
-                        <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.linkEndpoints}>
+                        <label
+                          className="block text-[11px] font-semibold mb-1"
+                          title={TOOLTIP.linkEndpoints}
+                        >
                           リンク
                         </label>
                         <HelpBadge title={TOOLTIP.linkEndpoints} />
@@ -2524,7 +2608,9 @@ const ExperimentPage: React.FC = () => {
                         <select
                           className="border rounded px-1 py-0.5 text-[11px]"
                           value={selectedLink.from}
-                          onChange={(e) => handleUpdateLink(selectedLink.id, { from: e.target.value })}
+                          onChange={(e) =>
+                            handleUpdateLink(selectedLink.id, { from: e.target.value })
+                          }
                           title={TOOLTIP.linkEndpoints}
                         >
                           {objects.map((o) => (
@@ -2537,7 +2623,9 @@ const ExperimentPage: React.FC = () => {
                         <select
                           className="border rounded px-1 py-0.5 text-[11px]"
                           value={selectedLink.to}
-                          onChange={(e) => handleUpdateLink(selectedLink.id, { to: e.target.value })}
+                          onChange={(e) =>
+                            handleUpdateLink(selectedLink.id, { to: e.target.value })
+                          }
                           title={TOOLTIP.linkEndpoints}
                         >
                           {objects.map((o) => (
@@ -2551,7 +2639,10 @@ const ExperimentPage: React.FC = () => {
 
                     <div>
                       <div className="flex items-center">
-                        <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.linkLabel}>
+                        <label
+                          className="block text-[11px] font-semibold mb-1"
+                          title={TOOLTIP.linkLabel}
+                        >
                           リンクラベル
                         </label>
                         <HelpBadge title={TOOLTIP.linkLabel} />
@@ -2560,11 +2651,12 @@ const ExperimentPage: React.FC = () => {
                       <input
                         className="w-full border rounded px-2 py-1 text-[11px]"
                         value={selectedLink.label}
-                        onChange={(e) => handleUpdateLink(selectedLink.id, { label: e.target.value })}
+                        onChange={(e) =>
+                          handleUpdateLink(selectedLink.id, { label: e.target.value })
+                        }
                         placeholder=""
                         title={TOOLTIP.linkLabel}
                       />
-
                     </div>
 
                     <div className="mt-3 pt-2 border-t border-dashed border-red-200 flex justify-end">
@@ -2602,7 +2694,9 @@ const ExperimentPage: React.FC = () => {
                   max={ZOOM_MAX}
                   step={ZOOM_STEP}
                   value={classZoom}
-                  onChange={(e) => setClassZoom(clampZoom(parseFloat(e.currentTarget.value)))}
+                  onChange={(e) =>
+                    setClassZoom(clampZoom(parseFloat(e.currentTarget.value)))
+                  }
                   disabled={!classPreviewUrl}
                   className="w-40"
                   title="ドラッグして倍率を変更"
@@ -2625,8 +2719,8 @@ const ExperimentPage: React.FC = () => {
               {hasUnnamedObject && (
                 <div className="p-3 text-[11px] text-slate-600">
                   推定クラス図は一時停止中です。<br />
-                  <span className="font-semibold">インスタンス名が未入力</span>のものがあるため、
-                  すべてのオブジェクトに名前を入力してください。
+                  <span className="font-semibold">インスタンス名が未入力</span>
+                  のものがあるため、すべてのオブジェクトに名前を入力してください。
                 </div>
               )}
 
@@ -2634,18 +2728,29 @@ const ExperimentPage: React.FC = () => {
                 <div className="flex-1 flex flex-col">
                   {classPreviewUrl && (
                     <div className="flex-1 overflow-auto border-b bg-white p-2">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <div style={{ zoom: classZoom }} className="inline-block origin-top-left">
-                        <img src={classPreviewUrl} alt="推定クラス図" className="block max-w-none h-auto" />
+                      <div
+                        style={{ zoom: classZoom }}
+                        className="inline-block origin-top-left"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={classPreviewUrl}
+                          alt="推定クラス図"
+                          className="block max-w-none h-auto"
+                        />
                       </div>
                     </div>
                   )}
 
                   {issues && (
                     <div className="p-2 text-[11px] border-t bg-slate-50">
-                      <div className="font-semibold mb-1">推定クラス図のチェック結果</div>
+                      <div className="font-semibold mb-1">
+                        推定クラス図のチェック結果
+                      </div>
                       {issues.classes.length === 0 && (
-                        <div className="text-slate-500">特に未完成・矛盾のある属性は見つかりませんでした。</div>
+                        <div className="text-slate-500">
+                          特に未完成・矛盾のある属性は見つかりませんでした。
+                        </div>
                       )}
                       {issues.classes.map((c) => (
                         <div key={c.name} className="mb-1">
@@ -2658,7 +2763,8 @@ const ExperimentPage: React.FC = () => {
                           )}
                           {c.contradictory.length > 0 && (
                             <div className="text-red-700">
-                              型が混在している属性: {c.contradictory.map(explainTypeText).join(", ")}
+                              型が混在している属性:{" "}
+                              {c.contradictory.map(explainTypeText).join(", ")}
                             </div>
                           )}
                         </div>
