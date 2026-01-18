@@ -1412,28 +1412,6 @@ const ExperimentPage: React.FC = () => {
       <div className="flex flex-1 overflow-hidden">
         {/* 左：問題文 */}
         <div className="w-1/4 min-w-[260px] border-r bg-white flex flex-col overflow-y-auto">
-          <div className="p-2 border-b font-semibold text-sm">要求文</div>
-
-          <div className="p-2 border-b text-xs flex flex-col gap-1">
-            <div className="flex items-center justify-between">
-              <span className="font-semibold">クラス図作成問題文</span>
-              <button
-                className="text-[10px] px-2 py-0.5 border rounded hover:bg-slate-100"
-                onClick={() => setShowClassProblemFull((v) => !v)}
-              >
-                {showClassProblemFull ? "本文を折りたたむ" : "本文を表示"}
-              </button>
-            </div>
-            <div
-              className={
-                "mt-1 whitespace-pre-wrap text-[11px] leading-relaxed border rounded bg-slate-50 px-2 py-1 " +
-                (showClassProblemFull ? "" : "max-h-[80px] overflow-hidden")
-              }
-            >
-              {classProblemText}
-            </div>
-          </div>
-
           <div className="p-2 text-xs flex flex-col gap-1 flex-1">
             <div className="flex items-center justify-between">
               <span className="font-semibold">オブジェクト図作成問題文</span>

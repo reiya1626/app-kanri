@@ -1,7 +1,7 @@
-// app/experiment2/class-editor/page.tsx
+// app/experiment/class-editor/page.tsx
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import plantumlEncoder from "plantuml-encoder";
 import { useProblemConfig } from "../../../components/problem-config";
@@ -51,14 +51,58 @@ type EditorPayload = {
 const STORAGE_KEY_EDITOR_STATE = "EXPERIMENT_CLASS_EDITOR_STATE_V1";
 const STORAGE_KEY_EDITOR_INITIAL = "EXPERIMENT_CLASS_EDITOR_INITIAL";
 
-// ★ 多重度：固定4択（▼で選択する方式）
-const MULTIPLICITY_CHOICES = ["0..1", "1", "0..*", "1..*"] as const;
+// ★ 多重度は4択で確実に選択できるように固定
+const MULT4 = ["0..1", "1", "0..*", "1..*"] as const;
+
+// ===== UI 小物：? ヘルプ（title で説明を表示） =====
+const HelpBadge = ({ text }: { text: string }) => (
+  <span
+    className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-slate-100 text-slate-600 text-[10px] cursor-help select-none"
+    title={text}
+    aria-label={text}
+  >
+    ?
+  </span>
+);
 
 // 簡易ID生成
 const makeId = () => Math.random().toString(36).slice(2);
 
 // 文字列エスケープ
 const esc = (s: string) => s.replace(/\"/g, '\\"');
+
+// 正規表現用エスケープ
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// ===== 問題文ハイライト用（部分一致の強化：末尾の識別子だけ落とす） =====
+const baseNameForProblemHighlight = (raw: string) => {
+  let s = String(raw ?? "").trim();
+  if (!s) return "";
+
+  // 末尾の区切り（先に除去）
+  s = s.replace(/[_\-\s]+$/g, "").trim();
+
+  // 末尾の連番（半角/全角）
+  s = s.replace(/[0-9]+$/g, "");
+  s = s.replace(/[０-９]+$/g, "");
+
+  // 末尾の英字+連番（例：UserA1）
+  s = s.replace(/[A-Za-z]+[0-9]+$/g, "");
+  s = s.replace(/[Ａ-Ｚａ-ｚ]+[0-9]+$/g, "");
+  s = s.replace(/[Ａ-Ｚａ-ｚ]+[０-９]+$/g, "");
+
+  // 末尾の英字 1 文字（例：利用者B）
+  if (/[A-Za-zＡ-Ｚａ-ｚ]$/.test(s)) {
+    const head = s.slice(0, -1);
+    // 「日本語を含む名前」に対してのみ落とす（UserB のような英字のみは温存）
+    if (/[ぁ-んァ-ン一-龥ー]/.test(head)) s = head;
+  }
+
+  return s.trim();
+};
+
+// 軽い正規化（比較用）
+const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
 
 // ===== OD→CD 連携: 文字正規化（OD側と同じ思想） =====
 const stripHtmlTags = (s: string) => (s ?? "").replace(/<[^>]*>/g, "");
@@ -71,10 +115,9 @@ const normalizeObjectLabel = (raw: string) => {
 
 // 末尾番号などを落としてベース名化（例：学生1→学生）
 const baseNameForAssist = (name: string) => {
+  // NOTE: 末尾の番号などは削除しない（厳密に扱う）
   let s = normalizeObjectLabel(name);
-  s = s.replace(/[0-9]+$/g, "");
-  s = s.replace(/[０-９]+$/g, "");
-  s = s.replace(/[A-Za-z]+[0-9]+$/g, "");
+  // 末尾の区切り記号だけはノイズになりやすいので削除する
   s = s.replace(/[_\-\s]+$/g, "");
   return s.trim();
 };
@@ -104,11 +147,7 @@ const formatSlotValueForPuml = (raw: string) => {
   if (/^[+-]?\d+$/.test(s)) return s;
   if (/^[+-]?\d+\.\d+$/.test(s)) return s;
   // already quoted
-  if (
-    (s.startsWith('"') && s.endsWith('"')) ||
-    (s.startsWith("'") && s.endsWith("'"))
-  )
-    return s;
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) return s;
   return `"${s.replace(/"/g, '\\"')}"`;
 };
 
@@ -146,9 +185,7 @@ const buildObjectDiagramPuml = (objs: Obj[], links: Link[]) => {
     const a = aliasById.get(l.from);
     const b = aliasById.get(l.to);
     if (!a || !b) continue;
-    const label = stripHtmlTags(String(l.label ?? ""))
-      .trim()
-      .replace(/"/g, '\\"');
+    const label = stripHtmlTags(String(l.label ?? "")).trim().replace(/"/g, '\\"');
     if (label) lines.push(`${a} -- ${b} : ${label}`);
     else lines.push(`${a} -- ${b}`);
   }
@@ -244,7 +281,7 @@ function parseInitialPuml(
   return { classes, relations };
 }
 
-// ===== フィードバック生成（多重度のヒント中心） =====
+// ===== 多重度を考えるヒント生成（多重度のヒント中心） =====
 function makeFeedback(classes: ClassInfo[], relations: Relation[]): string[] {
   const msgs: string[] = [
     "多重度は『片方 1 つに対して，反対側が何個つながるか』を左右それぞれで考えます．まずは問題文の言い方（必ず / 〜することがある / 複数 / 0でもよい など）を確認しましょう．",
@@ -258,8 +295,57 @@ function makeFeedback(classes: ClassInfo[], relations: Relation[]): string[] {
   return msgs;
 }
 
+// 問題文ハイライト用：選択語を <mark> で囲む
+type HighlightToken = {
+  match: string;
+  reason: string;
+  priority: number;
+};
+
+function highlightText(text: string, tokens: HighlightToken[]): ReactNode[] {
+  if (!text) return [text];
+
+  const cleaned = tokens
+    .map((t) => ({ ...t, match: String(t.match ?? "").trim() }))
+    .filter((t) => t.match.length > 0);
+  if (cleaned.length === 0) return [text];
+
+  const normKey = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  const bestByMatch = new Map<string, HighlightToken>();
+  for (const t of cleaned) {
+    const key = normKey(t.match);
+    const prev = bestByMatch.get(key);
+    if (!prev || t.priority > prev.priority) bestByMatch.set(key, t);
+  }
+
+  const uniq = Array.from(bestByMatch.values()).sort((a, b) => {
+    const len = b.match.length - a.match.length;
+    if (len !== 0) return len;
+    return b.priority - a.priority;
+  });
+
+  const pattern = uniq.map((t) => escapeRegExp(t.match)).join("|");
+  if (!pattern) return [text];
+
+  const re = new RegExp(`(${pattern})`, "gi");
+  const parts = text.split(re);
+
+  const tokenMap = new Map<string, HighlightToken>();
+  for (const t of uniq) tokenMap.set(normKey(t.match), t);
+
+  return parts.map((part, idx) => {
+    const token = tokenMap.get(normKey(part));
+    if (!token) return <React.Fragment key={idx}>{part}</React.Fragment>;
+    return (
+      <mark key={idx} className="bg-yellow-200 px-0.5 rounded" title={token.reason}>
+        {part}
+      </mark>
+    );
+  });
+}
+
 // ===== 多重度の合成（安全側＝広め） =====
-type MultRange = { min: number; max: number | null }; // max=null は無限(*)
+type MultRange = { min: number; max: number | null };
 
 function parseMultiplicity(m: string): MultRange {
   const t = (m ?? "").trim();
@@ -297,10 +383,10 @@ function mergeMultiplicity(a: string, b: string): string {
   return formatMultiplicity({ min, max });
 }
 
-// ===== メイン =====
+// ===== メインコンポーネント =====
 const ClassEditorPage: React.FC = () => {
   const router = useRouter();
-  const { classProblemText } = useProblemConfig();
+  const { classProblemText, classAnswerPuml } = useProblemConfig();
 
   const [classes, setClasses] = useState<ClassInfo[]>([]);
   const [relations, setRelations] = useState<Relation[]>([]);
@@ -319,11 +405,24 @@ const ClassEditorPage: React.FC = () => {
   const ZOOM_STEP = 0.1;
   const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
   const [classZoom, setClassZoom] = useState(1);
+  const [odZoom, setOdZoom] = useState(0.8);
 
-  // ★ select化したので「入力途中の0..」問題が起きない。互換のため state は残すが使わない。
-  const [isMultiplicityEditing] = useState(false);
+  // 多重度入力中はプレビューが不安定になりやすいので一時抑制
+  const [isMultiplicityEditing, setIsMultiplicityEditing] = useState(false);
+  const multEditTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // プレビュー抑制：入力が未完了の間は PlantUML エラー表示で混乱しやすいため，表示を遅らせる
+  const markMultiplicityEditing = () => {
+    setIsMultiplicityEditing(true);
+    if (multEditTimer.current) clearTimeout(multEditTimer.current);
+    multEditTimer.current = setTimeout(() => setIsMultiplicityEditing(false), 600);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (multEditTimer.current) clearTimeout(multEditTimer.current);
+    };
+  }, []);
+
   const previewHoldReasons = useMemo(() => {
     const reasons: string[] = [];
     if (classes.length === 0) return reasons;
@@ -340,10 +439,7 @@ const ClassEditorPage: React.FC = () => {
     ) {
       reasons.push("関連の端点");
     }
-
-    // ★ select化したのでここは実質増えない（互換で残す）
     if (isMultiplicityEditing) reasons.push("多重度（入力中）");
-
     return reasons;
   }, [classes, relations, isMultiplicityEditing]);
 
@@ -360,13 +456,13 @@ const ClassEditorPage: React.FC = () => {
         setClasses(parsed.classes ?? []);
         setRelations(parsed.relations ?? []);
         setSelectedClassId(parsed.classes?.[0]?.id ?? null);
-        // ★ return しない（OD snapshot は別で読む）
+        // ★ここで return しない（OD snapshot を別で読みたいので）
       }
     } catch {
       // ignore
     }
 
-    // B) 初期payload（OD snapshot / relationHints / 初期PUML）
+    // B) ODページからの初期payload（OD snapshot / relationHints / 初期PUML）
     try {
       const raw = localStorage.getItem(STORAGE_KEY_EDITOR_INITIAL);
       if (!raw) return;
@@ -404,9 +500,6 @@ const ClassEditorPage: React.FC = () => {
   }, []);
 
   // ===== PlantUML の再生成 =====
-  // ★ ハイライト機能を削除：
-  // - 選択中クラス/関連に応じた色変更をしない
-  // - 選択中関連だけ赤線にする、をしない（常に通常線）
   useEffect(() => {
     if (classes.length === 0 || previewHoldReasons.length > 0) {
       setEncodedPuml("");
@@ -418,6 +511,8 @@ const ClassEditorPage: React.FC = () => {
     lines.push("hide empty members");
     lines.push("skinparam classAttributeIconSize 0");
 
+    const selectedRelation = relations.find((r) => r.id === selectedRelationId) ?? null;
+
     // クラス定義：表示名は "..."，内部参照は alias
     const aliasById = new Map<string, string>();
     for (const cls of classes) {
@@ -425,12 +520,22 @@ const ClassEditorPage: React.FC = () => {
       aliasById.set(cls.id, `C_${safe}`);
     }
 
+    // 選択中クラス → 青，選択中関連の両端クラス → 赤系
     for (const cls of classes) {
-      const alias =
-        aliasById.get(cls.id) ?? `C_${String(cls.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
+      const isSelectedClass = cls.id === selectedClassId;
+      const isEndpointOfSelectedRelation =
+        selectedRelation &&
+        (selectedRelation.fromClassId === cls.id || selectedRelation.toClassId === cls.id);
 
-      // ★ 色指定（#...）を一切付けない
-      lines.push(`class "${esc(cls.name)}" as ${alias} {`);
+      let colorPart = "";
+      if (isSelectedClass) {
+        colorPart = " #CCEEFF";
+      } else if (isEndpointOfSelectedRelation) {
+        colorPart = " #FFCCCC";
+      }
+
+      const alias = aliasById.get(cls.id) ?? `C_${String(cls.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
+      lines.push(`class "${esc(cls.name)}" as ${alias}${colorPart} {`);
       for (const a of cls.attrs) {
         const ty = a.type || "string";
         lines.push(`  ${esc(a.name)}: ${ty}`);
@@ -438,22 +543,21 @@ const ClassEditorPage: React.FC = () => {
       lines.push("}");
     }
 
-    // 関連定義：常に通常線
+    // 関連定義：選択中関連だけ赤線
     for (const r of relations) {
       const from = classes.find((c) => c.id === r.fromClassId);
       const to = classes.find((c) => c.id === r.toClassId);
       if (!from || !to) continue;
 
-      const arrow = "--";
+      const isRelSelected = r.id === selectedRelationId;
+      const arrow = isRelSelected ? `-[#red]-` : "--";
 
       const leftMult = esc(r.leftMultiplicity || "");
       const rightMult = esc(r.rightMultiplicity || "");
       const labelPart = r.label ? ` : ${esc(r.label)}` : "";
 
-      const fromAlias =
-        aliasById.get(from.id) ?? `C_${String(from.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
-      const toAlias =
-        aliasById.get(to.id) ?? `C_${String(to.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
+      const fromAlias = aliasById.get(from.id) ?? `C_${String(from.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
+      const toAlias = aliasById.get(to.id) ?? `C_${String(to.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
 
       lines.push(`${fromAlias} "${leftMult}" ${arrow} "${rightMult}" ${toAlias}${labelPart}`);
     }
@@ -467,7 +571,7 @@ const ClassEditorPage: React.FC = () => {
       console.error("encode error", e);
       setEncodedPuml("");
     }
-  }, [classes, relations, previewHoldReasons]); // ★ selectedClassId / selectedRelationId を依存から外す
+  }, [classes, relations, selectedClassId, selectedRelationId, previewHoldReasons]);
 
   const previewUrl = useMemo(
     () => (encodedPuml ? `https://www.plantuml.com/plantuml/svg/${encodedPuml}` : ""),
@@ -484,9 +588,148 @@ const ClassEditorPage: React.FC = () => {
 
   const feedbackMessages = useMemo(() => makeFeedback(classes, relations), [classes, relations]);
 
-  // 選択中要素（編集欄に出すための “選択” は残す）
+  // 選択中要素
   const selectedClass = classes.find((c) => c.id === selectedClassId) ?? null;
   const selectedRelation = relations.find((r) => r.id === selectedRelationId) ?? null;
+
+  // ===== 選択中の関連：多重度ヒント =====
+  const multiplicityAssist = useMemo(() => {
+    if (!selectedRelation) return null;
+
+    const leftClass = classes.find((c) => c.id === selectedRelation.fromClassId) ?? null;
+    const rightClass = classes.find((c) => c.id === selectedRelation.toClassId) ?? null;
+    if (!leftClass || !rightClass) return null;
+
+    const leftName = leftClass.name || "（未入力）";
+    const rightName = rightClass.name || "（未入力）";
+    const leftBase = baseNameForAssist(leftName);
+    const rightBase = baseNameForAssist(rightName);
+
+    const objById = new Map<string, Obj>(odObjects.map((o) => [o.id, o]));
+    const leftCountByObj = new Map<string, number>();
+    const rightCountByObj = new Map<string, number>();
+
+    // まず 0 で初期化（ODに存在するオブジェクトのみ）
+    for (const o of odObjects) {
+      const b = baseNameForAssist(o.name);
+      if (b && leftBase && b === leftBase) leftCountByObj.set(o.id, 0);
+      if (b && rightBase && b === rightBase) rightCountByObj.set(o.id, 0);
+    }
+
+    // リンクを数える（無向として扱う）
+    for (const l of odLinks) {
+      const aObj = objById.get(l.from);
+      const bObj = objById.get(l.to);
+      if (!aObj || !bObj) continue;
+
+      const aBase = baseNameForAssist(aObj.name);
+      const bBase = baseNameForAssist(bObj.name);
+      if (!aBase || !bBase) continue;
+
+      if (leftBase && rightBase) {
+        if (aBase === leftBase && bBase === rightBase) {
+          leftCountByObj.set(aObj.id, (leftCountByObj.get(aObj.id) ?? 0) + 1);
+          rightCountByObj.set(bObj.id, (rightCountByObj.get(bObj.id) ?? 0) + 1);
+        } else if (aBase === rightBase && bBase === leftBase) {
+          rightCountByObj.set(aObj.id, (rightCountByObj.get(aObj.id) ?? 0) + 1);
+          leftCountByObj.set(bObj.id, (leftCountByObj.get(bObj.id) ?? 0) + 1);
+        }
+      }
+    }
+
+    const rangeFromCounts = (counts: number[]) => {
+      if (counts.length === 0) return null;
+      const min = Math.min(...counts);
+      const max = Math.max(...counts);
+      return { min, max };
+    };
+
+    const recommend4 = (min: number, max: number) => {
+      if (max <= 1) return min === 0 ? "0..1" : "1";
+      return min === 0 ? "0..*" : "1..*";
+    };
+
+    const leftCounts = Array.from(leftCountByObj.values());
+    const rightCounts = Array.from(rightCountByObj.values());
+
+    const leftToRight = rangeFromCounts(leftCounts);
+    const rightToLeft = rangeFromCounts(rightCounts);
+
+    return {
+      leftName,
+      rightName,
+      obsLeftToRight: leftToRight
+        ? {
+            min: leftToRight.min,
+            max: leftToRight.max,
+            rec: recommend4(leftToRight.min, leftToRight.max),
+            samples: leftCounts.length,
+          }
+        : null,
+      obsRightToLeft: rightToLeft
+        ? {
+            min: rightToLeft.min,
+            max: rightToLeft.max,
+            rec: recommend4(rightToLeft.min, rightToLeft.max),
+            samples: rightCounts.length,
+          }
+        : null,
+    };
+  }, [selectedRelation, classes, odObjects, odLinks]);
+
+  // 問題文ハイライト対象（トークン）
+  const problemHighlightTokens = useMemo<HighlightToken[]>(() => {
+    const tokens: HighlightToken[] = [];
+
+    const pushWithBase = (raw: string | null | undefined, context: string) => {
+      const t = String(raw ?? "").trim();
+      if (!t) return;
+
+      tokens.push({
+        match: t,
+        priority: 2,
+        reason: `${context}「${t}」に一致`,
+      });
+
+      const base = baseNameForProblemHighlight(t);
+      if (base && base !== t) {
+        tokens.push({
+          match: base,
+          priority: 1,
+          reason: `${context}「${t}」から末尾の識別子を除いた「${base}」に一致`,
+        });
+      }
+    };
+
+    if (selectedClass) {
+      pushWithBase(selectedClass.name, "選択中のクラス名");
+    }
+
+    if (selectedRelation) {
+      if (selectedRelation.label) pushWithBase(selectedRelation.label, "選択中の関連ラベル");
+      const from = classes.find((c) => c.id === selectedRelation.fromClassId);
+      const to = classes.find((c) => c.id === selectedRelation.toClassId);
+      if (from) pushWithBase(from.name, "選択中の関連の端点（クラス名）");
+      if (to) pushWithBase(to.name, "選択中の関連の端点（クラス名）");
+    }
+
+    const byKey = new Map<string, HighlightToken>();
+    for (const t of tokens) {
+      const k = String(t.match ?? "").trim().toLowerCase();
+      if (!k) continue;
+      const prev = byKey.get(k);
+      if (!prev || (t.priority ?? 0) > (prev.priority ?? 0)) byKey.set(k, t);
+    }
+    return Array.from(byKey.values());
+  }, [selectedClass, selectedRelation, classes]);
+
+  const highlightExplain = useMemo(() => {
+    const name = (selectedClass?.name ?? "").trim();
+    if (!name) return null;
+    const base = baseNameForProblemHighlight(name);
+    if (!base || base === name) return null;
+    return { name, base };
+  }, [selectedClass?.name]);
 
   // ===== OD→CD 連携: OD側リンクの集計（フィードバック用） =====
   const odLinkSummary = useMemo(() => {
@@ -511,7 +754,10 @@ const ClassEditorPage: React.FC = () => {
 
     const totalValidLinks = valid.length;
 
-    const byEndpoint = new Map<string, { a: string; b: string; count: number; labels: Map<string, number> }>();
+    const byEndpoint = new Map<
+      string,
+      { a: string; b: string; count: number; labels: Map<string, number> }
+    >();
 
     for (const v of valid) {
       const existing = byEndpoint.get(v.endpointKey);
@@ -561,6 +807,22 @@ const ClassEditorPage: React.FC = () => {
       cdPairs.add(makeEndpointKey(a, b));
     }
 
+    const hintsByEndpoint = new Map<
+      string,
+      { pretty: string; labels: { label: string; count: number }[] }
+    >();
+    for (const h of odRelationHints ?? []) {
+      const a = baseNameForAssist(h.fromClass);
+      const b = baseNameForAssist(h.toClass);
+      if (!a || !b) continue;
+      const k = makeEndpointKey(a, b);
+      const pretty = `${a <= b ? a : b} — ${a <= b ? b : a}`;
+      hintsByEndpoint.set(k, {
+        pretty,
+        labels: (h.candidates ?? []).slice().sort((x, y) => y.count - x.count).slice(0, 2),
+      });
+    }
+
     const hintFlat = new Map<string, { pretty: string; label: string; count: number }>();
     for (const h of odRelationHints ?? []) {
       const a = baseNameForAssist(h.fromClass);
@@ -594,6 +856,7 @@ const ClassEditorPage: React.FC = () => {
       convertHintsTop,
       cdRelationCount: relations.length,
       cdEndpointKindCount: cdPairs.size,
+      hintsByEndpoint,
     };
   }, [odObjects, odLinks, odRelationHints, classes, relations]);
 
@@ -625,7 +888,10 @@ const ClassEditorPage: React.FC = () => {
     setClasses((prev) =>
       prev.map((c) =>
         c.id === classId
-          ? { ...c, attrs: [...c.attrs, { id: makeId(), name: "", type: "string" }] }
+          ? {
+              ...c,
+              attrs: [...c.attrs, { id: makeId(), name: "", type: "string" as const }],
+            }
           : c
       )
     );
@@ -635,7 +901,10 @@ const ClassEditorPage: React.FC = () => {
     setClasses((prev) =>
       prev.map((c) =>
         c.id === classId
-          ? { ...c, attrs: c.attrs.map((a) => (a.id === attrId ? { ...a, ...partial } : a)) }
+          ? {
+              ...c,
+              attrs: c.attrs.map((a) => (a.id === attrId ? { ...a, ...partial } : a)),
+            }
           : c
       )
     );
@@ -655,9 +924,8 @@ const ClassEditorPage: React.FC = () => {
       fromClassId: classes[0].id,
       toClassId: classes[1].id,
       label: "",
-      // ★ 初期値は 0..* にする（スクショの状態）
-      leftMultiplicity: "0..*",
-      rightMultiplicity: "0..*",
+      leftMultiplicity: "1",
+      rightMultiplicity: "0..1",
     };
     setRelations((prev) => [...prev, newRel]);
     setSelectedRelationId(newRel.id);
@@ -698,8 +966,9 @@ const ClassEditorPage: React.FC = () => {
   };
 
   const handleResetAll = () => {
-    if (!window.confirm("クラス図編集の状態をすべてリセットします．よろしいですか？")) return;
-
+    if (!window.confirm("クラス図編集の状態をすべてリセットします．よろしいですか？")) {
+      return;
+    }
     localStorage.removeItem(STORAGE_KEY_EDITOR_STATE);
     const raw = localStorage.getItem(STORAGE_KEY_EDITOR_INITIAL);
     if (!raw) {
@@ -727,17 +996,7 @@ const ClassEditorPage: React.FC = () => {
     }
   };
 
-  // ★ 以前の datalist 用候補は不要になったが、残っていても害はない（UI側で使わない）
-  const multiplicityOptions = useMemo(() => {
-    const base = ["1", "0..1", "0..*", "1..*"];
-    const s = new Set(base);
-    for (const r of relations) {
-      if (r.leftMultiplicity) s.add(r.leftMultiplicity);
-      if (r.rightMultiplicity) s.add(r.rightMultiplicity);
-    }
-    return Array.from(s.values());
-  }, [relations]);
-
+  // ===== レイアウト =====
   return (
     <div className="flex flex-col h-screen bg-slate-50">
       {/* ヘッダ */}
@@ -745,7 +1004,7 @@ const ClassEditorPage: React.FC = () => {
         <div className="flex items-center gap-2">
           <button
             className="px-3 py-1 rounded bg-slate-100 text-sm hover:bg-slate-200"
-            onClick={() => router.push("/experiment2")}
+            onClick={() => router.push("/experiment")}
           >
             ← オブジェクト図へ戻る
           </button>
@@ -772,43 +1031,24 @@ const ClassEditorPage: React.FC = () => {
         </div>
       </div>
 
-      {/* メイン：左／右 */}
+      {/* メイン：左／中央／右 */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* 左側：問題文 + 編集 */}
         <div className="flex-1 flex flex-col border-r overflow-hidden min-h-0">
           {/* 左上：クラス図作成問題文 */}
           <div className="h-2/5 border-b bg-white flex flex-col min-h-0">
             <div className="px-3 py-2 border-b font-semibold text-sm">クラス図作成問題（本文）</div>
-
             <div className="flex-1 flex min-h-0">
               {/* 左：要求文 */}
               <div className="flex-1 p-3 overflow-auto text-[12px] leading-relaxed whitespace-pre-wrap min-w-0">
-                {/* ★ ハイライト削除：そのまま表示 */}
-                {classProblemText}
-              </div>
-
-              {/* 右：遷移前のオブジェクト図（OD） */}
-              <div className="w-[360px] max-w-[45%] border-l bg-slate-50 p-2 flex flex-col min-h-0">
-                <div className="text-[12px] font-semibold mb-1">オブジェクト図（OD）</div>
-                <div className="border rounded bg-white flex-1 p-2 overflow-hidden">
-                  {odPreviewUrl ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={odPreviewUrl}
-                      alt="遷移前のオブジェクト図プレビュー"
-                      className="w-full h-full object-contain"
-                    />
-                  ) : (
-                    <div className="h-full flex items-center justify-center text-[12px] text-slate-500">
-                      オブジェクト図（OD）のスナップショットが見つからないため，ここには表示できません．
-                    </div>
-                  )}
-                </div>
-                <div className="mt-1 text-[11px] text-slate-600">
-                  OD は「具体例」です．多重度や関連名を考えるときの見直し用に表示しています．
-                </div>
-              </div>
-            </div>
+                {highlightExplain && (
+                  <div className="mb-2 text-[11px] text-slate-600">
+                    選択中のクラス名「<span className="font-semibold">{highlightExplain.name}</span>」に合わせて，
+                    要求文中の「<span className="font-semibold">{highlightExplain.base}</span>」も強調表示しています．
+                  </div>
+                )}
+                {highlightText(classProblemText, problemHighlightTokens)}
+              </div></div>
           </div>
 
           {/* 左下：クラス編集＋関連編集 */}
@@ -817,12 +1057,14 @@ const ClassEditorPage: React.FC = () => {
             <div className="border-r flex flex-col min-h-0">
               <div className="px-3 py-2 border-b flex items-center justify-between bg-white">
                 <span className="font-semibold text-sm">クラスの編集</span>
-                <button
-                  className="px-2 py-0.5 text-xs rounded bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
-                  onClick={handleAddClass}
-                >
-                  ＋ クラスを追加
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="px-2 py-0.5 text-xs rounded bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                    onClick={handleAddClass}
+                  >
+                    ＋ クラスを追加
+                  </button>
+                </div>
               </div>
 
               <div className="flex-1 flex overflow-hidden min-h-0">
@@ -834,27 +1076,35 @@ const ClassEditorPage: React.FC = () => {
                     </div>
                   )}
                   {classes.map((c) => {
-                    // ★ ハイライト削除：選択中の色分けはしない（hoverのみ）
                     const isSelected = selectedClassId === c.id;
+                    const isEndpointOfSelectedRelation =
+                      selectedRelation &&
+                      (selectedRelation.fromClassId === c.id || selectedRelation.toClassId === c.id);
+
+                    let itemColor = "";
+                    if (isSelected) {
+                      itemColor = "bg-sky-200 border-sky-400";
+                    } else if (isEndpointOfSelectedRelation) {
+                      itemColor = "bg-red-50 border-red-300";
+                    } else {
+                      itemColor = "bg-slate-50 border-slate-200";
+                    }
+
+                    const hoverColor = isSelected ? "hover:bg-sky-200" : "hover:bg-sky-50";
 
                     return (
                       <button
                         key={c.id}
-                        className="w-full text-left px-2 py-1 border-b flex items-center justify-between transition-colors bg-slate-50 border-slate-200 hover:bg-slate-100"
-                        onClick={() => setSelectedClassId(isSelected ? null : c.id)}
+                        className={`w-full text-left px-2 py-1 border-b flex items-center justify-between transition-colors ${itemColor} ${hoverColor}`}
+                        onClick={() => {
+                          setSelectedClassId(isSelected ? null : c.id);
+                        }}
                       >
                         <span className="truncate">{c.name}</span>
                         <span className="text-[10px] text-slate-500 ml-1">{c.attrs.length} 属性</span>
                       </button>
                     );
                   })}
-
-                  {/* ★ 以前の datalist（input 用）。select 化したのでUIでは未使用。残していてもOK */}
-                  <datalist id="multiplicity-options">
-                    {multiplicityOptions.map((m) => (
-                      <option key={m} value={m} />
-                    ))}
-                  </datalist>
                 </div>
 
                 {/* クラス詳細 */}
@@ -867,18 +1117,24 @@ const ClassEditorPage: React.FC = () => {
                   {selectedClass && (
                     <div className="flex flex-col gap-2">
                       <div>
-                        <label className="block text-[11px] font-semibold mb-1">クラス名</label>
+                        <label className="block text-[11px] font-semibold mb-1">
+                          クラス名
+                          <HelpBadge text="クラス名：似たオブジェクトをまとめた「種類」の名前です．ODで登場したオブジェクト名（末尾の番号など）を一般化して付けます．例）学生，授業，注文 など．" />
+                        </label>
                         <input
                           className="w-full border rounded px-2 py-1 text-[12px]"
                           value={selectedClass.name}
                           onChange={(e) => handleUpdateClass(selectedClass.id, { name: e.target.value })}
-                          placeholder=""
+                          placeholder="例）学生，授業 など"
                         />
                       </div>
 
                       <div>
                         <div className="flex items-center justify-between mb-1">
-                          <span className="text-[11px] font-semibold">属性一覧</span>
+                          <span className="text-[11px] font-semibold">
+                            属性一覧
+                            <HelpBadge text="属性：クラスが持つ性質（データ）です．ODのスロット（key=value）の key が候補になります．型は値の種類（string/int/real/boolean）を選びます．" />
+                          </span>
                           <button
                             className="px-2 py-0.5 text-[11px] rounded bg-slate-100 hover:bg-slate-200"
                             onClick={() => handleAddAttr(selectedClass.id)}
@@ -886,6 +1142,12 @@ const ClassEditorPage: React.FC = () => {
                             ＋ 属性を追加
                           </button>
                         </div>
+
+                        {selectedClass.attrs.length === 0 && (
+                          <div className="text-[11px] text-slate-500 mb-1">
+                            例）属性名：年齢，型：string など
+                          </div>
+                        )}
 
                         <div className="flex flex-col gap-1">
                           {selectedClass.attrs.map((a) => (
@@ -897,7 +1159,7 @@ const ClassEditorPage: React.FC = () => {
                                   onChange={(e) =>
                                     handleUpdateAttr(selectedClass.id, a.id, { name: e.target.value })
                                   }
-                                  placeholder=""
+                                  placeholder="属性名（例：年齢）"
                                 />
                                 <span className="text-[11px] text-slate-400">:</span>
                                 <select
@@ -912,6 +1174,7 @@ const ClassEditorPage: React.FC = () => {
                                   <option value="real">real</option>
                                   <option value="boolean">boolean</option>
                                 </select>
+                                <HelpBadge text="属性の型：値の種類を表します．string=文字列，int=整数，real=小数，boolean=true/false です．ODの値に合わせて選びます．" />
                               </div>
                               <div className="flex justify-end">
                                 <button
@@ -943,7 +1206,13 @@ const ClassEditorPage: React.FC = () => {
             {/* 関連と多重度の編集 */}
             <div className="flex flex-col min-h-0">
               <div className="px-3 py-2 border-b flex items-center justify-between bg-white">
-                <span className="font-semibold text-sm">関連と多重度の編集</span>
+                <span className="font-semibold text-sm">
+                  関連
+                  <HelpBadge text="関連：クラス同士の関係を表します．ODで結んだリンクを一般化して，クラス間の関係として整理します．" />
+                  と多重度
+                  <HelpBadge text="多重度：片方 1 つに対して，反対側が何個つながるかを表します．例）1=必ず 1 つ，0..1=0 または 1，0..*=0 以上，1..*=1 以上です．" />
+                  の編集
+                </span>
                 <button
                   className="px-2 py-0.5 text-xs rounded bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
                   onClick={handleAddRelation}
@@ -960,17 +1229,20 @@ const ClassEditorPage: React.FC = () => {
                 )}
 
                 {relations.map((r) => {
-                  // ★ ハイライト削除：選択中の枠色を変えない（hoverのみ）
                   const isSelected = selectedRelationId === r.id;
 
                   return (
                     <div
                       key={r.id}
-                      className="m-2 p-2 border rounded bg-white flex flex-col gap-1 cursor-pointer transition-colors border-slate-200 hover:bg-slate-50"
+                      className={
+                        "m-2 p-2 border rounded bg-white flex flex-col gap-1 cursor-pointer transition-colors " +
+                        (isSelected ? "border-red-400 ring-1 ring-red-300 bg-red-50" : "border-slate-200 hover:bg-slate-50")
+                      }
                       onClick={() => setSelectedRelationId(isSelected ? null : r.id)}
                     >
                       <div className="flex items-center gap-2 text-[11px] text-slate-600">
                         <span>端点と多重度</span>
+                        <HelpBadge text="多重度：片方 1 つに対して，反対側が何個つながるかを表します．左右はそれぞれ，相手側の数です．" />
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2">
@@ -986,14 +1258,16 @@ const ClassEditorPage: React.FC = () => {
                           ))}
                         </select>
 
-                        {/* ★ 多重度：input(list) → select（▼で4択選択） */}
+                        {/* ★ここから：多重度は input ではなく select（4択で確実に表示） */}
                         <select
-                          className="border rounded px-1 py-0.5 text-[11px] w-[64px] bg-white"
-                          value={r.leftMultiplicity || "0..*"}
-                          onChange={(e) => handleUpdateRelation(r.id, { leftMultiplicity: e.target.value })}
-                          aria-label="左側の多重度"
+                          className="border rounded px-1 py-0.5 text-[11px] w-[88px]"
+                          value={r.leftMultiplicity}
+                          onChange={(e) => {
+                            markMultiplicityEditing();
+                            handleUpdateRelation(r.id, { leftMultiplicity: e.target.value });
+                          }}
                         >
-                          {MULTIPLICITY_CHOICES.map((m) => (
+                          {MULT4.map((m) => (
                             <option key={m} value={m}>
                               {m}
                             </option>
@@ -1003,17 +1277,20 @@ const ClassEditorPage: React.FC = () => {
                         <span className="text-[11px]">→</span>
 
                         <select
-                          className="border rounded px-1 py-0.5 text-[11px] w-[64px] bg-white"
-                          value={r.rightMultiplicity || "0..*"}
-                          onChange={(e) => handleUpdateRelation(r.id, { rightMultiplicity: e.target.value })}
-                          aria-label="右側の多重度"
+                          className="border rounded px-1 py-0.5 text-[11px] w-[88px]"
+                          value={r.rightMultiplicity}
+                          onChange={(e) => {
+                            markMultiplicityEditing();
+                            handleUpdateRelation(r.id, { rightMultiplicity: e.target.value });
+                          }}
                         >
-                          {MULTIPLICITY_CHOICES.map((m) => (
+                          {MULT4.map((m) => (
                             <option key={m} value={m}>
                               {m}
                             </option>
                           ))}
                         </select>
+                        {/* ★ここまで */}
 
                         <select
                           className="border rounded px-1 py-0.5 text-[11px]"
@@ -1029,12 +1306,16 @@ const ClassEditorPage: React.FC = () => {
                       </div>
 
                       <div className="flex items-center gap-2 mt-1">
-                        <span className="text-[11px]">関連名</span>
+                        <span className="text-[11px]">
+                          関連名
+                          <HelpBadge text="関連名：関係の意味を表す名前です．動詞（〜する，〜を持つ，〜を担当する 等）で書くと分かりやすくなります．ODのリンクラベルを一般化したものが候補になります．" />
+                          :
+                        </span>
                         <input
                           className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                           value={r.label}
                           onChange={(e) => handleUpdateRelation(r.id, { label: e.target.value })}
-                          placeholder=""
+                          placeholder="例）履修する，担当する など"
                         />
                       </div>
 
@@ -1058,12 +1339,12 @@ const ClassEditorPage: React.FC = () => {
           </div>
         </div>
 
-        {/* 右側：プレビュー（＋必要なら今後フィードバック追加） */}
+        {/* 右側：プレビュー＋フィードバック */}
         <div className="flex-1 flex flex-col overflow-hidden min-h-0">
           {/* 右上：クラス図プレビュー */}
           <div className="h-1/2 border-b bg-white flex flex-col min-h-0">
             <div className="px-3 py-2 border-b bg-white flex items-center justify-between">
-              <div className="font-semibold text-sm">クラス図</div>
+              <div className="font-semibold text-sm">あなたのクラス図（プレビュー）</div>
               <div className="flex items-center gap-2">
                 <span className="text-[11px] w-12 text-center tabular-nums">{Math.round(classZoom * 100)}%</span>
                 <input
@@ -1089,7 +1370,6 @@ const ClassEditorPage: React.FC = () => {
                 </button>
               </div>
             </div>
-
             <div className="flex-1 overflow-auto bg-white p-2">
               {!previewUrl && (
                 <div className="p-3 text-[11px] text-slate-500">
@@ -1105,7 +1385,6 @@ const ClassEditorPage: React.FC = () => {
                   )}
                 </div>
               )}
-
               {previewUrl && (
                 // eslint-disable-next-line @next/next/no-img-element
                 <div style={{ zoom: classZoom }} className="inline-block origin-top-left">
@@ -1114,7 +1393,44 @@ const ClassEditorPage: React.FC = () => {
               )}
             </div>
           </div>
-        </div>
+
+          {/* 右下：オブジェクト図（OD） */}
+<div className="flex-1 bg-slate-50 flex flex-col min-h-0">
+  <div className="px-3 py-2 border-b bg-white flex items-center justify-between">
+    <div className="font-semibold text-sm">オブジェクト図（OD）</div>
+    <div className="flex items-center gap-2 text-[11px] text-slate-600">
+      <span>拡大</span>
+      <input
+        type="range"
+        min={0.4}
+        max={1.6}
+        step={0.05}
+        value={odZoom}
+        onChange={(e) => setOdZoom(Number(e.target.value))}
+        className="w-28"
+        aria-label="ODズーム"
+      />
+      <span className="w-10 text-right">{Math.round(odZoom * 100)}%</span>
+    </div>
+  </div>
+
+  <div className="flex-1 overflow-auto bg-white p-2">
+    {odPreviewUrl ? (
+      // eslint-disable-next-line @next/next/no-img-element
+      <div style={{ zoom: odZoom }} className="inline-block origin-top-left">
+        <img
+          src={odPreviewUrl}
+          alt="オブジェクト図（OD）プレビュー"
+          className="block max-w-none h-auto"
+        />
+      </div>
+    ) : (
+      <div className="h-full flex items-center justify-center text-[12px] text-slate-500">
+        オブジェクト図（OD）のスナップショットが見つからないため，ここには表示できません．
+      </div>
+    )}
+  </div>
+</div></div>
       </div>
     </div>
   );

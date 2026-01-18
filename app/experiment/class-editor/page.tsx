@@ -115,10 +115,9 @@ const normalizeObjectLabel = (raw: string) => {
 
 // 末尾番号などを落としてベース名化（例：学生1→学生）
 const baseNameForAssist = (name: string) => {
+  // NOTE: 末尾の番号などは削除しない（厳密に扱う）
   let s = normalizeObjectLabel(name);
-  s = s.replace(/[0-9]+$/g, "");
-  s = s.replace(/[０-９]+$/g, "");
-  s = s.replace(/[A-Za-z]+[0-9]+$/g, "");
+  // 末尾の区切り記号だけはノイズになりやすいので削除する
   s = s.replace(/[_\-\s]+$/g, "");
   return s.trim();
 };
@@ -282,7 +281,7 @@ function parseInitialPuml(
   return { classes, relations };
 }
 
-// ===== フィードバック生成（多重度のヒント中心） =====
+// ===== 多重度を考えるヒント生成（多重度のヒント中心） =====
 function makeFeedback(classes: ClassInfo[], relations: Relation[]): string[] {
   const msgs: string[] = [
     "多重度は『片方 1 つに対して，反対側が何個つながるか』を左右それぞれで考えます．まずは問題文の言い方（必ず / 〜することがある / 複数 / 0でもよい など）を確認しましょう．",
@@ -406,6 +405,7 @@ const ClassEditorPage: React.FC = () => {
   const ZOOM_STEP = 0.1;
   const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
   const [classZoom, setClassZoom] = useState(1);
+  const [odZoom, setOdZoom] = useState(0.8);
 
   // 多重度入力中はプレビューが不安定になりやすいので一時抑制
   const [isMultiplicityEditing, setIsMultiplicityEditing] = useState(false);
@@ -1050,25 +1050,77 @@ const ClassEditorPage: React.FC = () => {
                 {highlightText(classProblemText, problemHighlightTokens)}
               </div>
 
-              {/* 右：遷移前のオブジェクト図（OD） */}
+              {/* 右：多重度の編集（ODの代わり） */}
               <div className="w-[360px] max-w-[45%] border-l bg-slate-50 p-2 flex flex-col min-h-0">
-                <div className="text-[12px] font-semibold mb-1">オブジェクト図（OD）</div>
-                <div className="border rounded bg-white flex-1 p-2 overflow-hidden">
-                  {odPreviewUrl ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={odPreviewUrl}
-                      alt="遷移前のオブジェクト図プレビュー"
-                      className="w-full h-full object-contain"
-                    />
+                <div className="text-[12px] font-semibold mb-1">多重度の編集</div>
+                <div className="border rounded bg-white flex-1 p-2 overflow-auto">
+                  {selectedRelation ? (
+                    <div className="text-[11px] leading-relaxed">
+                      <div className="font-semibold text-slate-700 mb-2">
+                        選択中の関連の多重度（左右をそれぞれ設定）
+                      </div>
+
+                      <div className="font-semibold text-slate-700">
+                        ① {multiplicityAssist?.leftName ?? "（左）"} から見て {multiplicityAssist?.rightName ?? "（右）"} は？
+                        <span className="ml-2 text-slate-500 font-normal">（→ の右に入ります）</span>
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-1 items-center">
+                        {MULT4.map((v) => (
+                          <button
+                            key={v}
+                            type="button"
+                            aria-pressed={v === selectedRelation.rightMultiplicity}
+                            className={
+                              "px-2 py-0.5 rounded text-[11px] border transition-colors " +
+                              (v === selectedRelation.rightMultiplicity
+                                ? "bg-sky-200 border-sky-400 font-semibold"
+                                : "bg-slate-100 border-slate-200 hover:bg-slate-200")
+                            }
+                            onClick={() => {
+                              markMultiplicityEditing();
+                              handleUpdateRelation(selectedRelation.id, { rightMultiplicity: v });
+                            }}
+                          >
+                            {v}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="mt-3 font-semibold text-slate-700">
+                        ② {multiplicityAssist?.rightName ?? "（右）"} から見て {multiplicityAssist?.leftName ?? "（左）"} は？
+                        <span className="ml-2 text-slate-500 font-normal">（→ の左に入ります）</span>
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-1 items-center">
+                        {MULT4.map((v) => (
+                          <button
+                            key={v}
+                            type="button"
+                            aria-pressed={v === selectedRelation.leftMultiplicity}
+                            className={
+                              "px-2 py-0.5 rounded text-[11px] border transition-colors " +
+                              (v === selectedRelation.leftMultiplicity
+                                ? "bg-sky-200 border-sky-400 font-semibold"
+                                : "bg-slate-100 border-slate-200 hover:bg-slate-200")
+                            }
+                            onClick={() => {
+                              markMultiplicityEditing();
+                              handleUpdateRelation(selectedRelation.id, { leftMultiplicity: v });
+                            }}
+                          >
+                            {v}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="mt-3 text-[11px] text-slate-600">
+                        右下の OD（具体例）を見ながら，「1つに対して相手が何個か」を数えて決めます．
+                      </div>
+                    </div>
                   ) : (
                     <div className="h-full flex items-center justify-center text-[12px] text-slate-500">
-                      オブジェクト図（OD）のスナップショットが見つからないため，ここには表示できません．
+                      関連（線）を1本クリックして選択すると，ここで多重度を編集できます．
                     </div>
                   )}
-                </div>
-                <div className="mt-1 text-[11px] text-slate-600">
-                  OD は「具体例」です．多重度や関連名を考えるときの見直し用に表示しています．
                 </div>
               </div>
             </div>
@@ -1417,186 +1469,47 @@ const ClassEditorPage: React.FC = () => {
             </div>
           </div>
 
-          {/* 右下：フィードバック */}
+          {/* 右下：オブジェクト図（OD） */}
           <div className="flex-1 bg-slate-50 flex flex-col min-h-0">
-            <div className="px-3 py-2 border-b bg-white font-semibold text-sm">フィードバック</div>
-            <div className="flex-1 p-3 overflow-auto text-[11px] leading-relaxed">
-              <ul className="list-disc pl-5 space-y-1">
-                {feedbackMessages.map((m, idx) => (
-                  <li key={idx}>{m}</li>
-                ))}
+            <div className="px-3 py-2 border-b bg-white font-semibold text-sm">オブジェクト図（OD）</div>
 
-                {selectedRelation && (
-                  <div className="mt-3 border-t pt-3">
-                    <div className="font-semibold text-slate-700 mb-1">選択中の関連の多重度ヒント(ここでも多重度編集ができます)</div>
+            <div className="flex-1 p-3 overflow-auto text-[11px] leading-relaxed flex flex-col gap-3">
+              <div className="border rounded bg-white p-2">
+                <div className="font-semibold text-slate-700 mb-2">ODで数えてみる（常に表示）</div>
 
-                    <div className="mt-2 border rounded bg-white p-2">
-                      <div className="font-semibold text-slate-700">
-                        ① {multiplicityAssist?.leftName ?? "（左）"} から見て {multiplicityAssist?.rightName ?? "（右）"} は？
-                        <span className="ml-2 text-slate-500 font-normal">（右の欄，→ の右に入ります．）</span>
-                      </div>
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {["1", "0..1", "0..*", "1..*"].map((v) => (
-                          <button
-                            key={v}
-                            type="button"
-                            className="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-[11px]"
-                            onClick={() => handleUpdateRelation(selectedRelation.id, { rightMultiplicity: v })}
-                          >
-                            {v}
-                          </button>
-                        ))}
-                        <span className="ml-1 text-slate-500">
-                          現在選択中：{selectedRelation.rightMultiplicity ? selectedRelation.rightMultiplicity : "（未入力）"}
-                        </span>
-                      </div>
-
-                      {multiplicityAssist && multiplicityAssist.obsLeftToRight && (
-                        <div className="mt-1 text-slate-600">
-                          ODの例では，{multiplicityAssist.leftName} 1つから見て {multiplicityAssist.rightName} は
-                          <span className="font-semibold">
-                            {multiplicityAssist.obsLeftToRight.min === multiplicityAssist.obsLeftToRight.max
-                              ? ` ${multiplicityAssist.obsLeftToRight.min} `
-                              : ` ${multiplicityAssist.obsLeftToRight.min}〜${multiplicityAssist.obsLeftToRight.max} `}
-                          </span>
-                          個でした．（よく使う候補なら「{multiplicityAssist.obsLeftToRight.rec}」）
-                        </div>
-                      )}
-
-                      <div className="mt-3 font-semibold text-slate-700">
-                        ② {multiplicityAssist?.rightName ?? "（右）"} から見て {multiplicityAssist?.leftName ?? "（左）"} は？
-                        <span className="ml-2 text-slate-500 font-normal">（左の欄，→ の左に入ります．）</span>
-                      </div>
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {["1", "0..1", "0..*", "1..*"].map((v) => (
-                          <button
-                            key={v}
-                            type="button"
-                            className="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-[11px]"
-                            onClick={() => handleUpdateRelation(selectedRelation.id, { leftMultiplicity: v })}
-                          >
-                            {v}
-                          </button>
-                        ))}
-                        <span className="ml-1 text-slate-500">
-                          現在選択中：{selectedRelation.leftMultiplicity ? selectedRelation.leftMultiplicity : "（未入力）"}
-                        </span>
-                      </div>
-
-                      {multiplicityAssist && multiplicityAssist.obsRightToLeft && (
-                        <div className="mt-1 text-slate-600">
-                          ODの例では，{multiplicityAssist.rightName} 1つから見て {multiplicityAssist.leftName} は
-                          <span className="font-semibold">
-                            {multiplicityAssist.obsRightToLeft.min === multiplicityAssist.obsRightToLeft.max
-                              ? ` ${multiplicityAssist.obsRightToLeft.min} `
-                              : ` ${multiplicityAssist.obsRightToLeft.min}〜${multiplicityAssist.obsRightToLeft.max} `}
-                          </span>
-                          個でした．（よく使う候補なら「{multiplicityAssist.obsRightToLeft.rec}」）
-                        </div>
-                      )}
-
-                      <div className="mt-2 text-slate-500">
-                        ※ OD は具体例なので，最終的には問題文の条件（必ず，0でもよい，複数，など）を優先してください．
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </ul>
-
-              {/* ===== OD→CD 連携の追加ヒント ===== */}
-              {odLinkSummary && (
-                <div className="mt-3 border-t pt-3">
-                  <div className="mt-3 font-semibold text-slate-700 mb-1">OD（オブジェクト図）からの手がかり</div>
-                  <div className="text-slate-600">
-                    <div>
-                      <span className="font-semibold">ODのリンク</span>：{odLinkSummary.totalValidLinks} 本（端点が有効なもの）
-                    </div>
-                    <div className="mt-0.5">
-                      <span className="font-semibold">ODの「関係の種類」</span>：{odLinkSummary.endpointKindCount} 種
-                      <span className="text-slate-500">（端点ペアごと）</span>
-                    </div>
-                    <div className="mt-0.5">
-                      <span className="font-semibold">このクラス図の関連</span>：{odLinkSummary.cdRelationCount} 本 ／
-                      <span className="font-semibold"> 端点ペア</span>：{odLinkSummary.cdEndpointKindCount} 種
-                    </div>
-
-                    {odLinkSummary.endpointKindsTop.length > 0 && (
-                      <div className="mt-2">
-                        <div className="font-semibold text-slate-700">ODリンクの集計（どの組み合わせが多いか）</div>
-                        <div className="mt-1 text-[11px] text-slate-600">
-                          ODでつないだオブジェクト同士を，「名前の最後につく番号や記号（A，1 など）を除いて」同じ種類としてまとめ
-                          ています．頻出する組み合わせは，クラス図の関連名の候補になります．
-                        </div>
-                        <ul className="list-disc pl-5 space-y-0.5 mt-1">
-                          {odLinkSummary.endpointKindsTop.map((e) => {
-                            const hint = odLinkSummary.hintsByEndpoint.get(e.key);
-                            return (
-                              <li key={e.key}>
-                                <span className="font-semibold">{e.pretty}</span>：{e.count} 回
-                                {hint && hint.labels.length > 0 && (
-                                  <span className="text-slate-600">
-                                    {" "}
-                                    ／ 関連名候補：{hint.labels.map((x) => x.label).join(" / ")}
-                                  </span>
-                                )}
-                                {!hint && e.topLabels.length > 0 && (
-                                  <span className="text-slate-600">
-                                    {" "}
-                                    ／ ラベル：{e.topLabels.map((x) => x.label).join(" / ")}
-                                  </span>
-                                )}
-                              </li>
-                            );
-                          })}
-                        </ul>
-                        <div className="mt-1 text-slate-500">
-                          ※ これは「答えの強制」ではなく，検討の材料です．根拠があってODと違う設計にするなら，そのままでも構いません．
-                        </div>
-                      </div>
-                    )}
-
-                    {odLinkSummary.labelTop.length > 0 && (
-                      <div className="mt-3">
-                        <div className="font-semibold text-slate-700">ODリンクから推定された関連ラベル</div>
-                        <div className="mt-1 text-[11px] text-slate-600">
-                          ODで同じ意味のラベルが繰り返し出ている場合，クラス図の関連名の候補になります（そのまま使っても，言い換えてもOKです）．
-                        </div>
-                        <ul className="list-disc pl-5 space-y-0.5 mt-1">
-                          {odLinkSummary.labelTop.map((x) => (
-                            <li key={x.label}>
-                              <span className="font-semibold">{x.label}</span>：{x.count} 回
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
-                    {odLinkSummary.convertHintsTop.length > 0 && (
-                      <div className="mt-3">
-                        <div className="font-semibold text-slate-700">推定クラス図の関係ヒント</div>
-                        <div className="mt-1 text-[11px] text-slate-600">
-                          変換結果（推定クラス図）の傾向です．
-                        </div>
-                        <ul className="list-disc pl-5 space-y-0.5 mt-1">
-                          {odLinkSummary.convertHintsTop.map((x, idx) => (
-                            <li key={idx}>
-                              <span className="font-semibold">{x.pretty}</span>：{x.label}（{x.count}）
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <div className="text-[11px] text-slate-600">OD拡大</div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="range"
+                      min={0.4}
+                      max={1.8}
+                      step={0.05}
+                      value={odZoom}
+                      onChange={(e) => setOdZoom(Number(e.target.value))}
+                      className="w-40"
+                      aria-label="ODズーム"
+                    />
+                    <span className="w-10 text-right text-[11px] text-slate-600">{Math.round(odZoom * 100)}%</span>
                   </div>
                 </div>
-              )}
 
-              {!odLinkSummary && (
-                <div className="mt-3 border-t pt-3 text-slate-500">
-                  ODのスナップショットが見つからなかったため，OD由来のヒントは表示していません．
+                <div className="border rounded bg-slate-50 p-2 overflow-auto">
+                  {odPreviewUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <div style={{ zoom: odZoom }} className="inline-block origin-top-left">
+                      <img src={odPreviewUrl} alt="オブジェクト図（OD）" className="block max-w-none h-auto" />
+                    </div>
+                  ) : (
+                    <div className="h-[180px] flex items-center justify-center text-[12px] text-slate-500">
+                      オブジェクト図（OD）のスナップショットが見つからないため表示できません．
+                    </div>
+                  )}
                 </div>
-              )}
+              </div>
             </div>
           </div>
+
         </div>
       </div>
     </div>

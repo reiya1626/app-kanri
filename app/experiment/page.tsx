@@ -214,14 +214,18 @@ const normalizeObjectLabel = (raw: string) => {
   return left.replace(/^"+|"+$/g, "").trim();
 };
 
-// 末尾番号などを落としてベース名化（例：学生1→学生）
+// ベース名化（＝診断で使うオブジェクト名のキー）
+//
+// 以前は「学生1→学生」のように末尾番号などを削除して同一視していましたが、
+// 正答例との“完全一致”を見たい用途では個体が混ざって診断が曖昧になります。
+// そのため、ここでは末尾番号などの削除は行わず、表示上のノイズだけ除去します。
+//
+// - HTMLタグ除去
+// - 前後空白の除去
+// - 「:」以降の除去（"学生: インスタンス" → "学生" のような表記を吸収）
+// - 両端の " を除去
 const baseNameForAssist = (name: string) => {
-  let s = normalizeObjectLabel(name);
-  s = s.replace(/[0-9]+$/g, "");
-  s = s.replace(/[０-９]+$/g, "");
-  s = s.replace(/[A-Za-z]+[0-9]+$/g, "");
-  s = s.replace(/[_\-\s]+$/g, "");
-  return s.trim();
+  return normalizeObjectLabel(name);
 };
 
 const normalizeLinkLabel = (raw: string) => {
@@ -587,13 +591,29 @@ const AssistHeader: React.FC<{
   enabled: boolean;
   collapsed: boolean;
   onToggle: () => void;
+  onDiagnose?: () => void;
+  diagnoseLabel?: string;
   rightText?: string;
-}> = ({ title, enabled, collapsed, onToggle, rightText }) => {
+}> = ({ title, enabled, collapsed, onToggle, rightText, onDiagnose, diagnoseLabel }) => {
   return (
     <div className="sticky top-0 z-10 bg-slate-50 p-2 border-b">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <span className="font-semibold text-[12px]">{title}</span>
+          <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="text-[11px] px-2 py-0.5 border rounded bg-white hover:bg-slate-100 disabled:opacity-60"
+            onClick={() => {
+              if (!enabled) return;
+              onDiagnose?.();
+            }}
+            disabled={!enabled}
+            title="クリックして診断"
+          >
+            {diagnoseLabel ?? title}
+          </button>
+          <span className="text-[11px] text-slate-600">{title}</span>
+        </div>
           <button
             type="button"
             className="text-[11px] px-2 py-0.5 border rounded bg-white hover:bg-slate-100"
@@ -642,7 +662,8 @@ const HintCard: React.FC<{
     disabled?: boolean;
     title?: string;
   };
-}> = ({ title, subtitle, countText, stateBadge, primary, rescue }) => {
+  primaryLeft?: React.ReactNode;
+}> = ({ title, subtitle, countText, stateBadge, primary, rescue, primaryLeft }) => {
   const toneBar =
     stateBadge?.tone === "emerald"
       ? "bg-emerald-400"
@@ -701,6 +722,9 @@ const HintCard: React.FC<{
 
             {/* 3行目：操作（主ボタン＋救済リンク） */}
             <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+              {primaryLeft && (
+                <div className="flex flex-wrap items-center gap-1">{primaryLeft}</div>
+              )}
               <div className="relative group">
                 <button
                   type="button"
@@ -743,7 +767,7 @@ const HintCard: React.FC<{
 // ===== メイン =====
 const ExperimentPage: React.FC = () => {
   const router = useRouter();
-  const { classProblemText, objectProblemText, objectAnswerPuml } =
+  const { objectProblemText, objectAnswerPuml } =
     useProblemConfig();
 
   // --- オブジェクト／リンクの状態 ---
@@ -1147,7 +1171,7 @@ const ExperimentPage: React.FC = () => {
     objRevealExtra >= objExtraBasesForReveal.length;
 
   const objExtraPrimaryDisabledReason = useMemo(() => {
-    if (!objChecked) return "まず「オブジェクトを診断する」を押してください。";
+    if (!objChecked) return "まず上の「OD作成アシスト（オブジェクト）」をクリックして診断してください。";
     if (objExtraBasesForReveal.length === 0) return "差分がありません。";
     if (objExtraRevealAllShown) return "表示済みです。";
     if (!objDirtySinceHint) return "診断後に修正すると表示できます。";
@@ -1170,7 +1194,7 @@ const ExperimentPage: React.FC = () => {
   }, [slotDiffsForShow]);
 
   const objSlotPrimaryDisabledReason = useMemo(() => {
-    if (!objChecked) return "まず「オブジェクトを診断する」を押してください。";
+    if (!objChecked) return "まず上の「OD作成アシスト（オブジェクト）」をクリックして診断してください。";
     if (!slotDiffHasAny) return "差分がありません。";
     if (objRevealSlotDiff) return "表示済みです。";
     if (!objSlotDiffDirtySinceHint) return "診断後に修正すると表示できます。";
@@ -1353,7 +1377,7 @@ const ExperimentPage: React.FC = () => {
   // 「正答例と異なるインスタンス名」：修正後に表示（通常ルート）
   const handleObjRevealExtraAfterEdit = () => {
     if (!objChecked)
-      return alert("まず「オブジェクトを診断する」を押してください。");
+      return alert("まず上の「OD作成アシスト（オブジェクト）」をクリックして診断してください。");
     if (objExtraBasesForReveal.length === 0) return;
     if (objRevealExtra >= objExtraBasesForReveal.length) return;
     if (!objDirtySinceHint) return;
@@ -1367,7 +1391,7 @@ const ExperimentPage: React.FC = () => {
   // 「正答例と異なるインスタンス名」：救済リンク（confirm）
   const handleObjRevealExtraNow = () => {
     if (!objChecked)
-      return alert("まず「オブジェクトを診断する」を押してください。");
+      return alert("まず上の「OD作成アシスト（オブジェクト）」をクリックして診断してください。");
     if (objExtraBasesForReveal.length === 0) return;
     if (objRevealExtra >= objExtraBasesForReveal.length) return;
 
@@ -1385,7 +1409,7 @@ const ExperimentPage: React.FC = () => {
   // 「スロット名（正答例と異なる入力）」：修正後に表示（通常ルート）
   const handleObjRevealSlotDiffAfterEdit = () => {
     if (!objChecked)
-      return alert("まず「オブジェクトを診断する」を押してください。");
+      return alert("まず上の「OD作成アシスト（オブジェクト）」をクリックして診断してください。");
     if (!objDiagnoseSnapshot) return;
     if ((objDiagnoseSnapshot.slotDiffs?.length ?? 0) === 0) return;
     if (objRevealSlotDiff) return;
@@ -1400,7 +1424,7 @@ const ExperimentPage: React.FC = () => {
   // 「スロット名（正答例と異なる入力）」：救済リンク（confirm）
   const handleObjRevealSlotDiffNow = () => {
     if (!objChecked)
-      return alert("まず「オブジェクトを診断する」を押してください。");
+      return alert("まず上の「OD作成アシスト（オブジェクト）」をクリックして診断してください。");
     if (!objDiagnoseSnapshot) return;
     if ((objDiagnoseSnapshot.slotDiffs?.length ?? 0) === 0) return;
     if (objRevealSlotDiff) return;
@@ -1472,7 +1496,7 @@ const ExperimentPage: React.FC = () => {
 
   // リンク：修正後に差分表示（通常ルート）
   const handleLinkRevealNextExtra = () => {
-    if (!linkChecked) return alert("まず「リンクを診断する」を押してください。");
+    if (!linkChecked) return alert("まず上の「OD作成アシスト（リンク）」をクリックして診断してください。");
     if (linkExtraLinksForReveal.length === 0) return;
     if (!linkDirtySinceHint) return;
     if (linkRevealExtra >= linkExtraLinksForReveal.length) return;
@@ -1485,7 +1509,7 @@ const ExperimentPage: React.FC = () => {
 
   // リンク：救済リンク（confirm）
   const handleLinkRevealNextExtraForce = () => {
-    if (!linkChecked) return alert("まず「リンクを診断する」を押してください。");
+    if (!linkChecked) return alert("まず上の「OD作成アシスト（リンク）」をクリックして診断してください。");
     if (linkExtraLinksForReveal.length === 0) return;
     if (linkRevealExtra >= linkExtraLinksForReveal.length) return;
 
@@ -1908,7 +1932,7 @@ const ExperimentPage: React.FC = () => {
   }, [linkChecked, linkExtraLinksForReveal.length, linkExtraAllShown, linkDirtySinceHint]);
 
   const linkPrimaryDisabledReason = useMemo(() => {
-    if (!linkChecked) return "まず「リンクを診断する」を押してください。";
+    if (!linkChecked) return "まず上の「OD作成アシスト（リンク）」をクリックして診断してください。";
     if (linkExtraLinksForReveal.length === 0) return "差分がありません。";
     if (linkExtraAllShown) return "表示済みです。";
     if (!linkDirtySinceHint) return "診断後に修正すると表示できます。";
@@ -1974,27 +1998,7 @@ const ExperimentPage: React.FC = () => {
       <div className="flex flex-1 overflow-hidden">
         {/* 左：問題文 */}
         <div className="w-1/4 min-w-[260px] border-r bg-white flex flex-col overflow-y-auto">
-          <div className="p-2 border-b font-semibold text-sm">要求文</div>
 
-          <div className="p-2 border-b text-xs flex flex-col gap-1">
-            <div className="flex items-center justify-between">
-              <span className="font-semibold">クラス図作成問題文</span>
-              <button
-                className="text-[10px] px-2 py-0.5 border rounded hover:bg-slate-100"
-                onClick={() => setShowClassProblemFull((v) => !v)}
-              >
-                {showClassProblemFull ? "本文を折りたたむ" : "本文を表示"}
-              </button>
-            </div>
-            <div
-              className={
-                "mt-1 whitespace-pre-wrap text-[11px] leading-relaxed border rounded bg-slate-50 px-2 py-1 " +
-                (showClassProblemFull ? "" : "max-h-[80px] overflow-hidden")
-              }
-            >
-              {classProblemText}
-            </div>
-          </div>
 
           <div className="p-2 text-xs flex flex-col gap-1 flex-1">
             <div className="flex items-center justify-between">
@@ -2044,6 +2048,8 @@ const ExperimentPage: React.FC = () => {
                 enabled={objAssist.enabled}
                 collapsed={objAssistCollapsed}
                 onToggle={() => setObjAssistCollapsed((v) => !v)}
+                onDiagnose={handleObjDiagnose}
+                diagnoseLabel="オブジェクトを診断する"
                 rightText={
                   objAssist.enabled && objChecked
                     ? `正答に含まれる：${objInputMatched}/${objInputTotal}　正答にない：${objInputUnmatched}/${objInputTotal}　正答にあるが未入力：${objMissingCount}　正答例と一致しない候補：${objExtraCount}`
@@ -2053,20 +2059,10 @@ const ExperimentPage: React.FC = () => {
 
               {!objAssistCollapsed && objAssist.enabled && (
                 <div className="p-2 space-y-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      className="px-3 py-1 text-[11px] rounded bg-slate-100 hover:bg-slate-200"
-                      onClick={handleObjDiagnose}
-                    >
-                      オブジェクトを診断する
-                    </button>
-
-                    <div className="text-[10px] text-slate-500">
+                  <div className="text-[10px] text-slate-500">
                       基本は「診断 → 修正 → 差分表示」です（詰まったら下のリンクから差分を先に表示できます）
                     </div>
-                  </div>
-
-                  {/* ★ 見やすいヒントカード 2枚 */}
+{/* ★ 見やすいヒントカード 2枚 */}
                   <HintCard
                     title="正答例と異なるインスタンス名（候補）"
                     subtitle="あなたの入力に含まれるインスタンス名のうち、正答例に含まれない可能性があるものを表示します。"
@@ -2076,6 +2072,15 @@ const ExperimentPage: React.FC = () => {
                         : undefined
                     }
                     stateBadge={badgeForExtra}
+                    primaryLeft={
+                      objChecked ? (
+                        <>
+                          <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px]">一致 {objInputMatched}/{objInputTotal}</span>
+                          <span className="px-2 py-0.5 rounded bg-red-50 text-red-700 border border-red-200 text-[10px]">不一致 {objInputUnmatched}/{objInputTotal}</span>
+                          <span className="px-2 py-0.5 rounded bg-slate-50 text-slate-700 border border-slate-200 text-[10px]">正答例にあるが未入力 {objMissingCount}</span>
+                        </>
+                      ) : undefined
+                    }
                     primary={{
                       label: "差分を表示",
                       onClick: handleObjRevealExtraAfterEdit,
@@ -2124,6 +2129,21 @@ const ExperimentPage: React.FC = () => {
                         : undefined
                     }
                     stateBadge={badgeForSlot}
+                    primaryLeft={
+                      objChecked ? (
+                        <>
+                          <span className="px-2 py-0.5 rounded border bg-emerald-50 border-emerald-200 text-[10px]">
+                            一致 {objSlotMatchedTotal}/{objSlotRequiredTotal}
+                          </span>
+                          <span className="px-2 py-0.5 rounded border bg-rose-50 border-rose-200 text-[10px]">
+                            不一致 {objSlotMissingTotal}
+                          </span>
+                          <span className="px-2 py-0.5 rounded border bg-slate-50 border-slate-200 text-[10px]">
+                            正答例にあるが未入力 {slotDiffTotalKeys}
+                          </span>
+                        </>
+                      ) : null
+                    }
                     primary={{
                       label: "差分を表示",
                       onClick: handleObjRevealSlotDiffAfterEdit,
@@ -2174,54 +2194,6 @@ const ExperimentPage: React.FC = () => {
 
                       <div className="mt-2 text-slate-500">
                         ※ これは「スロット名（キー）」のみの差分です（値は評価しません）。
-                      </div>
-                    </div>
-                  )}
-                  {/* 診断サマリ */}
-                  {!objChecked ? (
-                    <div className="text-[11px] text-slate-600">
-                      ※ 「オブジェクトを診断する」で、入力したインスタンス名が正答例に含まれるかどうかを確認できます。
-                    </div>
-                  ) : (
-                    <div className="text-[11px] text-slate-600">
-                      <div>
-                        <span className="font-semibold">入力（インスタンス名）</span>：
-                        正答に含まれる{" "}
-                        <span className="font-semibold">{objInputMatched}</span>/
-                        {objInputTotal}　 正答にない{" "}
-                        <span className="font-semibold">{objInputUnmatched}</span>/
-                        {objInputTotal}
-                      </div>
-
-                      <div className="mt-1">
-                        <span className="font-semibold">正答にあるが未入力</span>：
-                        <span className="font-semibold">{objMissingCount}</span>{" "}
-                        件{" "}
-                        <span className="text-slate-500">
-                          （具体名は表示しません）
-                        </span>
-                      </div>
-
-                      {objSlotRequiredTotal > 0 && (
-                        <div className="mt-1">
-                          <span className="font-semibold">スロット名</span>{" "}
-                          <span className="text-slate-500">
-                            （正答に含まれるインスタンスだけ）
-                          </span>
-                          ： 一致{" "}
-                          <span className="font-semibold">
-                            {objSlotMatchedTotal}
-                          </span>
-                          /{objSlotRequiredTotal}　 一致しない{" "}
-                          <span className="font-semibold">
-                            {objSlotMissingTotal}
-                          </span>
-                          /{objSlotRequiredTotal}
-                        </div>
-                      )}
-
-                      <div className="mt-1 text-slate-500">
-                        ※ 表示はあくまでヒントです。根拠があって正答例と異なる要素を入れているなら、そのままでもOKです。
                       </div>
                     </div>
                   )}
@@ -2469,6 +2441,8 @@ const ExperimentPage: React.FC = () => {
                 enabled={linkAssist.enabled}
                 collapsed={linkAssistCollapsed}
                 onToggle={() => setLinkAssistCollapsed((v) => !v)}
+                onDiagnose={handleLinkDiagnose}
+                diagnoseLabel="リンクを診断する"
                 rightText={
                   linkAssist.enabled && linkChecked
                     ? `正答に含まれる：${linkInputMatched}/${linkInputTotal}　正答にない：${linkInputUnmatched}/${linkInputTotal}　正答にあるが未入力：${linkMissingCount}　正答例と一致しない候補：${linkExtraCount}`
@@ -2478,26 +2452,31 @@ const ExperimentPage: React.FC = () => {
 
               {!linkAssistCollapsed && linkAssist.enabled && (
                 <div className="p-2 space-y-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      className="px-3 py-1 text-[11px] rounded bg-slate-100 hover:bg-slate-200"
-                      onClick={handleLinkDiagnose}
-                    >
-                      リンクを診断する
-                    </button>
-
-                    <div className="text-[10px] text-slate-500">
+                  <div className="text-[10px] text-slate-500">
                       基本は「診断 → 修正 → 差分表示」です（詰まったら下のリンクから差分を先に表示できます）
                     </div>
-                  </div>
-
-                  <HintCard
+<HintCard
                     title="正答例と異なるリンク（候補）"
                     subtitle="あなたの入力に含まれるリンクのうち、正答例に含まれない可能性があるものを表示します（端点のみ判定／ラベルは任意）。"
                     countText={
                       linkChecked ? `候補：${linkExtraLinksForReveal.length}` : undefined
                     }
                     stateBadge={badgeForLinkExtra}
+                    primaryLeft={
+                      linkChecked ? (
+                        <>
+                          <span className="px-2 py-0.5 rounded border bg-emerald-50 border-emerald-200 text-[10px]">
+                            一致 {linkInputMatched}/{linkInputTotal}
+                          </span>
+                          <span className="px-2 py-0.5 rounded border bg-rose-50 border-rose-200 text-[10px]">
+                            不一致 {linkInputUnmatched}/{linkInputTotal}
+                          </span>
+                          <span className="px-2 py-0.5 rounded border bg-slate-50 border-slate-200 text-[10px]">
+                            不足 {linkMissingCount}
+                          </span>
+                        </>
+                      ) : null
+                    }
                     primary={{
                       label: "差分を表示",
                       onClick: handleLinkRevealNextExtra,
