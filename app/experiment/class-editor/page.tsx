@@ -592,6 +592,87 @@ const ClassEditorPage: React.FC = () => {
   const selectedClass = classes.find((c) => c.id === selectedClassId) ?? null;
   const selectedRelation = relations.find((r) => r.id === selectedRelationId) ?? null;
 
+  // ===== 多重度編集パネル表示時：OD（具体例）からのヒント =====
+  // 目的：多重度カードを考える材料として，OD上の「どのインスタンス同士が何本つながっているか」を表示する
+  // - まず「選択中の関連ラベル」がある場合はそのラベルで OD リンクを絞る
+  // - 絞れない場合は OD 全リンクから代表例（最頻の端点）を表示する
+  const odMultiplicityCardHint = useMemo(() => {
+    if (!selectedRelation) return null;
+    if (!odObjects?.length || !odLinks?.length) return null;
+
+    const objById = new Map<string, Obj>(odObjects.map((o) => [o.id, o]));
+
+    type Row = {
+      a: string;
+      b: string;
+      key: string;
+      labelRaw: string;
+      labelNorm: string;
+    };
+
+    const toName = (o: Obj) => normalizeObjectLabel(o.name ?? "");
+    const toLabelRaw = (s: string) => stripHtmlTags(String(s ?? "")).trim();
+    const targetLabelNorm = normalizeLinkLabel(selectedRelation.label ?? "");
+
+    const all: Row[] = [];
+    for (const l of odLinks) {
+      const aObj = objById.get(l.from);
+      const bObj = objById.get(l.to);
+      if (!aObj || !bObj) continue;
+
+      const a = toName(aObj);
+      const b = toName(bObj);
+      if (!a || !b) continue;
+
+      const x = a <= b ? a : b;
+      const y = a <= b ? b : a;
+      const labelRaw = toLabelRaw(l.label ?? "");
+      const labelNorm = normalizeLinkLabel(labelRaw);
+      all.push({ a: x, b: y, key: `${x}||${y}`, labelRaw, labelNorm });
+    }
+    if (all.length === 0) return null;
+
+    let filtered: Row[] = all;
+    let usedLabelFilter = false;
+    if (targetLabelNorm) {
+      const byLabel = all.filter((r) => r.labelNorm === targetLabelNorm);
+      if (byLabel.length > 0) {
+        filtered = byLabel;
+        usedLabelFilter = true;
+      }
+    }
+
+    const totalLinks = filtered.length;
+    // 代表例（最頻の端点）
+    const byEndpoint = new Map<string, { a: string; b: string; count: number; labels: Map<string, number> }>();
+    for (const r of filtered) {
+      const cur = byEndpoint.get(r.key) ?? { a: r.a, b: r.b, count: 0, labels: new Map<string, number>() };
+      cur.count += 1;
+      if (r.labelRaw) cur.labels.set(r.labelRaw, (cur.labels.get(r.labelRaw) ?? 0) + 1);
+      byEndpoint.set(r.key, cur);
+    }
+
+    const sortedEndpoints = Array.from(byEndpoint.values()).sort(
+      (p, q) => q.count - p.count || `${p.a}—${p.b}`.localeCompare(`${q.a}—${q.b}`, "ja")
+    );
+    const top = sortedEndpoints[0];
+    if (!top) return null;
+
+    const topLabels = Array.from(top.labels.entries())
+      .map(([label, count]) => ({ label, count }))
+      .sort((p, q) => q.count - p.count || p.label.localeCompare(q.label, "ja"))
+      .slice(0, 4);
+
+    return {
+      endpointA: top.a,
+      endpointB: top.b,
+      totalLinks,
+      topLabels,
+      usedLabelFilter,
+      targetLabel: toLabelRaw(selectedRelation.label ?? ""),
+    };
+  }, [selectedRelation, odObjects, odLinks]);
+
   // ===== 選択中の関連：多重度ヒント =====
   const multiplicityAssist = useMemo(() => {
     if (!selectedRelation) return null;
@@ -1055,10 +1136,43 @@ const ClassEditorPage: React.FC = () => {
                 <div className="text-[12px] font-semibold mb-1">多重度の編集</div>
                 <div className="border rounded bg-white flex-1 p-2 overflow-auto">
                   {selectedRelation ? (
-                    <div className="text-[11px] leading-relaxed">
+                    (() => {
+                      const rel = selectedRelation; // null ではないことを TS に伝える
+                      return (
+                        <div className="text-[11px] leading-relaxed">
                       <div className="font-semibold text-slate-700 mb-2">
                         選択中の関連の多重度（左右をそれぞれ設定）
                       </div>
+
+                      {odMultiplicityCardHint && (
+                        <div className="mb-3 p-2 rounded border bg-slate-50">
+                          <div className="font-semibold text-slate-700">OD（具体例）からのヒント</div>
+                          <div className="mt-1 text-slate-700">
+                            端点：<span className="font-semibold">{odMultiplicityCardHint.endpointA}</span> —{" "}
+                            <span className="font-semibold">{odMultiplicityCardHint.endpointB}</span>
+                          </div>
+                          <div className="text-slate-700">
+                            リンク総数：<span className="font-semibold">{odMultiplicityCardHint.totalLinks}</span>
+                          </div>
+                          <div className="text-slate-700">
+                            ラベル：{" "}
+                            {odMultiplicityCardHint.topLabels.length > 0 ? (
+                              <span className="font-semibold">
+                                {odMultiplicityCardHint.topLabels
+                                  .map((x) => `${x.label}${x.count > 1 ? `(${x.count})` : ""}`)
+                                  .join(" / ")}
+                              </span>
+                            ) : (
+                              <span className="font-semibold">（ラベルなし）</span>
+                            )}
+                          </div>
+                          {odMultiplicityCardHint.targetLabel && !odMultiplicityCardHint.usedLabelFilter && (
+                            <div className="mt-1 text-[10px] text-slate-500">
+                              ※ ラベル「{odMultiplicityCardHint.targetLabel}」に一致するODリンクが見つからなかったため，OD全体から代表例を表示しています．
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       <div className="font-semibold text-slate-700">
                         ① {multiplicityAssist?.leftName ?? "（左）"} から見て {multiplicityAssist?.rightName ?? "（右）"} は？
@@ -1069,16 +1183,16 @@ const ClassEditorPage: React.FC = () => {
                           <button
                             key={v}
                             type="button"
-                            aria-pressed={v === selectedRelation.rightMultiplicity}
+                            aria-pressed={v === rel.rightMultiplicity}
                             className={
                               "px-2 py-0.5 rounded text-[11px] border transition-colors " +
-                              (v === selectedRelation.rightMultiplicity
+                              (v === rel.rightMultiplicity
                                 ? "bg-sky-200 border-sky-400 font-semibold"
                                 : "bg-slate-100 border-slate-200 hover:bg-slate-200")
                             }
                             onClick={() => {
                               markMultiplicityEditing();
-                              handleUpdateRelation(selectedRelation.id, { rightMultiplicity: v });
+                              handleUpdateRelation(rel.id, { rightMultiplicity: v });
                             }}
                           >
                             {v}
@@ -1095,16 +1209,16 @@ const ClassEditorPage: React.FC = () => {
                           <button
                             key={v}
                             type="button"
-                            aria-pressed={v === selectedRelation.leftMultiplicity}
+                            aria-pressed={v === rel.leftMultiplicity}
                             className={
                               "px-2 py-0.5 rounded text-[11px] border transition-colors " +
-                              (v === selectedRelation.leftMultiplicity
+                              (v === rel.leftMultiplicity
                                 ? "bg-sky-200 border-sky-400 font-semibold"
                                 : "bg-slate-100 border-slate-200 hover:bg-slate-200")
                             }
                             onClick={() => {
                               markMultiplicityEditing();
-                              handleUpdateRelation(selectedRelation.id, { leftMultiplicity: v });
+                              handleUpdateRelation(rel.id, { leftMultiplicity: v });
                             }}
                           >
                             {v}
@@ -1113,9 +1227,11 @@ const ClassEditorPage: React.FC = () => {
                       </div>
 
                       <div className="mt-3 text-[11px] text-slate-600">
-                        右下の OD（具体例）を見ながら，「1つに対して相手が何個か」を数えて決めます．
+                        上の OD（具体例）ヒントを見ながら，「1つに対して相手が何個か」を数えて決めます．
                       </div>
-                    </div>
+                        </div>
+                      );
+                    })()
                   ) : (
                     <div className="h-full flex items-center justify-center text-[12px] text-slate-500">
                       関連（線）を1本クリックして選択すると，ここで多重度を編集できます．

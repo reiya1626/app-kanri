@@ -16,7 +16,14 @@ export function ManualObjectsForm({
   const handleAdd = () => {
     if (!name.trim()) return;
     // Obj 型に合わせて { name, type } を追加
-    setObjects([...objects, { name, type }]);
+    setObjects([
+      ...objects, 
+      { 
+        id: crypto.randomUUID(),
+        name, 
+        type 
+      }
+    ]);
     setName("");
     setType("");
   };

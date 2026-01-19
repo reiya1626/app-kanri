@@ -7,6 +7,7 @@ export type Scenario = {
   id: string;
   classProblemText: string;
   objectProblemText: string;
+  problemText: string;
   // 追加
   status: "draft" | "published";
   createdAt: string;
@@ -23,9 +24,11 @@ export type Attr = {
 };
 
 export type Obj = {
+  id: string;
   name: string;
   type?: string;   
   attrs?: Attr[];
+  source?: string;
 };
 
 export type Link = {

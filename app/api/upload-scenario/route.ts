@@ -11,6 +11,7 @@ export async function POST(req: Request) {
     id,
     classProblemText: body.classProblemText || "",
     objectProblemText: body.objectProblemText || "",
+    problemText: body.problemText || "",
     status: body.status ?? "draft",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
