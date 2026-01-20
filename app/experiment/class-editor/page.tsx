@@ -1,7 +1,7 @@
 // app/experiment/class-editor/page.tsx
 "use client";
 
-import React, { useEffect, useMemo, useState, type ReactNode } from "react";
+import React, { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import plantumlEncoder from "plantuml-encoder";
 import { useProblemConfig } from "../../../components/problem-config";
@@ -47,6 +47,8 @@ type EditorPayload = {
   snapshot?: { objects: Obj[]; links: Link[] };
 };
 
+type MultiplicityPick = { side: "left" | "right"; value: "0..1" | "1" | "0..*" | "1..*" };
+
 // ===== 定数 =====
 const STORAGE_KEY_EDITOR_STATE = "EXPERIMENT_CLASS_EDITOR_STATE_V1";
 const STORAGE_KEY_EDITOR_INITIAL = "EXPERIMENT_CLASS_EDITOR_INITIAL";
@@ -54,16 +56,54 @@ const STORAGE_KEY_EDITOR_INITIAL = "EXPERIMENT_CLASS_EDITOR_INITIAL";
 // ★ 多重度は4択で確実に選択できるように固定
 const MULT4 = ["0..1", "1", "0..*", "1..*"] as const;
 
-// ===== UI 小物：? ヘルプ（title で説明を表示） =====
-const HelpBadge = ({ text }: { text: string }) => (
-  <span
-    className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-slate-100 text-slate-600 text-[10px] cursor-help select-none"
-    title={text}
-    aria-label={text}
-  >
-    ?
-  </span>
-);
+// ===== UI 小物：? ヘルプ（クリックで説明を表示） =====
+// 画面録画などで「ホバー状態」が拾えないことがあるため、クリックで開閉する。
+const HelpBadge = ({ text }: { text: string }) => {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLSpanElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const onDown = (e: MouseEvent) => {
+      const el = wrapRef.current;
+      if (!el) return;
+      if (!el.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <span ref={wrapRef} className="relative inline-flex">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-slate-100 text-slate-600 text-[10px] cursor-pointer select-none"
+        aria-label="用語の説明"
+        aria-expanded={open}
+      >
+        ?
+      </button>
+      {open && (
+        <div
+          role="tooltip"
+          className="absolute left-0 top-full mt-1 z-30 w-[320px] max-w-[80vw] whitespace-pre-wrap rounded border bg-white px-2 py-1 text-[11px] text-slate-700 shadow"
+        >
+          {text}
+        </div>
+      )}
+    </span>
+  );
+};
 
 // 簡易ID生成
 const makeId = () => Math.random().toString(36).slice(2);
@@ -394,6 +434,9 @@ const ClassEditorPage: React.FC = () => {
   const [selectedRelationId, setSelectedRelationId] = useState<string | null>(null);
   const [encodedPuml, setEncodedPuml] = useState<string>("");
 
+  // 直前に選択した多重度カード（どちら側の多重度を考えているかの文脈に使う）
+  const [lastMultiplicityPick, setLastMultiplicityPick] = useState<MultiplicityPick | null>(null);
+
   // ===== OD→CD 連携（ODページから渡されたスナップショット） =====
   const [odObjects, setOdObjects] = useState<Obj[]>([]);
   const [odLinks, setOdLinks] = useState<Link[]>([]);
@@ -592,87 +635,6 @@ const ClassEditorPage: React.FC = () => {
   const selectedClass = classes.find((c) => c.id === selectedClassId) ?? null;
   const selectedRelation = relations.find((r) => r.id === selectedRelationId) ?? null;
 
-  // ===== 多重度編集パネル表示時：OD（具体例）からのヒント =====
-  // 目的：多重度カードを考える材料として，OD上の「どのインスタンス同士が何本つながっているか」を表示する
-  // - まず「選択中の関連ラベル」がある場合はそのラベルで OD リンクを絞る
-  // - 絞れない場合は OD 全リンクから代表例（最頻の端点）を表示する
-  const odMultiplicityCardHint = useMemo(() => {
-    if (!selectedRelation) return null;
-    if (!odObjects?.length || !odLinks?.length) return null;
-
-    const objById = new Map<string, Obj>(odObjects.map((o) => [o.id, o]));
-
-    type Row = {
-      a: string;
-      b: string;
-      key: string;
-      labelRaw: string;
-      labelNorm: string;
-    };
-
-    const toName = (o: Obj) => normalizeObjectLabel(o.name ?? "");
-    const toLabelRaw = (s: string) => stripHtmlTags(String(s ?? "")).trim();
-    const targetLabelNorm = normalizeLinkLabel(selectedRelation.label ?? "");
-
-    const all: Row[] = [];
-    for (const l of odLinks) {
-      const aObj = objById.get(l.from);
-      const bObj = objById.get(l.to);
-      if (!aObj || !bObj) continue;
-
-      const a = toName(aObj);
-      const b = toName(bObj);
-      if (!a || !b) continue;
-
-      const x = a <= b ? a : b;
-      const y = a <= b ? b : a;
-      const labelRaw = toLabelRaw(l.label ?? "");
-      const labelNorm = normalizeLinkLabel(labelRaw);
-      all.push({ a: x, b: y, key: `${x}||${y}`, labelRaw, labelNorm });
-    }
-    if (all.length === 0) return null;
-
-    let filtered: Row[] = all;
-    let usedLabelFilter = false;
-    if (targetLabelNorm) {
-      const byLabel = all.filter((r) => r.labelNorm === targetLabelNorm);
-      if (byLabel.length > 0) {
-        filtered = byLabel;
-        usedLabelFilter = true;
-      }
-    }
-
-    const totalLinks = filtered.length;
-    // 代表例（最頻の端点）
-    const byEndpoint = new Map<string, { a: string; b: string; count: number; labels: Map<string, number> }>();
-    for (const r of filtered) {
-      const cur = byEndpoint.get(r.key) ?? { a: r.a, b: r.b, count: 0, labels: new Map<string, number>() };
-      cur.count += 1;
-      if (r.labelRaw) cur.labels.set(r.labelRaw, (cur.labels.get(r.labelRaw) ?? 0) + 1);
-      byEndpoint.set(r.key, cur);
-    }
-
-    const sortedEndpoints = Array.from(byEndpoint.values()).sort(
-      (p, q) => q.count - p.count || `${p.a}—${p.b}`.localeCompare(`${q.a}—${q.b}`, "ja")
-    );
-    const top = sortedEndpoints[0];
-    if (!top) return null;
-
-    const topLabels = Array.from(top.labels.entries())
-      .map(([label, count]) => ({ label, count }))
-      .sort((p, q) => q.count - p.count || p.label.localeCompare(q.label, "ja"))
-      .slice(0, 4);
-
-    return {
-      endpointA: top.a,
-      endpointB: top.b,
-      totalLinks,
-      topLabels,
-      usedLabelFilter,
-      targetLabel: toLabelRaw(selectedRelation.label ?? ""),
-    };
-  }, [selectedRelation, odObjects, odLinks]);
-
   // ===== 選択中の関連：多重度ヒント =====
   const multiplicityAssist = useMemo(() => {
     if (!selectedRelation) return null;
@@ -689,6 +651,10 @@ const ClassEditorPage: React.FC = () => {
     const objById = new Map<string, Obj>(odObjects.map((o) => [o.id, o]));
     const leftCountByObj = new Map<string, number>();
     const rightCountByObj = new Map<string, number>();
+
+    // 端点（左Base-右Base）間のリンク総数・ラベル頻度
+    const betweenLabelCounts = new Map<string, { display: string; count: number }>();
+    let betweenTotalLinks = 0;
 
     // まず 0 で初期化（ODに存在するオブジェクトのみ）
     for (const o of odObjects) {
@@ -709,9 +675,29 @@ const ClassEditorPage: React.FC = () => {
 
       if (leftBase && rightBase) {
         if (aBase === leftBase && bBase === rightBase) {
+          betweenTotalLinks += 1;
+          const rawLbl = stripHtmlTags(String(l.label ?? "")).trim().replace(/^\"+|\"+$/g, "");
+          const lblNorm = normalizeLinkLabel(rawLbl);
+          if (lblNorm) {
+            const prev = betweenLabelCounts.get(lblNorm);
+            betweenLabelCounts.set(lblNorm, {
+              display: prev?.display ?? rawLbl,
+              count: (prev?.count ?? 0) + 1,
+            });
+          }
           leftCountByObj.set(aObj.id, (leftCountByObj.get(aObj.id) ?? 0) + 1);
           rightCountByObj.set(bObj.id, (rightCountByObj.get(bObj.id) ?? 0) + 1);
         } else if (aBase === rightBase && bBase === leftBase) {
+          betweenTotalLinks += 1;
+          const rawLbl = stripHtmlTags(String(l.label ?? "")).trim().replace(/^\"+|\"+$/g, "");
+          const lblNorm = normalizeLinkLabel(rawLbl);
+          if (lblNorm) {
+            const prev = betweenLabelCounts.get(lblNorm);
+            betweenLabelCounts.set(lblNorm, {
+              display: prev?.display ?? rawLbl,
+              count: (prev?.count ?? 0) + 1,
+            });
+          }
           rightCountByObj.set(aObj.id, (rightCountByObj.get(aObj.id) ?? 0) + 1);
           leftCountByObj.set(bObj.id, (leftCountByObj.get(bObj.id) ?? 0) + 1);
         }
@@ -736,9 +722,15 @@ const ClassEditorPage: React.FC = () => {
     const leftToRight = rangeFromCounts(leftCounts);
     const rightToLeft = rangeFromCounts(rightCounts);
 
+    const betweenLabelsSorted = Array.from(betweenLabelCounts.values())
+      .filter((x) => x.display)
+      .sort((x, y) => y.count - x.count || x.display.localeCompare(y.display, "ja"));
+
     return {
       leftName,
       rightName,
+      betweenTotalLinks,
+      betweenLabelsSorted,
       obsLeftToRight: leftToRight
         ? {
             min: leftToRight.min,
@@ -1136,43 +1128,10 @@ const ClassEditorPage: React.FC = () => {
                 <div className="text-[12px] font-semibold mb-1">多重度の編集</div>
                 <div className="border rounded bg-white flex-1 p-2 overflow-auto">
                   {selectedRelation ? (
-                    (() => {
-                      const rel = selectedRelation; // null ではないことを TS に伝える
-                      return (
-                        <div className="text-[11px] leading-relaxed">
+                    <div className="text-[11px] leading-relaxed">
                       <div className="font-semibold text-slate-700 mb-2">
                         選択中の関連の多重度（左右をそれぞれ設定）
                       </div>
-
-                      {odMultiplicityCardHint && (
-                        <div className="mb-3 p-2 rounded border bg-slate-50">
-                          <div className="font-semibold text-slate-700">OD（具体例）からのヒント</div>
-                          <div className="mt-1 text-slate-700">
-                            端点：<span className="font-semibold">{odMultiplicityCardHint.endpointA}</span> —{" "}
-                            <span className="font-semibold">{odMultiplicityCardHint.endpointB}</span>
-                          </div>
-                          <div className="text-slate-700">
-                            リンク総数：<span className="font-semibold">{odMultiplicityCardHint.totalLinks}</span>
-                          </div>
-                          <div className="text-slate-700">
-                            ラベル：{" "}
-                            {odMultiplicityCardHint.topLabels.length > 0 ? (
-                              <span className="font-semibold">
-                                {odMultiplicityCardHint.topLabels
-                                  .map((x) => `${x.label}${x.count > 1 ? `(${x.count})` : ""}`)
-                                  .join(" / ")}
-                              </span>
-                            ) : (
-                              <span className="font-semibold">（ラベルなし）</span>
-                            )}
-                          </div>
-                          {odMultiplicityCardHint.targetLabel && !odMultiplicityCardHint.usedLabelFilter && (
-                            <div className="mt-1 text-[10px] text-slate-500">
-                              ※ ラベル「{odMultiplicityCardHint.targetLabel}」に一致するODリンクが見つからなかったため，OD全体から代表例を表示しています．
-                            </div>
-                          )}
-                        </div>
-                      )}
 
                       <div className="font-semibold text-slate-700">
                         ① {multiplicityAssist?.leftName ?? "（左）"} から見て {multiplicityAssist?.rightName ?? "（右）"} は？
@@ -1183,22 +1142,77 @@ const ClassEditorPage: React.FC = () => {
                           <button
                             key={v}
                             type="button"
-                            aria-pressed={v === rel.rightMultiplicity}
+                            aria-pressed={v === selectedRelation.rightMultiplicity}
                             className={
                               "px-2 py-0.5 rounded text-[11px] border transition-colors " +
-                              (v === rel.rightMultiplicity
+                              (v === selectedRelation.rightMultiplicity
                                 ? "bg-sky-200 border-sky-400 font-semibold"
                                 : "bg-slate-100 border-slate-200 hover:bg-slate-200")
                             }
                             onClick={() => {
                               markMultiplicityEditing();
-                              handleUpdateRelation(rel.id, { rightMultiplicity: v });
+                              setLastMultiplicityPick({ side: "right", value: v });
+                              handleUpdateRelation(selectedRelation.id, { rightMultiplicity: v });
                             }}
                           >
                             {v}
                           </button>
                         ))}
                       </div>
+
+                      {lastMultiplicityPick?.side === "right" && (
+                        <div className="mt-2 rounded border bg-slate-50 p-2">
+                          <div className="text-[11px] font-semibold text-slate-700 mb-1">
+                            OD（具体例）からのヒント
+                            <HelpBadge text="選択した多重度（①側）について，ODで『左の各インスタンスが右へ何本リンクを持つか』と，そのリンクラベルを数えて表示します．" />
+                          </div>
+
+                          {odLinks.length === 0 || odObjects.length === 0 ? (
+                            <div className="text-[11px] text-slate-600">
+                              ODスナップショットが無い/空のため，数え上げ結果を表示できません．
+                            </div>
+                          ) : (
+                            <div className="text-[11px] text-slate-700 leading-relaxed">
+                              <div>
+                                リンク総数（{multiplicityAssist?.leftName} — {multiplicityAssist?.rightName}）：
+                                <span className="ml-1 font-semibold">{multiplicityAssist?.betweenTotalLinks ?? 0}</span>
+                              </div>
+
+                              <div className="mt-1">
+                                {multiplicityAssist?.obsLeftToRight ? (
+                                  <>
+                                    {multiplicityAssist.leftName}の各インスタンスが持つリンク数：
+                                    <span className="ml-1 font-semibold">
+                                      {multiplicityAssist.obsLeftToRight.min}〜{multiplicityAssist.obsLeftToRight.max}
+                                    </span>
+                                    <span className="ml-1 text-slate-500">（サンプル {multiplicityAssist.obsLeftToRight.samples}）</span>
+                                    <span className="ml-2 text-slate-600">
+                                      4択の目安：<span className="font-semibold">{multiplicityAssist.obsLeftToRight.rec}</span>
+                                    </span>
+                                  </>
+                                ) : (
+                                  <>（該当するインスタンスがODに見つかりませんでした）</>
+                                )}
+                              </div>
+
+                              <div className="mt-1">
+                                リンクラベル：
+                                {multiplicityAssist?.betweenLabelsSorted?.length ? (
+                                  <span className="ml-1">
+                                    {multiplicityAssist.betweenLabelsSorted
+                                      .slice(0, 4)
+                                      .map((x) => `${x.display}(${x.count})`)
+                                      .join("，")}
+                                    {multiplicityAssist.betweenLabelsSorted.length > 4 && "，…"}
+                                  </span>
+                                ) : (
+                                  <span className="ml-1 text-slate-500">（ラベルなし）</span>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       <div className="mt-3 font-semibold text-slate-700">
                         ② {multiplicityAssist?.rightName ?? "（右）"} から見て {multiplicityAssist?.leftName ?? "（左）"} は？
@@ -1209,16 +1223,17 @@ const ClassEditorPage: React.FC = () => {
                           <button
                             key={v}
                             type="button"
-                            aria-pressed={v === rel.leftMultiplicity}
+                            aria-pressed={v === selectedRelation.leftMultiplicity}
                             className={
                               "px-2 py-0.5 rounded text-[11px] border transition-colors " +
-                              (v === rel.leftMultiplicity
+                              (v === selectedRelation.leftMultiplicity
                                 ? "bg-sky-200 border-sky-400 font-semibold"
                                 : "bg-slate-100 border-slate-200 hover:bg-slate-200")
                             }
                             onClick={() => {
                               markMultiplicityEditing();
-                              handleUpdateRelation(rel.id, { leftMultiplicity: v });
+                              setLastMultiplicityPick({ side: "left", value: v });
+                              handleUpdateRelation(selectedRelation.id, { leftMultiplicity: v });
                             }}
                           >
                             {v}
@@ -1226,12 +1241,64 @@ const ClassEditorPage: React.FC = () => {
                         ))}
                       </div>
 
-                      <div className="mt-3 text-[11px] text-slate-600">
-                        上の OD（具体例）ヒントを見ながら，「1つに対して相手が何個か」を数えて決めます．
-                      </div>
+                      {lastMultiplicityPick?.side === "left" && (
+                        <div className="mt-2 rounded border bg-slate-50 p-2">
+                          <div className="text-[11px] font-semibold text-slate-700 mb-1">
+                            OD（具体例）からのヒント
+                            <HelpBadge text="選択した多重度（②側）について，ODで『右の各インスタンスが左へ何本リンクを持つか』と，そのリンクラベルを数えて表示します．" />
+                          </div>
+
+                          {odLinks.length === 0 || odObjects.length === 0 ? (
+                            <div className="text-[11px] text-slate-600">
+                              ODスナップショットが無い/空のため，数え上げ結果を表示できません．
+                            </div>
+                          ) : (
+                            <div className="text-[11px] text-slate-700 leading-relaxed">
+                              <div>
+                                リンク総数（{multiplicityAssist?.leftName} — {multiplicityAssist?.rightName}）：
+                                <span className="ml-1 font-semibold">{multiplicityAssist?.betweenTotalLinks ?? 0}</span>
+                              </div>
+
+                              <div className="mt-1">
+                                {multiplicityAssist?.obsRightToLeft ? (
+                                  <>
+                                    {multiplicityAssist.rightName}の各インスタンスが持つリンク数：
+                                    <span className="ml-1 font-semibold">
+                                      {multiplicityAssist.obsRightToLeft.min}〜{multiplicityAssist.obsRightToLeft.max}
+                                    </span>
+                                    <span className="ml-1 text-slate-500">（サンプル {multiplicityAssist.obsRightToLeft.samples}）</span>
+                                    <span className="ml-2 text-slate-600">
+                                      4択の目安：<span className="font-semibold">{multiplicityAssist.obsRightToLeft.rec}</span>
+                                    </span>
+                                  </>
+                                ) : (
+                                  <>（該当するインスタンスがODに見つかりませんでした）</>
+                                )}
+                              </div>
+
+                              <div className="mt-1">
+                                リンクラベル：
+                                {multiplicityAssist?.betweenLabelsSorted?.length ? (
+                                  <span className="ml-1">
+                                    {multiplicityAssist.betweenLabelsSorted
+                                      .slice(0, 4)
+                                      .map((x) => `${x.display}(${x.count})`)
+                                      .join("，")}
+                                    {multiplicityAssist.betweenLabelsSorted.length > 4 && "，…"}
+                                  </span>
+                                ) : (
+                                  <span className="ml-1 text-slate-500">（ラベルなし）</span>
+                                )}
+                              </div>
+                            </div>
+                          )}
                         </div>
-                      );
-                    })()
+                      )}
+
+                      <div className="mt-3 text-[11px] text-slate-600">
+                        右下の OD（具体例）を見ながら，「1つに対して相手が何個か」を数えて決めます．
+                      </div>
+                    </div>
                   ) : (
                     <div className="h-full flex items-center justify-center text-[12px] text-slate-500">
                       関連（線）を1本クリックして選択すると，ここで多重度を編集できます．

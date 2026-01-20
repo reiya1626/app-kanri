@@ -572,15 +572,52 @@ const TOOLTIP = {
     "【リンクラベル】関係の意味を短い言葉で表します．行為や関係を表す表現が使われることが多い",
 } as const;
 
-// ===== ラベル用の ?（title表示の気づき誘導） =====
+// ===== ラベル用の ?（クリックで説明を表示） =====
+// 画面録画などで「ホバー状態」が拾えないことがあるため、クリックで開閉する。
 const HelpBadge: React.FC<{ title: string }> = ({ title }) => {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLSpanElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const onDown = (e: MouseEvent) => {
+      const el = wrapRef.current;
+      if (!el) return;
+      if (!el.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
   return (
-    <span
-      title={title}
-      className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full border border-slate-300 text-[10px] text-slate-600 bg-white cursor-help underline decoration-dotted"
-      aria-label="用語の説明"
-    >
-      ?
+    <span ref={wrapRef} className="relative inline-flex">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full border border-slate-300 text-[10px] text-slate-600 bg-white cursor-pointer underline decoration-dotted"
+        aria-label="用語の説明"
+        aria-expanded={open}
+      >
+        ?
+      </button>
+
+      {open && (
+        <div
+          role="tooltip"
+          className="absolute left-0 top-full mt-1 z-30 w-[320px] max-w-[80vw] whitespace-pre-wrap rounded border bg-white px-2 py-1 text-[11px] text-slate-700 shadow"
+        >
+          {title}
+        </div>
+      )}
     </span>
   );
 };
