@@ -37,8 +37,8 @@ type Slot = { key: string; value: string };
 type Obj = { id: string; name: string; slots: Slot[] };
 type Link = { id: string; from: string; to: string; label: string };
 type RelationHint = {
-  fromClassId: string;
-  toClassId: string;
+  fromClass: string;
+  toClass: string;
   candidates: { label: string; count: number }[];
 };
 type EditorPayload = {
@@ -604,10 +604,9 @@ const ClassEditorPage: React.FC = () => {
     const rightName = rightClass.name || "（未入力）";
 
     // --- OD変換集計（relationHints）からの補助情報（リンク数・ラベル候補） ---
-    const pickRelationHint = (fromId: string, toId: string) => {
-      const hit = (odRelationHints ?? []).find((h) => h.fromClassId === fromId && h.toClassId === toId);
+    const pickRelationHint = (fromName: string, toName: string) => {
+      const hit = (odRelationHints ?? []).find((h) => h.fromClass === fromName && h.toClass === toName);
       if (!hit) return null;
-
       const labels = (hit.candidates ?? [])
         .map((c) => ({ display: stripHtmlTags(String(c.label ?? "")).trim(), count: Number(c.count ?? 0) }))
         .filter((x) => x.count > 0)
@@ -618,8 +617,9 @@ const ClassEditorPage: React.FC = () => {
       return { total, labels };
     };
 
-    const hintLeftToRight = pickRelationHint(leftClass.id, rightClass.id);
-    const hintRightToLeft = pickRelationHint(rightClass.id, leftClass.id);
+    const hintLeftToRight = pickRelationHint(leftClass.name, rightClass.name);
+    const hintRightToLeft = pickRelationHint(rightClass.name, leftClass.name);
+
 
     const leftBase = baseNameForAssist(leftName);
     const rightBase = baseNameForAssist(rightName);
