@@ -37,8 +37,8 @@ type Slot = { key: string; value: string };
 type Obj = { id: string; name: string; slots: Slot[] };
 type Link = { id: string; from: string; to: string; label: string };
 type RelationHint = {
-  fromClass: string;
-  toClass: string;
+  fromClassId: string;
+  toClassId: string;
   candidates: { label: string; count: number }[];
 };
 type EditorPayload = {
@@ -602,6 +602,25 @@ const ClassEditorPage: React.FC = () => {
 
     const leftName = leftClass.name || "（未入力）";
     const rightName = rightClass.name || "（未入力）";
+
+    // --- OD変換集計（relationHints）からの補助情報（リンク数・ラベル候補） ---
+    const pickRelationHint = (fromId: string, toId: string) => {
+      const hit = (odRelationHints ?? []).find((h) => h.fromClassId === fromId && h.toClassId === toId);
+      if (!hit) return null;
+
+      const labels = (hit.candidates ?? [])
+        .map((c) => ({ display: stripHtmlTags(String(c.label ?? "")).trim(), count: Number(c.count ?? 0) }))
+        .filter((x) => x.count > 0)
+        .filter((x) => x.display.length > 0)
+        .sort((a, b) => b.count - a.count || a.display.localeCompare(b.display, "ja"));
+
+      const total = (hit.candidates ?? []).reduce((acc, c) => acc + (Number(c.count ?? 0) || 0), 0);
+      return { total, labels };
+    };
+
+    const hintLeftToRight = pickRelationHint(leftClass.id, rightClass.id);
+    const hintRightToLeft = pickRelationHint(rightClass.id, leftClass.id);
+
     const leftBase = baseNameForAssist(leftName);
     const rightBase = baseNameForAssist(rightName);
 
@@ -658,6 +677,8 @@ const ClassEditorPage: React.FC = () => {
     return {
       leftName,
       rightName,
+      hintLeftToRight,
+      hintRightToLeft,
       obsLeftToRight: leftToRight
         ? {
             min: leftToRight.min,
@@ -874,7 +895,20 @@ const ClassEditorPage: React.FC = () => {
   };
 
   const handleUpdateClass = (id: string, partial: Partial<ClassInfo>) => {
+    const oldClass = classes.find((c) => c.id === id);
+    const oldName = oldClass?.name;
+    const newName = partial.name;
     setClasses((prev) => prev.map((c) => (c.id === id ? { ...c, ...partial } : c)));
+    // クラス名変更時に odRelationHints を更新
+    if (oldName && newName && oldName !== newName) {
+      setOdRelationHints((prev) =>
+        prev.map((h) => ({
+          ...h,
+          fromClass: h.fromClass === oldName ? newName : h.fromClass,
+          toClass: h.toClass === oldName ? newName : h.toClass,
+        }))
+      );
+    }
   };
 
   const handleDeleteClass = (id: string) => {

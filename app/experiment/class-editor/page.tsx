@@ -170,6 +170,73 @@ const normalizeLinkLabel = (raw: string) => {
   return t;
 };
 
+
+// ===== OD→クラス推定（/api/convert と同等の簡易ルールをフロントでも再現） =====
+// 目的：クラス名が「クラス名未定X」のままでも，ODインスタンスをそのクラスへ割り当てて
+//       「どのインスタンス同士が何本つながっているか」を数えられるようにする。
+const baseNameDigits = (s: string): string => normalizeObjectLabel(s).replace(/\d+$/g, "").trim();
+const normSlotKey = (s: string): string =>
+  stripHtmlTags(String(s ?? ""))
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+
+type InferredClassAssign = {
+  // ODオブジェクトID → 推定クラス名（例：クラス名未定1）
+  objIdToClass: Map<string, string>;
+  // 推定クラス名 → ODオブジェクトID一覧
+  classToObjIds: Map<string, string[]>;
+};
+
+// /api/convert と同じ「属性キー集合でクラスタリングしてクラス名未定Xを振る」処理
+const inferClassAssignmentFromSnapshot = (objects: Obj[]): InferredClassAssign => {
+  const objIdToClass = new Map<string, string>();
+  const classToObjIds = new Map<string, string[]>();
+
+  const addMember = (cls: string, objId: string) => {
+    objIdToClass.set(objId, cls);
+    if (!classToObjIds.has(cls)) classToObjIds.set(cls, []);
+    classToObjIds.get(cls)!.push(objId);
+  };
+
+  // ObjInfo 相当
+  const objInfos = objects.map((o) => {
+    const base = baseNameDigits(o.name) || normalizeObjectLabel(o.name);
+    const keySet = new Set<string>();
+    for (const a of o.slots ?? []) {
+      const k = normSlotKey(a.key);
+      if (k) keySet.add(k);
+    }
+    const attrKeys = Array.from(keySet.values()).sort();
+    const hasAttrs = attrKeys.length > 0;
+    return { obj: o, base, attrKeys, hasAttrs };
+  });
+
+  // 1) 属性なし：baseName をそのままクラス名として採用
+  for (const info of objInfos.filter((i) => !i.hasAttrs)) {
+    const className = info.base || normalizeObjectLabel(info.obj.name);
+    addMember(className, info.obj.id);
+  }
+
+  // 2) 属性あり：属性キー集合パターンでクラスタリングし，クラス名未定X を振る
+  const attrFullInfos = objInfos.filter((i) => i.hasAttrs);
+  const patternGroups = new Map<string, { objId: string }[]>();
+
+  for (const info of attrFullInfos) {
+    const patternKey = info.attrKeys.length > 0 ? info.attrKeys.join("|") : "(none)";
+    if (!patternGroups.has(patternKey)) patternGroups.set(patternKey, []);
+    patternGroups.get(patternKey)!.push({ objId: info.obj.id });
+  }
+
+  let unnamedIndex = 1;
+  for (const [, group] of patternGroups.entries()) {
+    const className = `クラス名未定${unnamedIndex++}`;
+    for (const m of group) addMember(className, m.objId);
+  }
+
+  return { objIdToClass, classToObjIds };
+};
+
 const makeEndpointKey = (aBase: string, bBase: string) => {
   const x = aBase <= bBase ? aBase : bBase;
   const y = aBase <= bBase ? bBase : aBase;
@@ -429,6 +496,16 @@ const ClassEditorPage: React.FC = () => {
   const { classProblemText, classAnswerPuml } = useProblemConfig();
 
   const [classes, setClasses] = useState<ClassInfo[]>([]);
+  // ★ 初期クラス名（/api/convert 由来）を保持：学習者が後からリネームしてもOD→クラス割当の基準を失わない
+  const classInitialNameByIdRef = useRef<Map<string, string>>(new Map());
+
+  // ★ ODからの検討材料（多重度ヒント）を「必要なときだけ」表示するためのトグル
+  const [showOdEvidence, setShowOdEvidence] = useState(false);
+
+  // 検討材料の表示を段階化（答えを出しすぎない）
+  const [showAllOdLinks, setShowAllOdLinks] = useState(false);
+  const [showOdLabelCandidates, setShowOdLabelCandidates] = useState(false);
+
   const [relations, setRelations] = useState<Relation[]>([]);
   const [selectedClassId, setSelectedClassId] = useState<string | null>(null);
   const [selectedRelationId, setSelectedRelationId] = useState<string | null>(null);
@@ -497,6 +574,13 @@ const ClassEditorPage: React.FC = () => {
           relations?: Relation[];
         };
         setClasses(parsed.classes ?? []);
+        // 初期名マップを（まだ無ければ）保存データから初期化
+        if (parsed.classes && classInitialNameByIdRef.current.size === 0) {
+          const m0 = new Map<string, string>();
+          for (const c of parsed.classes) m0.set(c.id, c.name);
+          classInitialNameByIdRef.current = m0;
+        }
+
         setRelations(parsed.relations ?? []);
         setSelectedClassId(parsed.classes?.[0]?.id ?? null);
         // ★ここで return しない（OD snapshot を別で読みたいので）
@@ -522,6 +606,11 @@ const ClassEditorPage: React.FC = () => {
         const { classes: initClasses, relations: initRelations } = parseInitialPuml(initialClassPuml);
 
         setClasses(initClasses);
+        // 初期名マップを初期PUMLのクラス名で保存（学習者がリネームしてもOD→クラス割当の基準に使う）
+        const m1 = new Map<string, string>();
+        for (const c of initClasses) m1.set(c.id, c.name);
+        classInitialNameByIdRef.current = m1;
+
         setRelations(initRelations);
         setSelectedClassId(initClasses[0]?.id ?? null);
         setSelectedRelationId(null);
@@ -635,9 +724,42 @@ const ClassEditorPage: React.FC = () => {
   const selectedClass = classes.find((c) => c.id === selectedClassId) ?? null;
   const selectedRelation = relations.find((r) => r.id === selectedRelationId) ?? null;
 
+  // 関連を切り替えたら「ODからの検討材料」は閉じる（必要な学習者だけが開く想定）
+  useEffect(() => {
+    setShowOdEvidence(false);
+    setShowAllOdLinks(false);
+    setShowOdLabelCandidates(false);
+  }, [selectedRelationId]);
+
+
   // ===== 選択中の関連：多重度ヒント =====
+  
+  // ODスナップショットから「ODオブジェクト→推定クラス」を再構成（/api/convert と同等ルール）
+  const inferredAssign = useMemo(() => {
+    if (!odObjects || odObjects.length === 0) return null;
+    return inferClassAssignmentFromSnapshot(odObjects);
+  }, [odObjects]);
+
+  const getInitialClassName = (classId: string) => {
+    return classInitialNameByIdRef.current.get(classId) ?? (classes.find((c) => c.id === classId)?.name ?? "");
+  };
+
+
+  // ===== 選択中の関連：ODから観測できる「検討材料」（クラス名未定Xでも動くように，OD→クラス推定を使う） =====
   const multiplicityAssist = useMemo(() => {
     if (!selectedRelation) return null;
+    if (!inferredAssign) {
+      return {
+        leftName: "",
+        rightName: "",
+        betweenTotalLinks: 0,
+        betweenLabelsSorted: [] as { display: string; count: number }[],
+        obsLeftToRight: null as null | { min: number; max: number; rec: string; samples: number },
+        obsRightToLeft: null as null | { min: number; max: number; rec: string; samples: number },
+        concreteLinks: [] as string[],
+        note: "ODスナップショットが無い/空のため，検討材料を作れません．",
+      };
+    }
 
     const leftClass = classes.find((c) => c.id === selectedRelation.fromClassId) ?? null;
     const rightClass = classes.find((c) => c.id === selectedRelation.toClassId) ?? null;
@@ -645,62 +767,81 @@ const ClassEditorPage: React.FC = () => {
 
     const leftName = leftClass.name || "（未入力）";
     const rightName = rightClass.name || "（未入力）";
-    const leftBase = baseNameForAssist(leftName);
-    const rightBase = baseNameForAssist(rightName);
+
+    // ★ クラス名は学習者が変えられるので，「初期名（/api/convert由来）」でOD→クラス推定と突合する
+    const leftKey = getInitialClassName(leftClass.id) || leftName;
+    const rightKey = getInitialClassName(rightClass.id) || rightName;
 
     const objById = new Map<string, Obj>(odObjects.map((o) => [o.id, o]));
+
+    // 左/右クラスに属すると推定されたODオブジェクトID
+    const leftObjIds = inferredAssign.classToObjIds.get(leftKey) ?? [];
+    const rightObjIds = inferredAssign.classToObjIds.get(rightKey) ?? [];
+
     const leftCountByObj = new Map<string, number>();
     const rightCountByObj = new Map<string, number>();
 
-    // 端点（左Base-右Base）間のリンク総数・ラベル頻度
+    for (const id of leftObjIds) leftCountByObj.set(id, 0);
+    for (const id of rightObjIds) rightCountByObj.set(id, 0);
+
     const betweenLabelCounts = new Map<string, { display: string; count: number }>();
     let betweenTotalLinks = 0;
 
-    // まず 0 で初期化（ODに存在するオブジェクトのみ）
-    for (const o of odObjects) {
-      const b = baseNameForAssist(o.name);
-      if (b && leftBase && b === leftBase) leftCountByObj.set(o.id, 0);
-      if (b && rightBase && b === rightBase) rightCountByObj.set(o.id, 0);
-    }
+    const concreteLinks: string[] = [];
+
+    const addLabel = (rawLbl: string) => {
+      const lblNorm = normalizeLinkLabel(rawLbl);
+      if (!lblNorm) return;
+      const prev = betweenLabelCounts.get(lblNorm);
+      betweenLabelCounts.set(lblNorm, {
+        display: prev?.display ?? rawLbl,
+        count: (prev?.count ?? 0) + 1,
+      });
+    };
+
+    const isBetween = (aId: string, bId: string) => {
+      const aC = inferredAssign.objIdToClass.get(aId);
+      const bC = inferredAssign.objIdToClass.get(bId);
+      if (!aC || !bC) return false;
+      return (aC === leftKey && bC === rightKey) || (aC === rightKey && bC === leftKey);
+    };
 
     // リンクを数える（無向として扱う）
     for (const l of odLinks) {
       const aObj = objById.get(l.from);
       const bObj = objById.get(l.to);
       if (!aObj || !bObj) continue;
+      if (!isBetween(aObj.id, bObj.id)) continue;
 
-      const aBase = baseNameForAssist(aObj.name);
-      const bBase = baseNameForAssist(bObj.name);
-      if (!aBase || !bBase) continue;
+      betweenTotalLinks += 1;
 
-      if (leftBase && rightBase) {
-        if (aBase === leftBase && bBase === rightBase) {
-          betweenTotalLinks += 1;
-          const rawLbl = stripHtmlTags(String(l.label ?? "")).trim().replace(/^\"+|\"+$/g, "");
-          const lblNorm = normalizeLinkLabel(rawLbl);
-          if (lblNorm) {
-            const prev = betweenLabelCounts.get(lblNorm);
-            betweenLabelCounts.set(lblNorm, {
-              display: prev?.display ?? rawLbl,
-              count: (prev?.count ?? 0) + 1,
-            });
-          }
-          leftCountByObj.set(aObj.id, (leftCountByObj.get(aObj.id) ?? 0) + 1);
-          rightCountByObj.set(bObj.id, (rightCountByObj.get(bObj.id) ?? 0) + 1);
-        } else if (aBase === rightBase && bBase === leftBase) {
-          betweenTotalLinks += 1;
-          const rawLbl = stripHtmlTags(String(l.label ?? "")).trim().replace(/^\"+|\"+$/g, "");
-          const lblNorm = normalizeLinkLabel(rawLbl);
-          if (lblNorm) {
-            const prev = betweenLabelCounts.get(lblNorm);
-            betweenLabelCounts.set(lblNorm, {
-              display: prev?.display ?? rawLbl,
-              count: (prev?.count ?? 0) + 1,
-            });
-          }
-          rightCountByObj.set(aObj.id, (rightCountByObj.get(aObj.id) ?? 0) + 1);
-          leftCountByObj.set(bObj.id, (leftCountByObj.get(bObj.id) ?? 0) + 1);
-        }
+      const rawLbl = stripHtmlTags(String(l.label ?? "")).trim().replace(/^\"+|\"+$/g, "");
+      if (rawLbl) addLabel(rawLbl);
+
+      // 具体例の一覧（左→右の向きで整形）
+      const aC = inferredAssign.objIdToClass.get(aObj.id);
+      const bC = inferredAssign.objIdToClass.get(bObj.id);
+
+      const leftFirst =
+        aC === leftKey && bC === rightKey
+          ? { l: aObj, r: bObj }
+          : bC === leftKey && aC === rightKey
+          ? { l: bObj, r: aObj }
+          : { l: aObj, r: bObj };
+
+      const line =
+        rawLbl && rawLbl.trim().length > 0
+          ? `${leftFirst.l.name} — ${leftFirst.r.name}（ラベル：${rawLbl}）`
+          : `${leftFirst.l.name} — ${leftFirst.r.name}`;
+      concreteLinks.push(line);
+
+      // インスタンスごとの本数（左→右／右→左）
+      if (aC === leftKey && bC === rightKey) {
+        leftCountByObj.set(aObj.id, (leftCountByObj.get(aObj.id) ?? 0) + 1);
+        rightCountByObj.set(bObj.id, (rightCountByObj.get(bObj.id) ?? 0) + 1);
+      } else if (aC === rightKey && bC === leftKey) {
+        rightCountByObj.set(aObj.id, (rightCountByObj.get(aObj.id) ?? 0) + 1);
+        leftCountByObj.set(bObj.id, (leftCountByObj.get(bObj.id) ?? 0) + 1);
       }
     }
 
@@ -726,6 +867,11 @@ const ClassEditorPage: React.FC = () => {
       .filter((x) => x.display)
       .sort((x, y) => y.count - x.count || x.display.localeCompare(y.display, "ja"));
 
+    const note =
+      leftObjIds.length === 0 || rightObjIds.length === 0
+        ? "（この関連の端点クラスに対応するODインスタンスが推定できませんでした：クラス名未定Xの割当がずれている可能性があります）"
+        : "";
+
     return {
       leftName,
       rightName,
@@ -747,8 +893,18 @@ const ClassEditorPage: React.FC = () => {
             samples: rightCounts.length,
           }
         : null,
+      concreteLinks,
+      note,
     };
-  }, [selectedRelation, classes, odObjects, odLinks]);
+  }, [selectedRelation, classes, odObjects, odLinks, inferredAssign]);
+
+  const odLabelCandidates = useMemo(() => {
+    const arr = (multiplicityAssist?.betweenLabelsSorted ?? [])
+      .map((x) => String(x.display ?? "").trim())
+      .filter((s) => !!s);
+    return Array.from(new Set(arr));
+  }, [multiplicityAssist]);
+
 
   // 問題文ハイライト対象（トークン）
   const problemHighlightTokens = useMemo<HighlightToken[]>(() => {
@@ -941,6 +1097,11 @@ const ClassEditorPage: React.FC = () => {
       name: "クラス名未定",
       attrs: [],
     };
+    // 初期名として登録（後からリネームしてもOD→クラス割当の基準を保持）
+    if (!classInitialNameByIdRef.current.has(id)) {
+      classInitialNameByIdRef.current.set(id, newClass.name);
+    }
+
     setClasses((prev) => [...prev, newClass]);
     setSelectedClassId(id);
     setSelectedRelationId(null);
@@ -1160,59 +1321,135 @@ const ClassEditorPage: React.FC = () => {
                         ))}
                       </div>
 
-                      {lastMultiplicityPick?.side === "right" && (
-                        <div className="mt-2 rounded border bg-slate-50 p-2">
-                          <div className="text-[11px] font-semibold text-slate-700 mb-1">
-                            OD（具体例）からのヒント
-                            <HelpBadge text="選択した多重度（①側）について，ODで『左の各インスタンスが右へ何本リンクを持つか』と，そのリンクラベルを数えて表示します．" />
+                      
+                      <div className="mt-2 rounded border bg-slate-50 p-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-[11px] font-semibold text-slate-700">
+                            ODから考えるための材料（任意表示）
+                            <HelpBadge text="ここは『根拠を拾うための材料』です。多重度の答えは表示しません。ODのつながりを観察し、要求文（本文）と合わせて自分で判断してください。" />
                           </div>
-
-                          {odLinks.length === 0 || odObjects.length === 0 ? (
-                            <div className="text-[11px] text-slate-600">
-                              ODスナップショットが無い/空のため，数え上げ結果を表示できません．
-                            </div>
-                          ) : (
-                            <div className="text-[11px] text-slate-700 leading-relaxed">
-                              <div>
-                                リンク総数（{multiplicityAssist?.leftName} — {multiplicityAssist?.rightName}）：
-                                <span className="ml-1 font-semibold">{multiplicityAssist?.betweenTotalLinks ?? 0}</span>
-                              </div>
-
-                              <div className="mt-1">
-                                {multiplicityAssist?.obsLeftToRight ? (
-                                  <>
-                                    {multiplicityAssist.leftName}の各インスタンスが持つリンク数：
-                                    <span className="ml-1 font-semibold">
-                                      {multiplicityAssist.obsLeftToRight.min}〜{multiplicityAssist.obsLeftToRight.max}
-                                    </span>
-                                    <span className="ml-1 text-slate-500">（サンプル {multiplicityAssist.obsLeftToRight.samples}）</span>
-                                    <span className="ml-2 text-slate-600">
-                                      4択の目安：<span className="font-semibold">{multiplicityAssist.obsLeftToRight.rec}</span>
-                                    </span>
-                                  </>
-                                ) : (
-                                  <>（該当するインスタンスがODに見つかりませんでした）</>
-                                )}
-                              </div>
-
-                              <div className="mt-1">
-                                リンクラベル：
-                                {multiplicityAssist?.betweenLabelsSorted?.length ? (
-                                  <span className="ml-1">
-                                    {multiplicityAssist.betweenLabelsSorted
-                                      .slice(0, 4)
-                                      .map((x) => `${x.display}(${x.count})`)
-                                      .join("，")}
-                                    {multiplicityAssist.betweenLabelsSorted.length > 4 && "，…"}
-                                  </span>
-                                ) : (
-                                  <span className="ml-1 text-slate-500">（ラベルなし）</span>
-                                )}
-                              </div>
-                            </div>
-                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowOdEvidence((v) => {
+                                const next = !v;
+                                if (!next) {
+                                  setShowAllOdLinks(false);
+                                  setShowOdLabelCandidates(false);
+                                }
+                                return next;
+                              });
+                            }}
+                            className="text-[11px] rounded border bg-white px-2 py-1 hover:bg-slate-100"
+                          >
+                            {showOdEvidence ? "閉じる" : "表示する"}
+                          </button>
                         </div>
-                      )}
+
+                        {showOdEvidence && (
+                          <div className="mt-2 text-[11px] text-slate-700 leading-relaxed">
+                            {odLinks.length === 0 || odObjects.length === 0 ? (
+                              <div className="text-slate-600">
+                                ODスナップショットが無い/空のため，材料を表示できません．
+                              </div>
+                            ) : (
+                              <>
+                                <div className="rounded border bg-white p-2">
+                                  <div className="font-semibold text-slate-800">観察：ODで確認できるつながり</div>
+                                  <div className="mt-1 text-slate-700">
+                                    まずは一覧を眺めて，<span className="font-semibold">同じ名前が何回出てくるか</span>
+                                    （＝何本つながるか）を自分で数えてみましょう．必要なら右下のOD画像も拡大して確認してください．
+                                  </div>
+
+                                  {multiplicityAssist?.concreteLinks?.length ? (
+                                    <div className="mt-2">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <div className="text-slate-700">
+                                          例：インスタンス名 — インスタンス名（ラベルがあれば表示）
+                                        </div>
+                                        {multiplicityAssist.concreteLinks.length > 3 ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => setShowAllOdLinks((v) => !v)}
+                                            className="text-[11px] rounded border bg-white px-2 py-1 hover:bg-slate-100"
+                                          >
+                                            {showAllOdLinks ? "一部だけ見る" : "さらに表示"}
+                                          </button>
+                                        ) : null}
+                                      </div>
+
+                                      <div className="mt-1 max-h-28 overflow-auto rounded border bg-slate-50 p-2 leading-relaxed">
+                                        <ul className="list-disc pl-4">
+                                          {(showAllOdLinks
+                                            ? multiplicityAssist.concreteLinks.slice(0, 50)
+                                            : multiplicityAssist.concreteLinks.slice(0, 3)
+                                          ).map((t, i) => (
+                                            <li key={i}>{t}</li>
+                                          ))}
+                                        </ul>
+                                        {multiplicityAssist.concreteLinks.length > 50 && (
+                                          <div className="mt-1 text-slate-500">…（50件まで表示）</div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <div className="mt-2 text-slate-500">（該当するリンクがODに見つかりませんでした）</div>
+                                  )}
+                                </div>
+
+                                <div className="mt-2 rounded border bg-white p-2">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="font-semibold text-slate-800">意味づけ：関係の呼び名</div>
+                                    {odLabelCandidates.length > 0 ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => setShowOdLabelCandidates((v) => !v)}
+                                        className="text-[11px] rounded border bg-white px-2 py-1 hover:bg-slate-100"
+                                      >
+                                        {showOdLabelCandidates ? "隠す" : "ラベル候補を見る"}
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                  <div className="mt-1 text-slate-700">
+                                    ラベルは「関係名」のヒントです（多重度の答えそのものではありません）．
+                                    「〜する／〜される」の向きも意識して，自分の言葉で言い換えてみてください．
+                                  </div>
+
+                                  {odLabelCandidates.length === 0 ? (
+                                    <div className="mt-1 text-slate-500">（ラベルなし/未入力）</div>
+                                  ) : showOdLabelCandidates ? (
+                                    <div className="mt-1 rounded border bg-slate-50 p-2">
+                                      {odLabelCandidates.slice(0, 10).join("，")}
+                                      {odLabelCandidates.length > 10 && "，…"}
+                                    </div>
+                                  ) : (
+                                    <div className="mt-1 text-slate-600">（候補あり。必要なら「ラベル候補を見る」を押してください）</div>
+                                  )}
+                                </div>
+
+                                <div className="mt-2 rounded border bg-white p-2">
+                                  <div className="font-semibold text-slate-800">チェック：多重度を決める前に</div>
+                                  <ul className="mt-1 list-disc pl-5 text-slate-700">
+                                    <li>
+                                      左の「1つ」は，右を <span className="font-semibold">0個でも持てる？</span>{" "}
+                                      それとも <span className="font-semibold">必ず1個以上？</span>
+                                    </li>
+                                    <li>
+                                      右の「1つ」は，左に <span className="font-semibold">必ず1つ結び付く？</span>{" "}
+                                      それとも <span className="font-semibold">0でもよい？/複数もあり得る？</span>
+                                    </li>
+                                    <li>ODだけでなく本文（仕様）から「上限があるか（1までか，複数か）」も確認する</li>
+                                  </ul>
+                                </div>
+
+                                <div className="mt-2 text-slate-500">
+                                  ※この欄は答え（多重度）を表示しません。観察した内容を根拠に，自分で多重度を選んでください。
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </div>
 
                       <div className="mt-3 font-semibold text-slate-700">
                         ② {multiplicityAssist?.rightName ?? "（右）"} から見て {multiplicityAssist?.leftName ?? "（左）"} は？
@@ -1240,61 +1477,6 @@ const ClassEditorPage: React.FC = () => {
                           </button>
                         ))}
                       </div>
-
-                      {lastMultiplicityPick?.side === "left" && (
-                        <div className="mt-2 rounded border bg-slate-50 p-2">
-                          <div className="text-[11px] font-semibold text-slate-700 mb-1">
-                            OD（具体例）からのヒント
-                            <HelpBadge text="選択した多重度（②側）について，ODで『右の各インスタンスが左へ何本リンクを持つか』と，そのリンクラベルを数えて表示します．" />
-                          </div>
-
-                          {odLinks.length === 0 || odObjects.length === 0 ? (
-                            <div className="text-[11px] text-slate-600">
-                              ODスナップショットが無い/空のため，数え上げ結果を表示できません．
-                            </div>
-                          ) : (
-                            <div className="text-[11px] text-slate-700 leading-relaxed">
-                              <div>
-                                リンク総数（{multiplicityAssist?.leftName} — {multiplicityAssist?.rightName}）：
-                                <span className="ml-1 font-semibold">{multiplicityAssist?.betweenTotalLinks ?? 0}</span>
-                              </div>
-
-                              <div className="mt-1">
-                                {multiplicityAssist?.obsRightToLeft ? (
-                                  <>
-                                    {multiplicityAssist.rightName}の各インスタンスが持つリンク数：
-                                    <span className="ml-1 font-semibold">
-                                      {multiplicityAssist.obsRightToLeft.min}〜{multiplicityAssist.obsRightToLeft.max}
-                                    </span>
-                                    <span className="ml-1 text-slate-500">（サンプル {multiplicityAssist.obsRightToLeft.samples}）</span>
-                                    <span className="ml-2 text-slate-600">
-                                      4択の目安：<span className="font-semibold">{multiplicityAssist.obsRightToLeft.rec}</span>
-                                    </span>
-                                  </>
-                                ) : (
-                                  <>（該当するインスタンスがODに見つかりませんでした）</>
-                                )}
-                              </div>
-
-                              <div className="mt-1">
-                                リンクラベル：
-                                {multiplicityAssist?.betweenLabelsSorted?.length ? (
-                                  <span className="ml-1">
-                                    {multiplicityAssist.betweenLabelsSorted
-                                      .slice(0, 4)
-                                      .map((x) => `${x.display}(${x.count})`)
-                                      .join("，")}
-                                    {multiplicityAssist.betweenLabelsSorted.length > 4 && "，…"}
-                                  </span>
-                                ) : (
-                                  <span className="ml-1 text-slate-500">（ラベルなし）</span>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      )}
-
                       <div className="mt-3 text-[11px] text-slate-600">
                         右下の OD（具体例）を見ながら，「1つに対して相手が何個か」を数えて決めます．
                       </div>

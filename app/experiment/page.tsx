@@ -41,6 +41,12 @@ type ObjDiagnoseSnapshot = {
     base: string;
     onlyInInput: string[]; // 入力にのみ含まれるスロット名（= 正答例と一致しない入力）
   }[];
+
+  // ★ 正答例にあるが入力にない（不足）スロット名（baseごと）
+  slotMissingByBase: {
+    base: string;
+    missingInInput: string[];
+  }[];
 };
 
 // 「リンクを診断する」を押した時点の結果を固定表示するためのスナップショット
@@ -1222,15 +1228,20 @@ const ExperimentPage: React.FC = () => {
 
   // 「ヒント：スロット名（正答例と異なる入力）」
   const slotDiffsForShow = objSnapshot?.slotDiffs ?? [];
-  const slotDiffHasAny = slotDiffsForShow.length > 0;
+  const slotDiffHasAny = slotDiffsForShow.length > 0 || objSlotMissingTotal > 0;
 
-  const slotDiffTotalKeys = useMemo(() => {
+  const slotOnlyInInputTotalKeys = useMemo(() => {
     let sum = 0;
     for (const d of slotDiffsForShow) sum += d.onlyInInput.length;
     return sum;
   }, [slotDiffsForShow]);
 
-  const objSlotPrimaryDisabledReason = useMemo(() => {
+  // 差分総数（不一致 + 未入力）
+  const slotDiffTotalKeys = useMemo(() => {
+    return slotOnlyInInputTotalKeys + objSlotMissingTotal;
+  }, [slotOnlyInInputTotalKeys, objSlotMissingTotal]);
+
+const objSlotPrimaryDisabledReason = useMemo(() => {
     if (!objChecked) return "まず上の「OD作成アシスト（オブジェクト）」をクリックして診断してください。";
     if (!slotDiffHasAny) return "差分がありません。";
     if (objRevealSlotDiff) return "表示済みです。";
@@ -1368,6 +1379,7 @@ const ExperimentPage: React.FC = () => {
 
     // ★ スロット差分：要望に合わせて「入力にのみ含まれる（正答例と一致しない入力）」だけ収集
     const slotDiffs: { base: string; onlyInInput: string[] }[] = [];
+    const slotMissingByBase: { base: string; missingInInput: string[] }[] = [];
 
     const bases = Array.from(objAssist.requiredBases).sort((a, b) =>
       a.localeCompare(b, "ja")
@@ -1383,8 +1395,15 @@ const ExperimentPage: React.FC = () => {
         .filter((k) => !req.has(k))
         .sort((a, b) => a.localeCompare(b, "ja"));
 
+      const missingInInput = Array.from(req)
+        .filter((k) => !pres.has(k))
+        .sort((a, b) => a.localeCompare(b, "ja"));
+
       if (onlyInInput.length > 0) {
         slotDiffs.push({ base, onlyInInput });
+      }
+      if (missingInInput.length > 0) {
+        slotMissingByBase.push({ base, missingInInput });
       }
     }
 
@@ -1401,6 +1420,7 @@ const ExperimentPage: React.FC = () => {
       slotMatchedTotal: objAssist.matchedSlotKeyTotal,
       extraSlotCount: objAssist.extraSlotKeyTotal,
       slotDiffs,
+      slotMissingByBase,
     });
 
     // 診断し直し = 表示状態リセット
@@ -1448,7 +1468,7 @@ const ExperimentPage: React.FC = () => {
     if (!objChecked)
       return alert("まず上の「OD作成アシスト（オブジェクト）」をクリックして診断してください。");
     if (!objDiagnoseSnapshot) return;
-    if ((objDiagnoseSnapshot.slotDiffs?.length ?? 0) === 0) return;
+    if (!slotDiffHasAny) return;
     if (objRevealSlotDiff) return;
     if (!objSlotDiffDirtySinceHint) return;
 
@@ -1463,7 +1483,7 @@ const ExperimentPage: React.FC = () => {
     if (!objChecked)
       return alert("まず上の「OD作成アシスト（オブジェクト）」をクリックして診断してください。");
     if (!objDiagnoseSnapshot) return;
-    if ((objDiagnoseSnapshot.slotDiffs?.length ?? 0) === 0) return;
+    if (!slotDiffHasAny) return;
     if (objRevealSlotDiff) return;
 
     const ok = window.confirm(
@@ -1742,6 +1762,15 @@ const ExperimentPage: React.FC = () => {
       if (linkMissingCount > 0) medium = true;
     }
 
+    // スロット名の差分（正答例にあるが未入力／不一致）が残っている場合も確認を出す
+    if (objChecked) {
+      if (slotDiffTotalKeys > 0) medium = true;
+    } else {
+      // 未診断でも差分がありそうなら弱い警告
+      if (slotDiffTotalKeys > 0) weak = true;
+    }
+
+
     if (!strong && !medium && !weak) return { needsConfirm: false, message: "" };
 
     const title = strong
@@ -1759,7 +1788,10 @@ const ExperimentPage: React.FC = () => {
     parts.push(
       `・リンク：正答に含まれる ${linkInputMatched}/${linkInputTotal} ／ 正答にない ${linkInputUnmatched}/${linkInputTotal} ／ 正答にあるが未入力 ${linkMissingCount} ／ 正答例と一致しない候補 ${linkExtraCount}`
     );
-    parts.push("");
+        parts.push(
+      `・スロット名：不一致 ${slotOnlyInInputTotalKeys} ／ 正答例にあるが未入力 ${objSlotMissingTotal}`
+    );
+parts.push("");
     parts.push("このままクラス図編集へ進みますか？");
     return { needsConfirm: true, message: parts.join("\n") };
   };
@@ -2162,7 +2194,7 @@ const ExperimentPage: React.FC = () => {
                     subtitle="正答例にも入力にも存在するインスタンス名について、入力にのみ含まれるスロット名を表示します。"
                     countText={
                       objChecked
-                        ? `一致しないスロット名：${slotDiffTotalKeys}`
+                        ? `差分：${slotOnlyInInputTotalKeys}（不一致 ${slotOnlyInInputTotalKeys} / 未入力 ${objSlotMissingTotal}）`
                         : undefined
                     }
                     stateBadge={badgeForSlot}
@@ -2173,10 +2205,10 @@ const ExperimentPage: React.FC = () => {
                             一致 {objSlotMatchedTotal}/{objSlotRequiredTotal}
                           </span>
                           <span className="px-2 py-0.5 rounded border bg-rose-50 border-rose-200 text-[10px]">
-                            不一致 {objSlotMissingTotal}
+                            不一致 {slotOnlyInInputTotalKeys}
                           </span>
                           <span className="px-2 py-0.5 rounded border bg-slate-50 border-slate-200 text-[10px]">
-                            正答例にあるが未入力 {slotDiffTotalKeys}
+                            正答例にあるが未入力 {objSlotMissingTotal}
                           </span>
                         </>
                       ) : null
@@ -2204,28 +2236,60 @@ const ExperimentPage: React.FC = () => {
                         スロット名（正答例と異なる入力）
                       </div>
 
-                      {(objDiagnoseSnapshot.slotDiffs?.length ?? 0) === 0 ? (
+                      {((objDiagnoseSnapshot.slotDiffs?.length ?? 0) === 0) &&
+                      ((objDiagnoseSnapshot.slotMissingByBase?.length ?? 0) === 0) ? (
                         <div className="mt-1 text-slate-500">
                           一致しないスロット名は見つかりませんでした。
                         </div>
                       ) : (
-                        <div className="mt-2 space-y-2">
-                          {objDiagnoseSnapshot.slotDiffs.map((d) => (
-                            <div key={d.base} className="rounded border bg-white p-2">
-                              <div className="font-semibold text-slate-700">{d.base}</div>
+                        <div className="mt-2 space-y-3">
+                          {(objDiagnoseSnapshot.slotDiffs?.length ?? 0) > 0 && (
+                            <div className="space-y-2">
+                              <div className="font-semibold text-slate-700">
+                                入力したが、正答例と一致しないスロット名
+                              </div>
+                              {objDiagnoseSnapshot.slotDiffs.map((d) => (
+                                <div key={`only-${d.base}`} className="rounded border bg-white p-2">
+                                  <div className="font-semibold text-slate-700">{d.base}</div>
 
-                              <div className="mt-1 flex flex-wrap gap-1">
-                                {d.onlyInInput.map((k) => (
+                                  <div className="mt-1 flex flex-wrap gap-1">
+                                    {d.onlyInInput.map((k) => (
+                                      <span
+                                        key={`${d.base}-${k}`}
+                                        className="px-2 py-0.5 rounded border bg-slate-50 border-slate-200 text-slate-700"
+                                      >
+                                        {k}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {(objDiagnoseSnapshot.slotMissingByBase?.length ?? 0) > 0 && (
+                            <div className="space-y-2">
+                              <div className="font-semibold text-slate-700">
+                                正答例にあるが未入力なスロット（インスタンス名のみ表示）
+                              </div>
+                              <div className="text-[10px] text-slate-500">
+                                ※ スロット名は表示しません（答えを示してしまうため）。未入力が残っているインスタンス名だけ示します。
+                              </div>
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {objDiagnoseSnapshot.slotMissingByBase.map((d) => (
                                   <span
-                                    key={`${d.base}-${k}`}
-                                    className="px-2 py-0.5 rounded border bg-slate-50 border-slate-200 text-slate-700"
+                                    key={`miss-${d.base}`}
+                                    className="px-2 py-1 rounded border bg-white text-slate-700"
                                   >
-                                    {k}
+                                    {d.base}
+                                    <span className="ml-1 text-[10px] text-slate-500">
+                                      （未入力 {d.missingInInput.length}）
+                                    </span>
                                   </span>
                                 ))}
                               </div>
                             </div>
-                          ))}
+                          )}
                         </div>
                       )}
 
