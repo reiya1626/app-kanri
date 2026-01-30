@@ -143,24 +143,6 @@ export default function HomePage() {
 
         <div className="space-y-1">
           <div className="text-sm font-medium">
-            クラス図（正答例）PlantUML をアップロード
-          </div>
-          <input
-            type="file"
-            accept=".puml,.txt"
-            onChange={(e) => handlePumlUpload(e, "class")}
-            className="text-sm"
-          />
-          <div className="text-xs mt-1">
-            <div className="font-semibold">現在の内容</div>
-            <pre className="border rounded p-2 max-h-40 overflow-y-auto bg-neutral-50 text-[10px] whitespace-pre-wrap">
-              {classAnswerPuml || "（未登録）"}
-            </pre>
-          </div>
-        </div>
-
-        <div className="space-y-1">
-          <div className="text-sm font-medium">
             オブジェクト図（正答例）PlantUML をアップロード
           </div>
           <input
