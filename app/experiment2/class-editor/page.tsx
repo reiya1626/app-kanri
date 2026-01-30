@@ -54,16 +54,7 @@ const STORAGE_KEY_EDITOR_INITIAL = "EXPERIMENT_CLASS_EDITOR_INITIAL";
 // ★ 多重度は4択で確実に選択できるように固定
 const MULT4 = ["0..1", "1", "0..*", "1..*"] as const;
 
-// ===== UI 小物：? ヘルプ（title で説明を表示） =====
-const HelpBadge = ({ text }: { text: string }) => (
-  <span
-    className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-slate-100 text-slate-600 text-[10px] cursor-help select-none"
-    title={text}
-    aria-label={text}
-  >
-    ?
-  </span>
-);
+// (HelpBadge removed — inline help badges are disabled in this page)
 
 // 簡易ID生成
 const makeId = () => Math.random().toString(36).slice(2);
@@ -520,19 +511,9 @@ const ClassEditorPage: React.FC = () => {
       aliasById.set(cls.id, `C_${safe}`);
     }
 
-    // 選択中クラス → 青，選択中関連の両端クラス → 赤系
+    // クラスの色付け（選択による色変化は無効）
     for (const cls of classes) {
-      const isSelectedClass = cls.id === selectedClassId;
-      const isEndpointOfSelectedRelation =
-        selectedRelation &&
-        (selectedRelation.fromClassId === cls.id || selectedRelation.toClassId === cls.id);
-
-      let colorPart = "";
-      if (isSelectedClass) {
-        colorPart = " #CCEEFF";
-      } else if (isEndpointOfSelectedRelation) {
-        colorPart = " #FFCCCC";
-      }
+      const colorPart = "";
 
       const alias = aliasById.get(cls.id) ?? `C_${String(cls.id ?? "").replace(/[^A-Za-z0-9_]/g, "_")}`;
       lines.push(`class "${esc(cls.name)}" as ${alias}${colorPart} {`);
@@ -549,8 +530,7 @@ const ClassEditorPage: React.FC = () => {
       const to = classes.find((c) => c.id === r.toClassId);
       if (!from || !to) continue;
 
-      const isRelSelected = r.id === selectedRelationId;
-      const arrow = isRelSelected ? `-[#red]-` : "--";
+      const arrow = "--";
 
       const leftMult = esc(r.leftMultiplicity || "");
       const rightMult = esc(r.rightMultiplicity || "");
@@ -698,59 +678,9 @@ const ClassEditorPage: React.FC = () => {
     };
   }, [selectedRelation, classes, odObjects, odLinks]);
 
-  // 問題文ハイライト対象（トークン）
-  const problemHighlightTokens = useMemo<HighlightToken[]>(() => {
-    const tokens: HighlightToken[] = [];
-
-    const pushWithBase = (raw: string | null | undefined, context: string) => {
-      const t = String(raw ?? "").trim();
-      if (!t) return;
-
-      tokens.push({
-        match: t,
-        priority: 2,
-        reason: `${context}「${t}」に一致`,
-      });
-
-      const base = baseNameForProblemHighlight(t);
-      if (base && base !== t) {
-        tokens.push({
-          match: base,
-          priority: 1,
-          reason: `${context}「${t}」から末尾の識別子を除いた「${base}」に一致`,
-        });
-      }
-    };
-
-    if (selectedClass) {
-      pushWithBase(selectedClass.name, "選択中のクラス名");
-    }
-
-    if (selectedRelation) {
-      if (selectedRelation.label) pushWithBase(selectedRelation.label, "選択中の関連ラベル");
-      const from = classes.find((c) => c.id === selectedRelation.fromClassId);
-      const to = classes.find((c) => c.id === selectedRelation.toClassId);
-      if (from) pushWithBase(from.name, "選択中の関連の端点（クラス名）");
-      if (to) pushWithBase(to.name, "選択中の関連の端点（クラス名）");
-    }
-
-    const byKey = new Map<string, HighlightToken>();
-    for (const t of tokens) {
-      const k = String(t.match ?? "").trim().toLowerCase();
-      if (!k) continue;
-      const prev = byKey.get(k);
-      if (!prev || (t.priority ?? 0) > (prev.priority ?? 0)) byKey.set(k, t);
-    }
-    return Array.from(byKey.values());
-  }, [selectedClass, selectedRelation, classes]);
-
-  const highlightExplain = useMemo(() => {
-    const name = (selectedClass?.name ?? "").trim();
-    if (!name) return null;
-    const base = baseNameForProblemHighlight(name);
-    if (!base || base === name) return null;
-    return { name, base };
-  }, [selectedClass?.name]);
+  // 問題文ハイライトは無効化（選択時の本文強調を表示しない）
+  const problemHighlightTokens = useMemo<HighlightToken[]>(() => [], [selectedClass, selectedRelation, classes]);
+  const highlightExplain = useMemo(() => null, [selectedClass?.name]);
 
   // ===== OD→CD 連携: OD側リンクの集計（フィードバック用） =====
   const odLinkSummary = useMemo(() => {
@@ -1035,10 +965,10 @@ const ClassEditorPage: React.FC = () => {
     <div className="flex flex-col h-screen bg-slate-50">
       {/* ヘッダ */}
       <div className="flex items-center justify-between px-3 py-2 border-b bg-white">
-        <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2">
           <button
             className="px-3 py-1 rounded bg-slate-100 text-sm hover:bg-slate-200"
-            onClick={() => router.push("/experiment")}
+            onClick={() => router.push("/experiment2")}
           >
             ← オブジェクト図へ戻る
           </button>
@@ -1075,13 +1005,8 @@ const ClassEditorPage: React.FC = () => {
             <div className="flex-1 flex min-h-0">
               {/* 左：要求文 */}
               <div className="flex-1 p-3 overflow-auto text-[12px] leading-relaxed whitespace-pre-wrap min-w-0">
-                {highlightExplain && (
-                  <div className="mb-2 text-[11px] text-slate-600">
-                    選択中のクラス名「<span className="font-semibold">{highlightExplain.name}</span>」に合わせて，
-                    要求文中の「<span className="font-semibold">{highlightExplain.base}</span>」も強調表示しています．
-                  </div>
-                )}
-                {highlightText(classProblemText, problemHighlightTokens)}
+                {/* highlightExplain and highlighting removed */}
+                {classProblemText}
               </div></div>
           </div>
 
@@ -1115,16 +1040,9 @@ const ClassEditorPage: React.FC = () => {
                       selectedRelation &&
                       (selectedRelation.fromClassId === c.id || selectedRelation.toClassId === c.id);
 
-                    let itemColor = "";
-                    if (isSelected) {
-                      itemColor = "bg-sky-200 border-sky-400";
-                    } else if (isEndpointOfSelectedRelation) {
-                      itemColor = "bg-red-50 border-red-300";
-                    } else {
-                      itemColor = "bg-slate-50 border-slate-200";
-                    }
-
-                    const hoverColor = isSelected ? "hover:bg-sky-200" : "hover:bg-sky-50";
+                    // 選択時の色強調を無効化（常に非強調スタイル）
+                    const itemColor = "bg-slate-50 border-slate-200";
+                    const hoverColor = "hover:bg-slate-50";
 
                     return (
                       <button
@@ -1153,7 +1071,7 @@ const ClassEditorPage: React.FC = () => {
                       <div>
                         <label className="block text-[11px] font-semibold mb-1">
                           クラス名
-                          <HelpBadge text="クラス名：似たオブジェクトをまとめた「種類」の名前です．ODで登場したオブジェクト名（末尾の番号など）を一般化して付けます．例）学生，授業，注文 など．" />
+                          {/* HelpBadge removed */}
                         </label>
                         <input
                           className="w-full border rounded px-2 py-1 text-[12px]"
@@ -1167,7 +1085,7 @@ const ClassEditorPage: React.FC = () => {
                         <div className="flex items-center justify-between mb-1">
                           <span className="text-[11px] font-semibold">
                             属性一覧
-                            <HelpBadge text="属性：クラスが持つ性質（データ）です．ODのスロット（key=value）の key が候補になります．型は値の種類（string/int/real/boolean）を選びます．" />
+                            {/* HelpBadge removed */}
                           </span>
                           <button
                             className="px-2 py-0.5 text-[11px] rounded bg-slate-100 hover:bg-slate-200"
@@ -1208,7 +1126,7 @@ const ClassEditorPage: React.FC = () => {
                                   <option value="real">real</option>
                                   <option value="boolean">boolean</option>
                                 </select>
-                                <HelpBadge text="属性の型：値の種類を表します．string=文字列，int=整数，real=小数，boolean=true/false です．ODの値に合わせて選びます．" />
+                                {/* HelpBadge removed */}
                               </div>
                               <div className="flex justify-end">
                                 <button
@@ -1242,9 +1160,8 @@ const ClassEditorPage: React.FC = () => {
               <div className="px-3 py-2 border-b flex items-center justify-between bg-white">
                 <span className="font-semibold text-sm">
                   関連
-                  <HelpBadge text="関連：クラス同士の関係を表します．ODで結んだリンクを一般化して，クラス間の関係として整理します．" />
+                  {/* HelpBadges removed */}
                   と多重度
-                  <HelpBadge text="多重度：片方 1 つに対して，反対側が何個つながるかを表します．例）1=必ず 1 つ，0..1=0 または 1，0..*=0 以上，1..*=1 以上です．" />
                   の編集
                 </span>
                 <button
@@ -1265,18 +1182,17 @@ const ClassEditorPage: React.FC = () => {
                 {relations.map((r) => {
                   const isSelected = selectedRelationId === r.id;
 
-                  return (
-                    <div
-                      key={r.id}
-                      className={
-                        "m-2 p-2 border rounded bg-white flex flex-col gap-1 cursor-pointer transition-colors " +
-                        (isSelected ? "border-red-400 ring-1 ring-red-300 bg-red-50" : "border-slate-200 hover:bg-slate-50")
-                      }
-                      onClick={() => setSelectedRelationId(isSelected ? null : r.id)}
-                    >
+                    return (
+                      <div
+                        key={r.id}
+                        className={
+                          "m-2 p-2 border rounded bg-white flex flex-col gap-1 cursor-pointer transition-colors border-slate-200 hover:bg-slate-50"
+                        }
+                        onClick={() => setSelectedRelationId(isSelected ? null : r.id)}
+                      >
                       <div className="flex items-center gap-2 text-[11px] text-slate-600">
                         <span>端点と多重度</span>
-                        <HelpBadge text="多重度：片方 1 つに対して，反対側が何個つながるかを表します．左右はそれぞれ，相手側の数です．" />
+                        {/* HelpBadge removed */}
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2">
@@ -1342,7 +1258,7 @@ const ClassEditorPage: React.FC = () => {
                       <div className="flex items-center gap-2 mt-1">
                         <span className="text-[11px]">
                           関連名
-                          <HelpBadge text="関連名：関係の意味を表す名前です．動詞（〜する，〜を持つ，〜を担当する 等）で書くと分かりやすくなります．ODのリンクラベルを一般化したものが候補になります．" />
+                          {/* HelpBadge removed */}
                           :
                         </span>
                         <input
