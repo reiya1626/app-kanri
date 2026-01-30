@@ -488,7 +488,6 @@ const AssistHeader: React.FC<{
             className="text-[11px] px-2 py-0.5 border rounded bg-white hover:bg-slate-100"
             onClick={onToggle}
             disabled={!enabled}
-            title={collapsed ? "アシストを開く" : "アシストを閉じる"}
           >
             {collapsed ? "表示する" : "折りたたむ"}
           </button>
@@ -1485,7 +1484,7 @@ const ExperimentPage: React.FC = () => {
                   <div className="flex flex-col gap-2">
                     <div>
                       <div className="flex items-center">
-                        <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.objectName}>
+                        <label className="block text-[11px] font-semibold mb-1">
                           インスタンス名
                         </label>
                       </div>
@@ -1497,14 +1496,13 @@ const ExperimentPage: React.FC = () => {
                         onFocus={() => setEditingObjectId(selectedObject.id)}
                         onBlur={() => setEditingObjectId(null)}
                         placeholder=""
-                        title={TOOLTIP.objectName}
                       />
                     </div>
 
                     <div>
                       <div className="flex items-center justify-between mb-1">
                         <div className="flex items-center">
-                          <span className="text-[11px] font-semibold" title={`${TOOLTIP.slotKey}\n${TOOLTIP.slotValue}`}>
+                          <span className="text-[11px] font-semibold">
                             スロット（スロット名 と 値）
                           </span>
                         </div>
@@ -1530,7 +1528,7 @@ const ExperimentPage: React.FC = () => {
                                 value={s.key}
                                 onChange={(e) => handleUpdateSlot(idx, { key: e.target.value })}
                                 placeholder=""
-                                title={TOOLTIP.slotKey}
+                               
                               />
                               <span className="text-[11px] text-slate-400">=</span>
                               <input
@@ -1538,7 +1536,7 @@ const ExperimentPage: React.FC = () => {
                                 value={s.value}
                                 onChange={(e) => handleUpdateSlot(idx, { value: e.target.value })}
                                 placeholder={""}
-                                title={TOOLTIP.slotValue}
+                                
                               />
                             </div>
                             <div className="flex justify-end">
@@ -1676,7 +1674,7 @@ const ExperimentPage: React.FC = () => {
                   <div className="flex flex-col gap-2 text-xs">
                     <div>
                       <div className="flex items-center">
-                        <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.linkEndpoints}>
+                        <label className="block text-[11px] font-semibold mb-1">
                           リンク
                         </label>
                       </div>
@@ -1686,7 +1684,6 @@ const ExperimentPage: React.FC = () => {
                           className="border rounded px-1 py-0.5 text-[11px]"
                           value={selectedLink.from}
                           onChange={(e) => handleUpdateLink(selectedLink.id, { from: e.target.value })}
-                          title={TOOLTIP.linkEndpoints}
                         >
                           {objects.map((o) => (
                             <option key={o.id} value={o.id}>
@@ -1699,7 +1696,6 @@ const ExperimentPage: React.FC = () => {
                           className="border rounded px-1 py-0.5 text-[11px]"
                           value={selectedLink.to}
                           onChange={(e) => handleUpdateLink(selectedLink.id, { to: e.target.value })}
-                          title={TOOLTIP.linkEndpoints}
                         >
                           {objects.map((o) => (
                             <option key={o.id} value={o.id}>
@@ -1712,7 +1708,7 @@ const ExperimentPage: React.FC = () => {
 
                     <div>
                       <div className="flex items-center">
-                        <label className="block text-[11px] font-semibold mb-1" title={TOOLTIP.linkLabel}>
+                        <label className="block text-[11px] font-semibold mb-1" >
                           リンクラベル
                         </label>
                       </div>
@@ -1722,7 +1718,6 @@ const ExperimentPage: React.FC = () => {
                         value={selectedLink.label}
                         onChange={(e) => handleUpdateLink(selectedLink.id, { label: e.target.value })}
                         placeholder=""
-                        title={TOOLTIP.linkLabel}
                       />
                     </div>
 
@@ -1747,7 +1742,7 @@ const ExperimentPage: React.FC = () => {
 
               <div className="flex items-center gap-2">
                 <div className="flex items-center mr-2">
-                  <span className="text-[11px] text-slate-500" title={TYPE_LEGEND_TOOLTIP}>
+                  <span className="text-[11px] text-slate-500" >
                     型の見方
                   </span>
                 </div>

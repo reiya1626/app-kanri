@@ -1077,7 +1077,7 @@ const ClassEditorPage: React.FC = () => {
                           className="w-full border rounded px-2 py-1 text-[12px]"
                           value={selectedClass.name}
                           onChange={(e) => handleUpdateClass(selectedClass.id, { name: e.target.value })}
-                          placeholder="例）学生，授業 など"
+                          placeholder=""
                         />
                       </div>
 
@@ -1097,7 +1097,6 @@ const ClassEditorPage: React.FC = () => {
 
                         {selectedClass.attrs.length === 0 && (
                           <div className="text-[11px] text-slate-500 mb-1">
-                            例）属性名：年齢，型：string など
                           </div>
                         )}
 
@@ -1111,7 +1110,7 @@ const ClassEditorPage: React.FC = () => {
                                   onChange={(e) =>
                                     handleUpdateAttr(selectedClass.id, a.id, { name: e.target.value })
                                   }
-                                  placeholder="属性名（例：年齢）"
+                                  placeholder="属性名"
                                 />
                                 <span className="text-[11px] text-slate-400">:</span>
                                 <select
@@ -1265,7 +1264,7 @@ const ClassEditorPage: React.FC = () => {
                           className="flex-1 border rounded px-1 py-0.5 text-[11px]"
                           value={r.label}
                           onChange={(e) => handleUpdateRelation(r.id, { label: e.target.value })}
-                          placeholder="例）履修する，担当する など"
+                          placeholder=""
                         />
                       </div>
 
