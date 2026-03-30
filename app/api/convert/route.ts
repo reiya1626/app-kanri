@@ -16,6 +16,10 @@ import plantumlEncoder from "plantuml-encoder";
  *   （OD観測値は multiplicityHints で別返し）
  * - 明示リンクに label があれば、それを関連名として採用（多数決で1つに絞る）
  * - さらに、クラス対ごとのラベル候補一覧 relationHints も返す
+ * - 継承候補は「共通属性があり、かつ双方に固有属性がある」組合せを提示する
+ *   - 共通属性が2個以上 → 有力候補
+ *   - 共通属性が1個 → 参考候補
+ *   - 親クラス名は自動確定せず、suggestedParentName は補助候補のみ返す
  */
 
 type PrimType = "int" | "real" | "boolean" | "string";
@@ -59,6 +63,21 @@ type MultiplicityHint = {
   bToAMax: number;
 };
 
+type InheritanceCandidateStrength = "strong" | "weak";
+
+type InheritanceCandidate = {
+  key: string;
+  children: [string, string];
+  sharedAttrs: string[];
+  childSpecificAttrs: Record<string, string[]>;
+  sharedCount: number;
+  strength: InheritanceCandidateStrength;
+  score: number;
+  suggestedParentName?: string;
+  explanationFacts: string[];
+  explanationSummary: string;
+};
+
 // ===== ユーティリティ =====
 
 const detectType = (v: string): PrimType => {
@@ -91,6 +110,104 @@ const tokenizeList = (raw: string): string[] => {
 
 /** PlantUML安全用：ダブルクオートをエスケープ */
 const esc = (s: string) => s.replace(/"/g, '\\"');
+
+const uniqueSorted = (values: string[]) => Array.from(new Set(values)).sort();
+
+const title = (strength: InheritanceCandidateStrength) =>
+  strength === "strong" ? "有力候補" : "参考候補";
+
+const longestCommonSuffix = (a: string, b: string): string => {
+  const aa = a.trim();
+  const bb = b.trim();
+  let i = 0;
+  while (
+    i < aa.length &&
+    i < bb.length &&
+    aa.charAt(aa.length - 1 - i) === bb.charAt(bb.length - 1 - i)
+  ) {
+    i += 1;
+  }
+  return i > 0 ? aa.slice(aa.length - i).trim() : "";
+};
+
+const pickSuggestedParentName = (a: string, b: string): string | undefined => {
+  const suffix = longestCommonSuffix(a, b);
+  if (suffix && suffix.length >= 2) return suffix;
+  return undefined;
+};
+
+function buildInheritanceCandidates(classAttrMap: Map<string, string[]>) {
+  const classNames = Array.from(classAttrMap.keys()).sort();
+  const results: InheritanceCandidate[] = [];
+
+  for (let i = 0; i < classNames.length; i += 1) {
+    for (let j = i + 1; j < classNames.length; j += 1) {
+      const a = classNames[i];
+      const b = classNames[j];
+      const attrsA = uniqueSorted(classAttrMap.get(a) ?? []);
+      const attrsB = uniqueSorted(classAttrMap.get(b) ?? []);
+
+      if (attrsA.length === 0 || attrsB.length === 0) continue;
+
+      const setA = new Set(attrsA);
+      const setB = new Set(attrsB);
+
+      const sharedAttrs = attrsA.filter((k) => setB.has(k));
+      const onlyA = attrsA.filter((k) => !setB.has(k));
+      const onlyB = attrsB.filter((k) => !setA.has(k));
+
+      // 教育向けルール:
+      // - 共通属性が1個以上ある
+      // - 双方に固有属性が1個以上ある
+      if (sharedAttrs.length < 1) continue;
+      if (onlyA.length < 1 || onlyB.length < 1) continue;
+
+      const denom = Math.max(attrsA.length, attrsB.length, 1);
+      const score = Number((sharedAttrs.length / denom).toFixed(2));
+      const strength: InheritanceCandidateStrength =
+        sharedAttrs.length >= 2 ? "strong" : "weak";
+
+      const suggestedParentName = pickSuggestedParentName(a, b);
+      const explanationFacts = [
+        `${a} と ${b} は共通して「${sharedAttrs.join("」「")}」を持っています。`,
+        `${a} には「${onlyA.join("」「")}」があります。`,
+        `${b} には「${onlyB.join("」「")}」があります。`,
+      ];
+
+      const explanationSummary =
+        strength === "strong"
+          ? `複数の共通属性があり、かつ両クラスに固有属性もあるため、共通部分を親クラスにまとめる継承関係の${title(
+              strength
+            )}です。`
+          : `共通属性はありますが数は多くないため、継承関係の${title(
+              strength
+            )}として提示しています。親クラスにまとめるかは設計上の検討が必要です。`;
+
+      results.push({
+        key: `${a}::${b}`,
+        children: [a, b],
+        sharedAttrs,
+        childSpecificAttrs: {
+          [a]: onlyA,
+          [b]: onlyB,
+        },
+        sharedCount: sharedAttrs.length,
+        strength,
+        score,
+        suggestedParentName,
+        explanationFacts,
+        explanationSummary,
+      });
+    }
+  }
+
+  return results.sort((x, y) => {
+    if (x.strength !== y.strength) return x.strength === "strong" ? -1 : 1;
+    if (y.sharedCount !== x.sharedCount) return y.sharedCount - x.sharedCount;
+    if (y.score !== x.score) return y.score - x.score;
+    return x.key.localeCompare(y.key, "ja");
+  });
+}
 
 // ====== ルート本体 ======
 export async function POST(req: NextRequest) {
@@ -212,6 +329,15 @@ export async function POST(req: NextRequest) {
       }
     }
   }
+
+  // 継承候補用: クラスごとの属性一覧を作る
+  const classAttrMap = new Map<string, string[]>();
+  for (const c of classes) {
+    const attrKeys = Array.from((typeSets.get(c.name) ?? new Map()).keys()).sort();
+    classAttrMap.set(c.name, attrKeys);
+  }
+
+  const inheritanceCandidates = buildInheritanceCandidates(classAttrMap);
 
   // --- 参照（関連）観測 ---
   // NOTE:
@@ -458,15 +584,15 @@ export async function POST(req: NextRequest) {
   puml += "@enduml";
 
   const encoded = plantumlEncoder.encode(puml);
-
   const issues = summarizeIssues(typeSets, emptySeen);
 
   return NextResponse.json({
     classPuml: puml,
     encodedPuml: encoded,
     issues,
-    relationHints, // ★ クラス対ごとのラベル候補一覧（class-editor で使う）
-    multiplicityHints, // ★ 多重度の観測値（ODから）
+    relationHints,
+    multiplicityHints,
+    inheritanceCandidates,
   });
 }
 
