@@ -1,3 +1,4 @@
+
 // app/experiment/page.tsx
 "use client";
 
@@ -74,6 +75,15 @@ type EditorPayload = {
   relationHints?: RelationHint[];
   inheritanceCandidates?: InheritanceCandidate[];
   snapshot?: { objects: Obj[]; links: Link[] };
+};
+
+type LinkSig = {
+  a: string;
+  b: string;
+  label: string;
+  endpointKey: string;
+  fullKey: string;
+  pretty: string;
 };
 
 const STORAGE_KEY_STATE = "EXPERIMENT_OBJECT_EDITOR_STATE";
@@ -250,15 +260,6 @@ const extractRequiredSlotKeysByBaseFromPuml = (puml: string) => {
   return map;
 };
 
-type LinkSig = {
-  a: string;
-  b: string;
-  label: string;
-  endpointKey: string;
-  fullKey: string;
-  pretty: string;
-};
-
 const makeEndpointKey = (aBase: string, bBase: string) => {
   const x = aBase <= bBase ? aBase : bBase;
   const y = aBase <= bBase ? bBase : aBase;
@@ -295,11 +296,10 @@ const extractLinksFromPuml = (puml: string) => {
     out.push({ a: aBase, b: bBase, label, endpointKey, fullKey, pretty });
   }
   const uniq = new Map<string, LinkSig>();
-  for (const l of out) { if (!uniq.has(l.fullKey)) uniq.set(l.fullKey, l); }
+  for (const l of out) if (!uniq.has(l.fullKey)) uniq.set(l.fullKey, l);
   return Array.from(uniq.values());
 };
 
-// ===== パン＆ズーム用のカスタムフック =====
 const usePanZoom = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -386,33 +386,57 @@ const HelpBadge: React.FC<{ title: string }> = ({ title }) => {
   );
 };
 
-const HintCard: React.FC<{
+const DiagnoseGroupCard: React.FC<{
   title: string;
-  subtitle: string;
-  countText?: React.ReactNode;
-  primaryLabel: string;
-  onPrimary: () => void;
+  tone: "missing" | "review";
+  count: number;
+  summary: string;
+  detailLabel: string;
+  onDetail: () => void;
   disabled?: boolean;
-}> = ({ title, subtitle, countText, primaryLabel, onPrimary, disabled }) => (
-  <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4">
-    <div className="font-semibold text-slate-800 mb-2">{title}</div>
-    <div className="text-xs text-slate-600 mb-3">{subtitle}</div>
-    {countText && (
-      <div className="mb-4 px-3 py-2 bg-amber-50 text-amber-800 rounded text-xs font-medium inline-flex items-center gap-2">
-        <span>💡</span>{countText}
+  children?: React.ReactNode;
+}> = ({ title, tone, count, summary, detailLabel, onDetail, disabled, children }) => {
+  const toneClass =
+    tone === "missing"
+      ? "border-amber-200 bg-amber-50"
+      : "border-rose-200 bg-rose-50";
+  const badgeClass =
+    tone === "missing"
+      ? "bg-amber-100 text-amber-800"
+      : "bg-rose-100 text-rose-800";
+
+  return (
+    <div className={`rounded-lg border p-4 shadow-sm ${toneClass}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-slate-800">{title}</div>
+          <div className="mt-1 text-xs text-slate-600">{summary}</div>
+        </div>
+        <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${badgeClass}`}>
+          {count}件
+        </span>
       </div>
-    )}
-    <button
-      className="px-4 py-1.5 text-xs font-medium rounded-md bg-indigo-600 text-white disabled:bg-slate-300"
-      onClick={onPrimary}
-      disabled={disabled}
-    >
-      {primaryLabel}
-    </button>
-  </div>
+      {children ? <div className="mt-3">{children}</div> : null}
+      <div className="mt-3">
+        <button
+          type="button"
+          className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-200 hover:bg-slate-50 disabled:bg-slate-100 disabled:text-slate-400"
+          onClick={onDetail}
+          disabled={disabled}
+        >
+          {detailLabel}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const CountBadge: React.FC<{ label: string; value: number }> = ({ label, value }) => (
+  <span className="px-2 py-1 rounded bg-white border border-amber-200 text-amber-800 text-xs font-medium">
+    {label} {value}
+  </span>
 );
 
-// ===== メイン =====
 const ExperimentPage: React.FC = () => {
   const router = useRouter();
   const { objectProblemText, objectAnswerPuml } = useProblemConfig();
@@ -429,15 +453,14 @@ const ExperimentPage: React.FC = () => {
   const [selectedLinkId, setSelectedLinkId] = useState<string | null>(null);
   const [editingObjectId] = useState<string | null>(null);
 
-  const [encodedObjectPuml, setEncodedObjectPuml] = useState<string>("");
-  const [classPuml, setClassPuml] = useState<string>("");
-  const [encodedClassPuml, setEncodedClassPuml] = useState<string>("");
+  const [encodedObjectPuml, setEncodedObjectPuml] = useState("");
+  const [classPuml, setClassPuml] = useState("");
+  const [encodedClassPuml, setEncodedClassPuml] = useState("");
   const [issues, setIssues] = useState<IssuesResponse | null>(null);
   const [relationHints, setRelationHints] = useState<RelationHint[]>([]);
   const [inheritanceCandidates, setInheritanceCandidates] = useState<InheritanceCandidate[]>([]);
   const [showInheritanceHint, setShowInheritanceHint] = useState(false);
 
-  const ZOOM_MIN = 0.3; const ZOOM_MAX = 3.0; const ZOOM_STEP = 0.1;
   const [objectZoom, setObjectZoom] = useState(1);
   const [classZoom, setClassZoom] = useState(1);
 
@@ -450,17 +473,25 @@ const ExperimentPage: React.FC = () => {
   const [objDiagnoseSnapshot, setObjDiagnoseSnapshot] = useState<ObjDiagnoseSnapshot | null>(null);
   const [objRevealExtra, setObjRevealExtra] = useState(0);
   const [objDirtySinceHint, setObjDirtySinceHint] = useState(false);
-  const [objRevealSlotDiff, setObjRevealSlotDiff] = useState(false);
-  const [objSlotDiffDirtySinceHint, setObjSlotDiffDirtySinceHint] = useState(false);
+  const [objRevealMissingHints, setObjRevealMissingHints] = useState(false);
+  const [objMissingDirtySinceHint, setObjMissingDirtySinceHint] = useState(false);
 
   const [linkChecked, setLinkChecked] = useState(false);
   const [linkDiagnoseSnapshot, setLinkDiagnoseSnapshot] = useState<LinkDiagnoseSnapshot | null>(null);
   const [linkRevealExtra, setLinkRevealExtra] = useState(0);
   const [linkDirtySinceHint, setLinkDirtySinceHint] = useState(false);
+  const [linkRevealMissingHints, setLinkRevealMissingHints] = useState(false);
+  const [linkMissingDirtySinceHint, setLinkMissingDirtySinceHint] = useState(false);
 
   const markMeaningfulChange = (affectObj: boolean, affectLink: boolean) => {
-    if (affectObj) { setObjDirtySinceHint(true); setObjSlotDiffDirtySinceHint(true); }
-    if (affectLink) setLinkDirtySinceHint(true);
+    if (affectObj) {
+      setObjDirtySinceHint(true);
+      setObjMissingDirtySinceHint(true);
+    }
+    if (affectLink) {
+      setLinkDirtySinceHint(true);
+      setLinkMissingDirtySinceHint(true);
+    }
   };
 
   const objAssistScrollRef = useRef<HTMLDivElement | null>(null);
@@ -476,7 +507,10 @@ const ExperimentPage: React.FC = () => {
     } catch {}
   }, []);
 
-  const hasUnnamedObject = useMemo(() => objects.some((o) => !o.name || o.name.trim().length === 0), [objects]);
+  const hasUnnamedObject = useMemo(
+    () => objects.some((o) => !o.name || o.name.trim().length === 0),
+    [objects]
+  );
 
   useEffect(() => {
     if ((objects.length === 0 && links.length === 0) || hasUnnamedObject) {
@@ -487,13 +521,20 @@ const ExperimentPage: React.FC = () => {
     const linkHighlightIds = new Set<string>();
     if (selectedObjectId) objectHighlightIds.add(selectedObjectId);
     const currentLink = links.find((l) => l.id === selectedLinkId) ?? null;
-    if (currentLink) { linkHighlightIds.add(currentLink.from); linkHighlightIds.add(currentLink.to); }
+    if (currentLink) {
+      linkHighlightIds.add(currentLink.from);
+      linkHighlightIds.add(currentLink.to);
+    }
 
     const lines: string[] = ["@startuml"];
     for (const o of objects) {
       const safeName = o.name || "(無名)";
       const underlined = `<u>${escLabel(safeName)}</u>`;
-      let fill = objectHighlightIds.has(o.id) ? " #FFF6BF" : linkHighlightIds.has(o.id) ? " #FFD6E0" : "";
+      const fill = objectHighlightIds.has(o.id)
+        ? " #FFF6BF"
+        : linkHighlightIds.has(o.id)
+          ? " #FFD6E0"
+          : "";
       lines.push(`object "${underlined}" as ${o.id}${fill} {`);
       for (const s of o.slots) {
         if (!s.key && !s.value) continue;
@@ -511,20 +552,34 @@ const ExperimentPage: React.FC = () => {
       lines.push(`${from.id} ${linePattern} ${to.id}${labelPart}`);
     }
     lines.push("@enduml");
-    try { setEncodedObjectPuml(plantumlEncoder.encode(lines.join("\n"))); } catch { setEncodedObjectPuml(""); }
+    try {
+      setEncodedObjectPuml(plantumlEncoder.encode(lines.join("\n")));
+    } catch {
+      setEncodedObjectPuml("");
+    }
   }, [objects, links, selectedObjectId, selectedLinkId, hasUnnamedObject]);
 
   useEffect(() => {
     if ((objects.length === 0 && links.length === 0) || hasUnnamedObject) {
-      setClassPuml(""); setEncodedClassPuml(""); setIssues(null); setRelationHints([]); setInheritanceCandidates([]); return;
+      setClassPuml("");
+      setEncodedClassPuml("");
+      setIssues(null);
+      setRelationHints([]);
+      setInheritanceCandidates([]);
+      return;
     }
+
     const controller = new AbortController();
     const id = setTimeout(async () => {
       try {
         const res = await fetch("/api/convert", {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            objects: objects.map((o) => ({ name: o.name, attrs: o.slots.map((s) => ({ key: s.key, value: s.value })) })),
+            objects: objects.map((o) => ({
+              name: o.name,
+              attrs: o.slots.map((s) => ({ key: s.key, value: s.value })),
+            })),
             links: links.map((l) => ({
               from: objects.find((o) => o.id === l.from)?.name ?? "",
               to: objects.find((o) => o.id === l.to)?.name ?? "",
@@ -537,7 +592,11 @@ const ExperimentPage: React.FC = () => {
         const data = (await res.json()) as ConvertResponse;
         const solid = forceSolidRelations(data.classPuml);
         setClassPuml(solid);
-        try { setEncodedClassPuml(plantumlEncoder.encode(solid)); } catch { setEncodedClassPuml(""); }
+        try {
+          setEncodedClassPuml(plantumlEncoder.encode(solid));
+        } catch {
+          setEncodedClassPuml("");
+        }
         setIssues(data.issues ?? null);
         setRelationHints(data.relationHints ?? []);
         setInheritanceCandidates(data.inheritanceCandidates ?? []);
@@ -545,20 +604,41 @@ const ExperimentPage: React.FC = () => {
         if (e?.name !== "AbortError") console.error(e);
       }
     }, 500);
-    return () => { clearTimeout(id); controller.abort(); };
+
+    return () => {
+      clearTimeout(id);
+      controller.abort();
+    };
   }, [objects, links, hasUnnamedObject]);
 
-  const inheritanceStrong = useMemo(() => inheritanceCandidates.filter((c) => c.strength === "strong"), [inheritanceCandidates]);
-  const inheritanceWeak = useMemo(() => inheritanceCandidates.filter((c) => c.strength === "weak"), [inheritanceCandidates]);
+  const inheritanceStrong = useMemo(
+    () => inheritanceCandidates.filter((c) => c.strength === "strong"),
+    [inheritanceCandidates]
+  );
+  const inheritanceWeak = useMemo(
+    () => inheritanceCandidates.filter((c) => c.strength === "weak"),
+    [inheritanceCandidates]
+  );
   const featuredInheritance = inheritanceStrong[0] ?? inheritanceWeak[0] ?? null;
 
-  const selectedObject = useMemo(() => objects.find((o) => o.id === selectedObjectId) ?? null, [objects, selectedObjectId]);
-  const selectedLink = useMemo(() => links.find((l) => l.id === selectedLinkId) ?? null, [links, selectedLinkId]);
+  const selectedObject = useMemo(
+    () => objects.find((o) => o.id === selectedObjectId) ?? null,
+    [objects, selectedObjectId]
+  );
+  const selectedLink = useMemo(
+    () => links.find((l) => l.id === selectedLinkId) ?? null,
+    [links, selectedLinkId]
+  );
 
   const objAssist = useMemo(() => {
     const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
+
     const requiredBases = new Set<string>();
-    if (enabled) extractObjectLabelsFromPuml(objectAnswerPuml).forEach((raw) => requiredBases.add(baseNameForAssist(raw)));
+    if (enabled) {
+      extractObjectLabelsFromPuml(objectAnswerPuml).forEach((raw) => {
+        requiredBases.add(baseNameForAssist(raw));
+      });
+    }
 
     const presentBases = new Set<string>();
     objects.forEach((o) => {
@@ -566,10 +646,18 @@ const ExperimentPage: React.FC = () => {
       if (o.name?.trim()) presentBases.add(baseNameForAssist(o.name));
     });
 
-    const missingBases = enabled ? Array.from(requiredBases).filter((b) => !presentBases.has(b)).sort() : [];
-    const extraBases = enabled ? Array.from(presentBases).filter((b) => !requiredBases.has(b)).sort() : [];
+    const missingBases = enabled
+      ? Array.from(requiredBases).filter((b) => !presentBases.has(b)).sort()
+      : [];
 
-    const requiredSlotKeysByBase = enabled ? extractRequiredSlotKeysByBaseFromPuml(objectAnswerPuml) : new Map<string, Set<string>>();
+    const extraBases = enabled
+      ? Array.from(presentBases).filter((b) => !requiredBases.has(b)).sort()
+      : [];
+
+    const requiredSlotKeysByBase = enabled
+      ? extractRequiredSlotKeysByBaseFromPuml(objectAnswerPuml)
+      : new Map<string, Set<string>>();
+
     const presentSlotKeysByBase = new Map<string, Set<string>>();
 
     objects.forEach((o) => {
@@ -588,11 +676,13 @@ const ExperimentPage: React.FC = () => {
     let requiredSlotKeyTotal = 0;
     let missingSlotKeyTotal = 0;
     let extraSlotKeyTotal = 0;
+
     const slotDiffs: { base: string; onlyInInput: string[] }[] = [];
     const slotMissingByBase: { base: string; missingInInput: string[] }[] = [];
 
     for (const [base, reqSet] of requiredSlotKeysByBase.entries()) {
       if (!requiredBases.has(base) || !presentBases.has(base) || !reqSet.size) continue;
+
       requiredSlotKeyTotal += reqSet.size;
       const presentSet = presentSlotKeysByBase.get(base) ?? new Set<string>();
 
@@ -603,6 +693,7 @@ const ExperimentPage: React.FC = () => {
         extraSlotKeyTotal += onlyInInput.length;
         slotDiffs.push({ base, onlyInInput });
       }
+
       if (missingInInput.length > 0) {
         missingSlotKeyTotal += missingInInput.length;
         slotMissingByBase.push({ base, missingInInput });
@@ -617,8 +708,6 @@ const ExperimentPage: React.FC = () => {
       presentBases,
       missingBases,
       extraBases,
-      requiredSlotKeysByBase,
-      presentSlotKeysByBase,
       requiredSlotKeyTotal,
       missingSlotKeyTotal,
       matchedSlotKeyTotal,
@@ -629,19 +718,33 @@ const ExperimentPage: React.FC = () => {
   }, [objects, objectAnswerPuml, editingObjectId]);
 
   const objSnapshot = objChecked ? objDiagnoseSnapshot : null;
+
   const objMissingCount = objSnapshot ? objSnapshot.missingCount : objAssist.missingBases.length;
   const objExtraBasesForReveal = objSnapshot ? objSnapshot.extraBases : objAssist.extraBases;
   const objSlotRequiredTotal = objSnapshot ? objSnapshot.slotRequiredTotal : objAssist.requiredSlotKeyTotal;
   const objSlotMissingTotal = objSnapshot ? objSnapshot.slotMissingTotal : objAssist.missingSlotKeyTotal;
   const objSlotMatchedTotal = objSnapshot ? objSnapshot.slotMatchedTotal : objAssist.matchedSlotKeyTotal;
-  const objInputTotal = objSnapshot ? objSnapshot.inputTotal : objects.filter((o) => !!o.name?.trim() && o.id !== editingObjectId).length;
-  const objInputMatched = objSnapshot ? objSnapshot.inputMatched : objects.filter((o) => o.name?.trim() && o.id !== editingObjectId && objAssist.requiredBases.has(baseNameForAssist(o.name))).length;
-  const objInputUnmatched = objSnapshot ? objSnapshot.inputUnmatched : Math.max(0, objInputTotal - objInputMatched);
+  const objInputTotal = objSnapshot
+    ? objSnapshot.inputTotal
+    : objects.filter((o) => !!o.name?.trim() && o.id !== editingObjectId).length;
+  const objInputMatched = objSnapshot
+    ? objSnapshot.inputMatched
+    : objects.filter(
+        (o) =>
+          o.name?.trim() &&
+          o.id !== editingObjectId &&
+          objAssist.requiredBases.has(baseNameForAssist(o.name))
+      ).length;
+  const objInputUnmatched = objSnapshot
+    ? objSnapshot.inputUnmatched
+    : Math.max(0, objInputTotal - objInputMatched);
   const objExtraCount = objSnapshot ? objSnapshot.extraCount : objAssist.extraBases.length;
-  const objExtraRevealAllShown = objChecked && objExtraBasesForReveal.length > 0 && objRevealExtra >= objExtraBasesForReveal.length;
+  const objExtraRevealAllShown =
+    objChecked &&
+    objExtraBasesForReveal.length > 0 &&
+    objRevealExtra >= objExtraBasesForReveal.length;
 
   const slotDiffsForShow = objSnapshot?.slotDiffs ?? objAssist.slotDiffs;
-  const slotMissingByBaseForShow = objSnapshot?.slotMissingByBase ?? objAssist.slotMissingByBase;
   const slotOnlyInInputTotalKeys = useMemo(
     () => slotDiffsForShow.reduce((sum, d) => sum + d.onlyInInput.length, 0),
     [slotDiffsForShow]
@@ -652,6 +755,7 @@ const ExperimentPage: React.FC = () => {
     const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
     const requiredLinks = enabled ? extractLinksFromPuml(objectAnswerPuml) : [];
     const requiredEndpointKeys = new Set(requiredLinks.map((r) => r.endpointKey));
+
     const presentLinks: LinkSig[] = [];
     links.forEach((l) => {
       const fromObj = objects.find((o) => o.id === l.from);
@@ -670,7 +774,9 @@ const ExperimentPage: React.FC = () => {
         pretty: label ? `${aBase} — ${bBase}（${label}）` : `${aBase} — ${bBase}`,
       });
     });
+
     const presentEndpointKeys = new Set(presentLinks.map((p) => p.endpointKey));
+
     const missingPretty = enabled
       ? Array.from(requiredEndpointKeys)
           .filter((k) => !presentEndpointKeys.has(k))
@@ -679,22 +785,33 @@ const ExperimentPage: React.FC = () => {
             return `${x} — ${y}`;
           })
       : [];
+
     const extraLinks = enabled
-      ? presentLinks.filter((p) => !requiredEndpointKeys.has(p.endpointKey)).sort((x, y) => x.pretty.localeCompare(y.pretty, "ja"))
+      ? presentLinks
+          .filter((p) => !requiredEndpointKeys.has(p.endpointKey))
+          .sort((x, y) => x.pretty.localeCompare(y.pretty, "ja"))
       : [];
+
     return { enabled, requiredEndpointKeys, missingPretty, extraLinks };
   }, [objectAnswerPuml, objects, links]);
 
-  const linkExtraLinksForReveal = linkDiagnoseSnapshot ? linkDiagnoseSnapshot.extraLinks : linkAssist.extraLinks;
+  const linkExtraLinksForReveal = linkDiagnoseSnapshot
+    ? linkDiagnoseSnapshot.extraLinks
+    : linkAssist.extraLinks;
   const linkExtraCount = linkExtraLinksForReveal.length;
-  const linkMissingCount = linkDiagnoseSnapshot ? linkDiagnoseSnapshot.missingCount : linkAssist.missingPretty.length;
+  const linkMissingCount = linkDiagnoseSnapshot
+    ? linkDiagnoseSnapshot.missingCount
+    : linkAssist.missingPretty.length;
 
   const handleObjDiagnose = () => {
     setObjChecked(true);
     setObjTab("diagnose");
+
     const inputObjs = objects.filter((o) => o.name?.trim() && o.id !== editingObjectId);
     const inputTotal = inputObjs.length;
-    const inputMatched = inputObjs.filter((o) => objAssist.requiredBases.has(baseNameForAssist(o.name))).length;
+    const inputMatched = inputObjs.filter((o) =>
+      objAssist.requiredBases.has(baseNameForAssist(o.name))
+    ).length;
     const inputUnmatched = Math.max(0, inputTotal - inputMatched);
 
     setObjDiagnoseSnapshot({
@@ -712,37 +829,50 @@ const ExperimentPage: React.FC = () => {
       slotDiffs: [...objAssist.slotDiffs],
       slotMissingByBase: [...objAssist.slotMissingByBase],
     });
+
     setObjRevealExtra(0);
     setObjDirtySinceHint(false);
-    setObjRevealSlotDiff(false);
-    setObjSlotDiffDirtySinceHint(false);
+    setObjRevealMissingHints(false);
+    setObjMissingDirtySinceHint(false);
   };
 
-  const handleRequestObjDetails = () => {
+  const handleRequestObjReviewDetails = () => {
     if (!objChecked) return alert("まず「診断」を行ってください。");
     if (
       !objDirtySinceHint &&
-      !window.confirm("まだ修正が加えられていません。\nまずは自力で見直してみることをお勧めします。\n\n詳細なヒントを表示しますか？")
+      !window.confirm("まだ修正が加えられていません。\nまずは自力で見直してみることをお勧めします。\n\n見直しのヒントを表示しますか？")
     ) return;
     setObjRevealExtra(objExtraBasesForReveal.length);
     setObjDirtySinceHint(false);
-    setTimeout(() => objAssistScrollRef.current?.scrollTo({ top: objAssistScrollRef.current.scrollHeight, behavior: "smooth" }), 0);
+    setTimeout(() => {
+      objAssistScrollRef.current?.scrollTo({
+        top: objAssistScrollRef.current.scrollHeight,
+        behavior: "smooth",
+      });
+    }, 0);
   };
 
-  const handleRequestObjSlotDetails = () => {
+  const handleRequestObjMissingHints = () => {
     if (!objChecked) return alert("まず「診断」を行ってください。");
     if (
-      !objSlotDiffDirtySinceHint &&
-      !window.confirm("まだ修正が加えられていません。\nまずは自力で見直してみることをお勧めします。\n\n詳細なヒントを表示しますか？")
+      !objMissingDirtySinceHint &&
+      !window.confirm("まだ修正が加えられていません。\nまずは自力で見直してみることをお勧めします。\n\n不足に気づくためのヒントを表示しますか？")
     ) return;
-    setObjRevealSlotDiff(true);
-    setObjSlotDiffDirtySinceHint(false);
-    setTimeout(() => objAssistScrollRef.current?.scrollTo({ top: objAssistScrollRef.current.scrollHeight, behavior: "smooth" }), 0);
+
+    setObjRevealMissingHints(true);
+    setObjMissingDirtySinceHint(false);
+    setTimeout(() => {
+      objAssistScrollRef.current?.scrollTo({
+        top: objAssistScrollRef.current.scrollHeight,
+        behavior: "smooth",
+      });
+    }, 0);
   };
 
   const handleLinkDiagnose = () => {
     setLinkChecked(true);
     setLinkTab("diagnose");
+
     const presentLinks: LinkSig[] = [];
     links.forEach((l) => {
       const a = baseNameForAssist(objects.find((o) => o.id === l.from)?.name || "");
@@ -758,8 +888,12 @@ const ExperimentPage: React.FC = () => {
         pretty: label ? `${a} — ${b}（${label}）` : `${a} — ${b}`,
       });
     });
+
     const inputTotal = presentLinks.length;
-    const inputMatched = presentLinks.filter((p) => linkAssist.requiredEndpointKeys.has(p.endpointKey)).length;
+    const inputMatched = presentLinks.filter((p) =>
+      linkAssist.requiredEndpointKeys.has(p.endpointKey)
+    ).length;
+
     setLinkDiagnoseSnapshot({
       inputTotal,
       inputMatched,
@@ -769,19 +903,45 @@ const ExperimentPage: React.FC = () => {
       extraCount: linkAssist.extraLinks.length,
       extraLinks: linkAssist.extraLinks,
     });
+
     setLinkRevealExtra(0);
     setLinkDirtySinceHint(false);
+    setLinkRevealMissingHints(false);
+    setLinkMissingDirtySinceHint(false);
   };
 
-  const handleRequestLinkDetails = () => {
+  const handleRequestLinkReviewDetails = () => {
     if (!linkChecked) return alert("まず「診断」を行ってください。");
     if (
       !linkDirtySinceHint &&
-      !window.confirm("まだ修正が加えられていません。\nまずは自力で見直してみることをお勧めします。\n\n詳細なヒントを表示しますか？")
+      !window.confirm("まだ修正が加えられていません。\nまずは自力で見直してみることをお勧めします。\n\n見直しのヒントを表示しますか？")
     ) return;
+
     setLinkRevealExtra(linkExtraLinksForReveal.length);
     setLinkDirtySinceHint(false);
-    setTimeout(() => linkAssistScrollRef.current?.scrollTo({ top: linkAssistScrollRef.current.scrollHeight, behavior: "smooth" }), 0);
+    setTimeout(() => {
+      linkAssistScrollRef.current?.scrollTo({
+        top: linkAssistScrollRef.current.scrollHeight,
+        behavior: "smooth",
+      });
+    }, 0);
+  };
+
+  const handleRequestLinkMissingHints = () => {
+    if (!linkChecked) return alert("まず「診断」を行ってください。");
+    if (
+      !linkMissingDirtySinceHint &&
+      !window.confirm("まだ修正が加えられていません。\nまずは自力で見直してみることをお勧めします。\n\n不足に気づくためのヒントを表示しますか？")
+    ) return;
+
+    setLinkRevealMissingHints(true);
+    setLinkMissingDirtySinceHint(false);
+    setTimeout(() => {
+      linkAssistScrollRef.current?.scrollTo({
+        top: linkAssistScrollRef.current.scrollHeight,
+        behavior: "smooth",
+      });
+    }, 0);
   };
 
   const handleAddObject = () => {
@@ -797,7 +957,11 @@ const ExperimentPage: React.FC = () => {
     if (!target) return;
     const newId = makeId();
     const newName = target.name ? `${target.name}_コピー` : "名称未設定_コピー";
-    const newObj: Obj = { id: newId, name: newName, slots: target.slots.map((s) => ({ ...s })) };
+    const newObj: Obj = {
+      id: newId,
+      name: newName,
+      slots: target.slots.map((s) => ({ ...s })),
+    };
     setObjects((prev) => [...prev, newObj]);
     setSelectedObjectId(newId);
     setSelectedLinkId(null);
@@ -819,34 +983,47 @@ const ExperimentPage: React.FC = () => {
 
   const handleAddSlotToSelected = () => {
     if (!selectedObject) return;
-    setObjects((prev) => prev.map((o) => (o.id === selectedObject.id ? { ...o, slots: [...o.slots, { key: "", value: "" }] } : o)));
+    setObjects((prev) =>
+      prev.map((o) =>
+        o.id === selectedObject.id
+          ? { ...o, slots: [...o.slots, { key: "", value: "" }] }
+          : o
+      )
+    );
     markMeaningfulChange(true, false);
   };
 
   const handleUpdateSlot = (index: number, partial: Partial<Slot>) => {
     if (!selectedObject) return;
-    setObjects((prev) => prev.map((o) =>
-      o.id === selectedObject.id
-        ? { ...o, slots: o.slots.map((s, i) => (i === index ? { ...s, ...partial } : s)) }
-        : o
-    ));
+    setObjects((prev) =>
+      prev.map((o) =>
+        o.id === selectedObject.id
+          ? { ...o, slots: o.slots.map((s, i) => (i === index ? { ...s, ...partial } : s)) }
+          : o
+      )
+    );
     markMeaningfulChange(true, false);
   };
 
   const handleDeleteSlot = (index: number) => {
     if (!selectedObject) return;
-    setObjects((prev) => prev.map((o) =>
-      o.id === selectedObject.id
-        ? { ...o, slots: o.slots.filter((_, i) => i !== index) }
-        : o
-    ));
+    setObjects((prev) =>
+      prev.map((o) =>
+        o.id === selectedObject.id
+          ? { ...o, slots: o.slots.filter((_, i) => i !== index) }
+          : o
+      )
+    );
     markMeaningfulChange(true, false);
   };
 
   const handleAddLink = () => {
     if (objects.length < 2) return alert("オブジェクトを2つ以上作成してください");
     const id = makeId();
-    setLinks((prev) => [...prev, { id, from: objects[0].id, to: objects[1].id, label: "" }]);
+    setLinks((prev) => [
+      ...prev,
+      { id, from: objects[0].id, to: objects[1].id, label: "" },
+    ]);
     setSelectedLinkId(id);
     setSelectedObjectId(null);
     markMeaningfulChange(false, true);
@@ -891,8 +1068,14 @@ const ExperimentPage: React.FC = () => {
   };
 
   const handleConvertAndOpenClassEditor = async () => {
-    if (hasUnnamedObject) return alert("インスタンス名が未入力のものがあります。");
-    try { localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify({ objects, links })); } catch {}
+    if (hasUnnamedObject) {
+      alert("インスタンス名が未入力のものがあります。");
+      return;
+    }
+
+    try {
+      localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify({ objects, links }));
+    } catch {}
 
     const hasUncheckedOrMismatch =
       !objChecked ||
@@ -904,7 +1087,9 @@ const ExperimentPage: React.FC = () => {
       slotDiffTotalKeys > 0;
 
     if (hasUncheckedOrMismatch) {
-      const ok = window.confirm("未診断、または診断で確認事項が残っています。\nこのままクラス図編集ページへ進みますか？");
+      const ok = window.confirm(
+        "未診断、または診断で確認事項が残っています。\nこのままクラス図編集ページへ進みますか？"
+      );
       if (!ok) return;
     }
 
@@ -913,7 +1098,12 @@ const ExperimentPage: React.FC = () => {
     if (classPuml) {
       const solid = forceSolidRelations(classPuml);
       let encoded = "";
-      try { encoded = plantumlEncoder.encode(solid); } catch { encoded = encodedClassPuml || ""; }
+      try {
+        encoded = plantumlEncoder.encode(solid);
+      } catch {
+        encoded = encodedClassPuml || "";
+      }
+
       result = {
         classPuml: solid,
         encodedPuml: encoded,
@@ -927,7 +1117,10 @@ const ExperimentPage: React.FC = () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            objects: objects.map((o) => ({ name: o.name, attrs: o.slots.map((s) => ({ key: s.key, value: s.value })) })),
+            objects: objects.map((o) => ({
+              name: o.name,
+              attrs: o.slots.map((s) => ({ key: s.key, value: s.value })),
+            })),
             links: links.map((l) => ({
               from: objects.find((o) => o.id === l.from)?.name ?? "",
               to: objects.find((o) => o.id === l.to)?.name ?? "",
@@ -944,7 +1137,11 @@ const ExperimentPage: React.FC = () => {
         const data = (await res.json()) as ConvertResponse;
         const solid = forceSolidRelations(data.classPuml);
         let encoded = "";
-        try { encoded = plantumlEncoder.encode(solid); } catch { encoded = data.encodedPuml || ""; }
+        try {
+          encoded = plantumlEncoder.encode(solid);
+        } catch {
+          encoded = data.encodedPuml || "";
+        }
 
         setClassPuml(solid);
         setEncodedClassPuml(encoded);
@@ -952,7 +1149,11 @@ const ExperimentPage: React.FC = () => {
         setRelationHints(data.relationHints ?? []);
         setInheritanceCandidates(data.inheritanceCandidates ?? []);
 
-        result = { ...data, classPuml: solid, encodedPuml: encoded };
+        result = {
+          ...data,
+          classPuml: solid,
+          encodedPuml: encoded,
+        };
       } catch (e) {
         console.error(e);
         alert("クラス図への変換で予期しないエラーが発生しました。");
@@ -968,23 +1169,57 @@ const ExperimentPage: React.FC = () => {
       inheritanceCandidates: result.inheritanceCandidates ?? [],
       snapshot: { objects, links },
     };
-    try { localStorage.setItem(STORAGE_KEY_EDITOR_INITIAL, JSON.stringify(editorPayload)); } catch {}
+
+    try {
+      localStorage.setItem(STORAGE_KEY_EDITOR_INITIAL, JSON.stringify(editorPayload));
+    } catch {}
 
     router.push("/experiment/class-editor");
   };
 
-  const displayClassPuml = useMemo(() => sanitizeClassPumlForLearner(forceSolidRelations(classPuml)), [classPuml]);
-  const displayEncodedClassPuml = useMemo(() => { try { return displayClassPuml ? plantumlEncoder.encode(displayClassPuml) : ""; } catch { return ""; } }, [displayClassPuml]);
-  const objectPreviewUrl = encodedObjectPuml ? `https://www.plantuml.com/plantuml/svg/${encodedObjectPuml}` : "";
-  const classPreviewUrl = displayEncodedClassPuml ? `https://www.plantuml.com/plantuml/svg/${displayEncodedClassPuml}` : "";
+  const displayClassPuml = useMemo(
+    () => sanitizeClassPumlForLearner(forceSolidRelations(classPuml)),
+    [classPuml]
+  );
+
+  const displayEncodedClassPuml = useMemo(() => {
+    try {
+      return displayClassPuml ? plantumlEncoder.encode(displayClassPuml) : "";
+    } catch {
+      return "";
+    }
+  }, [displayClassPuml]);
+
+  const objectPreviewUrl = encodedObjectPuml
+    ? `https://www.plantuml.com/plantuml/svg/${encodedObjectPuml}`
+    : "";
+
+  const classPreviewUrl = displayEncodedClassPuml
+    ? `https://www.plantuml.com/plantuml/svg/${displayEncodedClassPuml}`
+    : "";
 
   return (
     <div className="flex flex-col h-screen bg-slate-50 text-slate-800 font-sans">
       <div className="flex items-center justify-between px-4 py-3 bg-white border-b border-slate-200 shadow-sm z-10">
         <div className="flex gap-3">
-          <button className="px-3 py-1.5 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded transition" onClick={handleClearAll}>クリア</button>
-          <button className="px-3 py-1.5 text-xs font-medium text-slate-600 border border-slate-200 hover:bg-slate-50 rounded transition" onClick={handleLoadState}>復元</button>
-          <button className="px-3 py-1.5 text-xs font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 rounded transition" onClick={handleSaveState}>保存</button>
+          <button
+            className="px-3 py-1.5 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded transition"
+            onClick={handleClearAll}
+          >
+            クリア
+          </button>
+          <button
+            className="px-3 py-1.5 text-xs font-medium text-slate-600 border border-slate-200 hover:bg-slate-50 rounded transition"
+            onClick={handleLoadState}
+          >
+            復元
+          </button>
+          <button
+            className="px-3 py-1.5 text-xs font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 rounded transition"
+            onClick={handleSaveState}
+          >
+            保存
+          </button>
         </div>
         <button
           className="px-5 py-2 text-sm font-semibold rounded-md bg-indigo-600 text-white hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition shadow-sm"
@@ -1000,28 +1235,68 @@ const ExperimentPage: React.FC = () => {
           <div className="p-4 flex-1 overflow-y-auto">
             <div className="flex items-center justify-between mb-3">
               <h2 className="font-bold text-sm text-slate-800">要求文（問題）</h2>
-              <button className="text-xs text-slate-500 hover:text-slate-800 underline decoration-slate-300" onClick={() => setShowObjectProblemFull(!showObjectProblemFull)}>
+              <button
+                className="text-xs text-slate-500 hover:text-slate-800 underline decoration-slate-300"
+                onClick={() => setShowObjectProblemFull(!showObjectProblemFull)}
+              >
                 {showObjectProblemFull ? "折りたたむ" : "すべて表示"}
               </button>
             </div>
-            <div className={`text-[12px] leading-relaxed text-slate-700 bg-slate-50 p-3 rounded-lg border border-slate-100 ${!showObjectProblemFull && "max-h-[150px] overflow-hidden relative"}`}>
+            <div
+              className={`text-[12px] leading-relaxed text-slate-700 bg-slate-50 p-3 rounded-lg border border-slate-100 ${
+                !showObjectProblemFull && "max-h-[150px] overflow-hidden relative"
+              }`}
+            >
               {objectProblemText || "問題文がありません。"}
-              {!showObjectProblemFull && <div className="absolute bottom-0 left-0 w-full h-8 bg-gradient-to-t from-slate-50 to-transparent" />}
+              {!showObjectProblemFull && (
+                <div className="absolute bottom-0 left-0 w-full h-8 bg-gradient-to-t from-slate-50 to-transparent" />
+              )}
             </div>
           </div>
         </div>
 
         <div className="flex-1 flex flex-col border-r border-slate-200 bg-slate-50/50">
-          <div style={{ height: `${objPanelRatio}%` }} className="flex flex-col min-h-[20%] max-h-[80%] bg-white relative overflow-hidden border-b border-slate-200">
+          <div
+            style={{ height: `${objPanelRatio}%` }}
+            className="flex flex-col min-h-[20%] max-h-[80%] bg-white relative overflow-hidden border-b border-slate-200"
+          >
             <div className="flex items-center justify-between px-4 py-2 border-b border-slate-100 bg-slate-50">
               <div className="flex items-center p-1 bg-slate-200/60 rounded-md gap-1">
-                <button onClick={() => setObjTab("edit")} className={`px-4 py-1 text-xs font-semibold rounded ${objTab === "edit" ? "bg-white shadow-sm text-slate-800" : "text-slate-500 hover:text-slate-700"}`}>エディタ</button>
-                <button onClick={() => setObjTab("diagnose")} className={`px-4 py-1 text-xs font-semibold rounded ${objTab === "diagnose" ? "bg-white shadow-sm text-indigo-700" : "text-slate-500 hover:text-slate-700"}`}>診断結果</button>
+                <button
+                  onClick={() => setObjTab("edit")}
+                  className={`px-4 py-1 text-xs font-semibold rounded ${
+                    objTab === "edit"
+                      ? "bg-white shadow-sm text-slate-800"
+                      : "text-slate-500 hover:text-slate-700"
+                  }`}
+                >
+                  エディタ
+                </button>
+                <button
+                  onClick={() => setObjTab("diagnose")}
+                  className={`px-4 py-1 text-xs font-semibold rounded ${
+                    objTab === "diagnose"
+                      ? "bg-white shadow-sm text-indigo-700"
+                      : "text-slate-500 hover:text-slate-700"
+                  }`}
+                >
+                  診断結果
+                </button>
               </div>
               {objTab === "edit" ? (
-                <button className="px-3 py-1 text-xs font-medium bg-indigo-50 text-indigo-600 rounded hover:bg-indigo-100 transition" onClick={handleAddObject}>＋ オブジェクト追加</button>
+                <button
+                  className="px-3 py-1 text-xs font-medium bg-indigo-50 text-indigo-600 rounded hover:bg-indigo-100 transition"
+                  onClick={handleAddObject}
+                >
+                  ＋ オブジェクト追加
+                </button>
               ) : (
-                <button className="px-3 py-1 text-xs font-medium bg-indigo-600 text-white rounded hover:bg-indigo-700 transition shadow-sm" onClick={handleObjDiagnose}>診断を再実行</button>
+                <button
+                  className="px-3 py-1 text-xs font-medium bg-indigo-600 text-white rounded hover:bg-indigo-700 transition shadow-sm"
+                  onClick={handleObjDiagnose}
+                >
+                  診断を再実行
+                </button>
               )}
             </div>
 
@@ -1031,9 +1306,24 @@ const ExperimentPage: React.FC = () => {
                   <div className="w-1/2 overflow-y-auto overflow-x-hidden border-r border-slate-100 bg-slate-50/30">
                     <div className="p-3 pb-6">
                       {objects.map((o) => (
-                        <div key={o.id} onClick={() => { setSelectedObjectId(o.id); setSelectedLinkId(null); }} className={`p-3 mb-2 rounded-lg cursor-pointer transition border ${selectedObjectId === o.id ? "bg-white border-indigo-300 shadow-sm ring-1 ring-indigo-100" : "bg-white border-slate-200 hover:border-slate-300 hover:shadow-sm"}`}>
-                          <div className="font-medium text-sm text-slate-800">{o.name || "名称未設定"}</div>
-                          <div className="text-xs text-slate-500 mt-1">{o.slots.length} スロット</div>
+                        <div
+                          key={o.id}
+                          onClick={() => {
+                            setSelectedObjectId(o.id);
+                            setSelectedLinkId(null);
+                          }}
+                          className={`p-3 mb-2 rounded-lg cursor-pointer transition border ${
+                            selectedObjectId === o.id
+                              ? "bg-white border-indigo-300 shadow-sm ring-1 ring-indigo-100"
+                              : "bg-white border-slate-200 hover:border-slate-300 hover:shadow-sm"
+                          }`}
+                        >
+                          <div className="font-medium text-sm text-slate-800">
+                            {o.name || "名称未設定"}
+                          </div>
+                          <div className="text-xs text-slate-500 mt-1">
+                            {o.slots.length} スロット
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -1044,100 +1334,228 @@ const ExperimentPage: React.FC = () => {
                       {selectedObject ? (
                         <div className="space-y-4">
                           <div>
-                            <label className="text-xs font-bold text-slate-700 mb-1 flex items-center">インスタンス名 <HelpBadge title={TOOLTIP.objectName} /></label>
-                            <input className="w-full min-w-0 px-3 py-2 border border-slate-300 rounded-md text-sm" value={selectedObject.name} onChange={(e) => handleUpdateObjectName(selectedObject.id, e.target.value)} />
+                            <label className="text-xs font-bold text-slate-700 mb-1 flex items-center">
+                              インスタンス名 <HelpBadge title={TOOLTIP.objectName} />
+                            </label>
+                            <input
+                              className="w-full min-w-0 px-3 py-2 border border-slate-300 rounded-md text-sm"
+                              value={selectedObject.name}
+                              onChange={(e) =>
+                                handleUpdateObjectName(selectedObject.id, e.target.value)
+                              }
+                            />
                           </div>
+
                           <div>
                             <div className="flex items-center justify-between mb-2">
-                              <label className="text-xs font-bold text-slate-700 flex items-center">スロット <HelpBadge title={TOOLTIP.slotKey} /></label>
-                              <button className="text-xs text-indigo-600 hover:underline font-medium" onClick={handleAddSlotToSelected}>＋ スロット追加</button>
+                              <label className="text-xs font-bold text-slate-700 flex items-center">
+                                スロット <HelpBadge title={TOOLTIP.slotKey} />
+                              </label>
+                              <button
+                                className="text-xs text-indigo-600 hover:underline font-medium"
+                                onClick={handleAddSlotToSelected}
+                              >
+                                ＋ スロット追加
+                              </button>
                             </div>
                             <div className="space-y-2">
                               {selectedObject.slots.map((s, i) => (
-                                <div key={i} className="flex items-center gap-2 p-2 rounded-md border border-slate-200 bg-slate-50/50 shadow-sm w-full">
-                                  <input className="flex-1 min-w-0 px-2 py-1.5 text-xs border border-slate-200 rounded bg-white" placeholder="名前" value={s.key} onChange={(e) => handleUpdateSlot(i, { key: e.target.value })} />
+                                <div
+                                  key={i}
+                                  className="flex items-center gap-2 p-2 rounded-md border border-slate-200 bg-slate-50/50 shadow-sm w-full"
+                                >
+                                  <input
+                                    className="flex-1 min-w-0 px-2 py-1.5 text-xs border border-slate-200 rounded bg-white"
+                                    placeholder="名前"
+                                    value={s.key}
+                                    onChange={(e) => handleUpdateSlot(i, { key: e.target.value })}
+                                  />
                                   <span className="text-slate-400 text-xs flex-shrink-0">=</span>
-                                  <input className="flex-1 min-w-0 px-2 py-1.5 text-xs border border-slate-200 rounded bg-white" placeholder="値" value={s.value} onChange={(e) => handleUpdateSlot(i, { value: e.target.value })} />
-                                  <button className="text-slate-400 hover:text-red-500 px-1 text-lg leading-none flex-shrink-0" onClick={() => handleDeleteSlot(i)}>×</button>
+                                  <input
+                                    className="flex-1 min-w-0 px-2 py-1.5 text-xs border border-slate-200 rounded bg-white"
+                                    placeholder="値"
+                                    value={s.value}
+                                    onChange={(e) => handleUpdateSlot(i, { value: e.target.value })}
+                                  />
+                                  <button
+                                    className="text-slate-400 hover:text-red-500 px-1 text-lg leading-none flex-shrink-0"
+                                    onClick={() => handleDeleteSlot(i)}
+                                  >
+                                    ×
+                                  </button>
                                 </div>
                               ))}
                             </div>
                           </div>
+
                           <div className="pt-4 border-t border-slate-100 flex justify-end gap-4">
-                            <button className="text-xs text-indigo-600 hover:underline font-medium" onClick={() => handleDuplicateObject(selectedObject.id)}>このオブジェクトを複製</button>
-                            <button className="text-xs text-red-500 hover:underline font-medium" onClick={() => handleDeleteObject(selectedObject.id)}>このオブジェクトを削除</button>
+                            <button
+                              className="text-xs text-indigo-600 hover:underline font-medium"
+                              onClick={() => handleDuplicateObject(selectedObject.id)}
+                            >
+                              このオブジェクトを複製
+                            </button>
+                            <button
+                              className="text-xs text-red-500 hover:underline font-medium"
+                              onClick={() => handleDeleteObject(selectedObject.id)}
+                            >
+                              このオブジェクトを削除
+                            </button>
                           </div>
                         </div>
-                      ) : <div className="text-sm text-slate-400 text-center mt-10">左のリストからオブジェクトを選択してください</div>}
+                      ) : (
+                        <div className="text-sm text-slate-400 text-center mt-10">
+                          左のリストからオブジェクトを選択してください
+                        </div>
+                      )}
                     </div>
                   </div>
                 </>
               ) : (
-                <div className="flex-1 overflow-y-auto overflow-x-hidden bg-slate-50" ref={objAssistScrollRef}>
+                <div
+                  className="flex-1 overflow-y-auto overflow-x-hidden bg-slate-50"
+                  ref={objAssistScrollRef}
+                >
                   <div className="p-6 pb-12">
                     {!objChecked ? (
                       <div className="flex flex-col items-center justify-center h-full text-slate-500">
                         <p className="text-sm mb-4">まだ診断が実行されていません。</p>
-                        <button className="px-4 py-2 bg-indigo-600 text-white rounded-md text-sm shadow-sm hover:bg-indigo-700 transition" onClick={handleObjDiagnose}>診断を実行する</button>
+                        <button
+                          className="px-4 py-2 bg-indigo-600 text-white rounded-md text-sm shadow-sm hover:bg-indigo-700 transition"
+                          onClick={handleObjDiagnose}
+                        >
+                          診断を実行する
+                        </button>
                       </div>
                     ) : (
                       <div className="max-w-2xl mx-auto space-y-6">
-                        <HintCard
-                          title="インスタンス名"
-                          subtitle="要求と合っていない可能性があります。"
-                          countText={objExtraBasesForReveal.length > 0 ? `${objExtraBasesForReveal.length}件の候補` : null}
-                          primaryLabel="詳細を見る"
-                          onPrimary={handleRequestObjDetails}
-                          disabled={!objDirtySinceHint && objExtraRevealAllShown}
+                        <DiagnoseGroupCard
+                          title="不足しているもの"
+                          tone="missing"
+                          count={objMissingCount + objSlotMissingTotal + linkMissingCount}
+                          summary="まだ追加できていない対象・情報・関係があります。"
+                          detailLabel="不足に気づくヒントを見る"
+                          onDetail={handleRequestObjMissingHints}
+                          disabled={
+                            objMissingCount + objSlotMissingTotal + linkMissingCount === 0 ||
+                            (!objMissingDirtySinceHint && objRevealMissingHints)
+                          }
+                        >
+                          <div className="flex flex-wrap gap-2">
+                            <CountBadge label="インスタンス不足" value={objMissingCount} />
+                            <CountBadge label="スロット不足" value={objSlotMissingTotal} />
+                            
+                          </div>
+                        </DiagnoseGroupCard>
+
+                        <DiagnoseGroupCard
+                          title="見直したいもの"
+                          tone="review"
+                          count={objExtraCount + slotOnlyInInputTotalKeys}
+                          summary="入っているが、問題文との対応を見直した方がよいものがあります。"
+                          detailLabel="見直しのヒントを見る"
+                          onDetail={handleRequestObjReviewDetails}
+                          disabled={
+                            objExtraCount + slotOnlyInInputTotalKeys === 0 ||
+                            (!objDirtySinceHint && objExtraRevealAllShown)
+                          }
                         />
-                        {objRevealExtra > 0 && (
-                          <div className="p-4 bg-white border-l-4 border-red-400 rounded shadow-sm transition-all duration-300">
-                            <div className="text-xs font-bold text-slate-700 mb-2">💡 確認すべきインスタンス名</div>
+
+                        {objRevealMissingHints && (
+                          <div className="p-4 bg-white border-l-4 border-amber-400 rounded shadow-sm transition-all duration-300 space-y-4">
                             <div className="flex flex-wrap gap-2">
-                              {objExtraBasesForReveal.map((b) => (
-                                <span key={b} className="px-2 py-1 bg-red-50 text-red-700 text-xs rounded border border-red-100">{b}</span>
-                              ))}
+                              <CountBadge label="インスタンス不足" value={objMissingCount} />
+                              <CountBadge label="スロット不足" value={objSlotMissingTotal} />
                             </div>
+
+                            {objMissingCount > 0 && (
+                              <div>
+                                <div className="text-xs font-bold text-slate-700 mb-2">
+                                  ➕ インスタンスについてのヒント
+                                </div>
+                                <div className="text-sm text-slate-700 leading-relaxed">
+                                  問題文に出てくる対象が、まだ図に十分表せていない可能性があります。
+                                  <br />
+                                  人だけでなく、管理対象・予約対象・関係の相手にも注目してみましょう。
+                                </div>
+                              </div>
+                            )}
+
+                            {objSlotMissingTotal > 0 && (
+                              <div className={objMissingCount > 0 ? "pt-3 border-t border-slate-100" : ""}>
+                                <div className="text-xs font-bold text-slate-700 mb-2">
+                                  ➕ 情報についてのヒント
+                                </div>
+                                <div className="text-sm text-slate-700 leading-relaxed">
+                                  いくつかのインスタンスで、持つべき情報がまだそろっていない可能性があります。
+                                  <br />
+                                  問題文の「〜は、…をもつ」「〜番号」「氏名」「連絡先」などの表現を見直してみましょう。
+                                </div>
+                                <div className="mt-2 text-[11px] text-slate-500">
+                                  一致: {objSlotMatchedTotal} / 必要: {objSlotRequiredTotal} / 不足: {objSlotMissingTotal}
+                                </div>
+                              </div>
+                            )}
+
+                            {linkMissingCount > 0 && (
+                              <div className={(objMissingCount > 0 || objSlotMissingTotal > 0) ? "pt-3 border-t border-slate-100" : ""}>
+                                <div className="text-xs font-bold text-slate-700 mb-2">
+                                  ➕ スロットについてのヒント
+                                </div>
+                                <div className="text-sm text-slate-700 leading-relaxed">
+                                  まだ図に表せていない関係がある可能性があります。
+                                  <br />
+                                  問題文の「担当する」「予約している」「所有する」「対応する」など、
+                                  2つの対象を結ぶ表現がないかを確認してみましょう。
+                                </div>
+                              </div>
+                            )}
                           </div>
                         )}
 
-                        <HintCard
-                          title="スロット"
-                          subtitle="未入力や要求と異なる可能性があります。"
-                          countText={slotDiffTotalKeys > 0 ? `確認事項 ${slotDiffTotalKeys}件` : "確認事項 0件"}
-                          primaryLabel="詳細を見る"
-                          onPrimary={handleRequestObjSlotDetails}
-                          disabled={slotDiffTotalKeys === 0 || (!objSlotDiffDirtySinceHint && objRevealSlotDiff)}
-                        />
-                        {objRevealSlotDiff && (
-                          <div className="p-4 bg-white border-l-4 border-amber-400 rounded shadow-sm transition-all duration-300 space-y-4">
-                            {slotDiffsForShow.length > 0 && (
+                        {objRevealExtra > 0 && (
+                          <div className="p-4 bg-white border-l-4 border-rose-400 rounded shadow-sm transition-all duration-300 space-y-4">
+                            {objExtraCount > 0 && (
                               <div>
-                                <div className="text-xs font-bold text-slate-700 mb-2">💡 入力したが、正答例と一致しないスロット名</div>
-                                {slotDiffsForShow.map((d) => (
-                                  <div key={d.base} className="mb-2">
-                                    <span className="text-xs font-medium text-slate-600 w-24 inline-block">{d.base}</span>：
-                                    {d.onlyInInput.map((k) => (
-                                      <span key={k} className="mx-1 px-1.5 py-0.5 bg-slate-100 text-slate-600 text-xs rounded">{k}</span>
-                                    ))}
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                            {slotMissingByBaseForShow.length > 0 && (
-                              <div className={slotDiffsForShow.length > 0 ? "pt-3 border-t border-slate-100" : ""}>
-                                <div className="text-xs font-bold text-slate-700 mb-2">💡 情報（スロット）が不足しているインスタンス</div>
+                                <div className="text-xs font-bold text-slate-700 mb-2">
+                                  🔍 このインスタンス名を見直しましょう
+                                </div>
                                 <div className="flex flex-wrap gap-2">
-                                  {slotMissingByBaseForShow.map((d) => (
-                                    <span key={d.base} className="px-2 py-1 bg-amber-50 text-amber-800 text-xs rounded border border-amber-100">
-                                      {d.base}
+                                  {objExtraBasesForReveal.map((b) => (
+                                    <span
+                                      key={b}
+                                      className="px-2 py-1 bg-rose-50 text-rose-700 text-xs rounded border border-rose-100"
+                                    >
+                                      {b}
                                     </span>
                                   ))}
                                 </div>
                               </div>
                             )}
+
+                            {slotDiffsForShow.length > 0 && (
+                              <div className={objExtraCount > 0 ? "pt-3 border-t border-slate-100" : ""}>
+                                <div className="text-xs font-bold text-slate-700 mb-2">
+                                  🔍 この対象の情報を見直しましょう
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                  {slotDiffsForShow.map((d) => (
+                                    <span
+                                      key={d.base}
+                                      className="px-2 py-1 bg-rose-50 text-rose-700 text-xs rounded border border-rose-100"
+                                    >
+                                      {d.base}
+                                    </span>
+                                  ))}
+                                </div>
+                                <div className="mt-2 text-[11px] text-slate-500">
+                                  どのスロット名がずれているかは表示せず、対象だけ示しています。
+                                </div>
+                              </div>
+                            )}
+
                             <div className="text-[11px] text-slate-500">
-                              一致: {objSlotMatchedTotal} / 必要: {objSlotRequiredTotal} / 不足: {objSlotMissingTotal}
+                              入力インスタンス: {objInputTotal} / 一致: {objInputMatched} / 見直し候補: {objInputUnmatched}
                             </div>
                           </div>
                         )}
@@ -1148,7 +1566,8 @@ const ExperimentPage: React.FC = () => {
               )}
             </div>
 
-            <div className="absolute bottom-0 left-0 w-full h-1.5 cursor-row-resize bg-slate-200 hover:bg-indigo-300 transition z-20"
+            <div
+              className="absolute bottom-0 left-0 w-full h-1.5 cursor-row-resize bg-slate-200 hover:bg-indigo-300 transition z-20"
               onMouseDown={(e) => {
                 const startY = e.clientY;
                 const startRatio = objPanelRatio;
@@ -1156,8 +1575,12 @@ const ExperimentPage: React.FC = () => {
                   const delta = ((moveEvent.clientY - startY) / window.innerHeight) * 100;
                   setObjPanelRatio(Math.min(80, Math.max(20, startRatio + delta)));
                 };
-                const onMouseUp = () => { document.removeEventListener("mousemove", onMouseMove); document.removeEventListener("mouseup", onMouseUp); };
-                document.addEventListener("mousemove", onMouseMove); document.addEventListener("mouseup", onMouseUp);
+                const onMouseUp = () => {
+                  document.removeEventListener("mousemove", onMouseMove);
+                  document.removeEventListener("mouseup", onMouseUp);
+                };
+                document.addEventListener("mousemove", onMouseMove);
+                document.addEventListener("mouseup", onMouseUp);
               }}
             />
           </div>
@@ -1165,33 +1588,78 @@ const ExperimentPage: React.FC = () => {
           <div className="flex-1 flex flex-col min-h-[20%] bg-slate-100 overflow-hidden relative">
             <div className="absolute top-2 right-4 z-10 flex gap-2 bg-white/90 p-1.5 rounded shadow-sm border border-slate-200 backdrop-blur">
               <span className="text-xs font-bold text-slate-600 py-1 px-2">プレビュー</span>
-              <input type="range" min={ZOOM_MIN} max={ZOOM_MAX} step={ZOOM_STEP} value={objectZoom} onChange={(e) => setObjectZoom(parseFloat(e.target.value))} className="w-24" />
+              <input
+                type="range"
+                min={0.3}
+                max={3}
+                step={0.1}
+                value={objectZoom}
+                onChange={(e) => setObjectZoom(parseFloat(e.target.value))}
+                className="w-24"
+              />
               <span className="text-xs w-10 text-center">{Math.round(objectZoom * 100)}%</span>
             </div>
 
-            <div className={`flex-1 overflow-auto p-4 ${objectPan.isDragging ? "cursor-grabbing" : "cursor-grab"}`} ref={objectPan.containerRef} {...objectPan.handlers}>
+            <div
+              className={`flex-1 overflow-auto p-4 ${objectPan.isDragging ? "cursor-grabbing" : "cursor-grab"}`}
+              ref={objectPan.containerRef}
+              {...objectPan.handlers}
+            >
               {objectPreviewUrl ? (
                 <div style={{ transform: `scale(${objectZoom})`, transformOrigin: "top left", width: "max-content" }}>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={objectPreviewUrl} alt="オブジェクト図" className="pointer-events-none select-none drop-shadow-sm" />
                 </div>
-              ) : <div className="text-slate-400 text-sm text-center mt-10">図がありません</div>}
+              ) : (
+                <div className="text-slate-400 text-sm text-center mt-10">図がありません</div>
+              )}
             </div>
           </div>
         </div>
 
         <div className="flex-1 flex flex-col bg-slate-50/50">
-          <div style={{ height: `${linkPanelRatio}%` }} className="flex flex-col min-h-[20%] max-h-[80%] bg-white relative overflow-hidden border-b border-slate-200">
+          <div
+            style={{ height: `${linkPanelRatio}%` }}
+            className="flex flex-col min-h-[20%] max-h-[80%] bg-white relative overflow-hidden border-b border-slate-200"
+          >
             <div className="flex items-center justify-between px-4 py-2 border-b border-slate-100 bg-slate-50">
               <div className="flex items-center p-1 bg-slate-200/60 rounded-md gap-1">
-                <button onClick={() => setLinkTab("edit")} className={`px-4 py-1 text-xs font-semibold rounded ${linkTab === "edit" ? "bg-white shadow-sm text-slate-800" : "text-slate-500 hover:text-slate-700"}`}>エディタ</button>
-                <button onClick={() => setLinkTab("diagnose")} className={`px-4 py-1 text-xs font-semibold rounded ${linkTab === "diagnose" ? "bg-white shadow-sm text-indigo-700" : "text-slate-500 hover:text-slate-700"}`}>診断結果</button>
+                <button
+                  onClick={() => setLinkTab("edit")}
+                  className={`px-4 py-1 text-xs font-semibold rounded ${
+                    linkTab === "edit"
+                      ? "bg-white shadow-sm text-slate-800"
+                      : "text-slate-500 hover:text-slate-700"
+                  }`}
+                >
+                  エディタ
+                </button>
+                <button
+                  onClick={() => setLinkTab("diagnose")}
+                  className={`px-4 py-1 text-xs font-semibold rounded ${
+                    linkTab === "diagnose"
+                      ? "bg-white shadow-sm text-indigo-700"
+                      : "text-slate-500 hover:text-slate-700"
+                  }`}
+                >
+                  診断結果
+                </button>
               </div>
 
               {linkTab === "edit" ? (
-                <button className="px-3 py-1 text-xs font-medium bg-indigo-50 text-indigo-600 rounded hover:bg-indigo-100 transition" onClick={handleAddLink}>＋ リンク追加</button>
+                <button
+                  className="px-3 py-1 text-xs font-medium bg-indigo-50 text-indigo-600 rounded hover:bg-indigo-100 transition"
+                  onClick={handleAddLink}
+                >
+                  ＋ リンク追加
+                </button>
               ) : (
-                <button className="px-3 py-1 text-xs font-medium bg-indigo-600 text-white rounded hover:bg-indigo-700 transition shadow-sm" onClick={handleLinkDiagnose}>診断を再実行</button>
+                <button
+                  className="px-3 py-1 text-xs font-medium bg-indigo-600 text-white rounded hover:bg-indigo-700 transition shadow-sm"
+                  onClick={handleLinkDiagnose}
+                >
+                  診断を再実行
+                </button>
               )}
             </div>
 
@@ -1201,68 +1669,180 @@ const ExperimentPage: React.FC = () => {
                   <div className="w-1/2 overflow-y-auto overflow-x-hidden border-r border-slate-100 bg-slate-50/30">
                     <div className="p-3 pb-6">
                       {links.map((l) => (
-                        <div key={l.id} onClick={() => { setSelectedLinkId(l.id); setSelectedObjectId(null); }} className={`p-3 mb-2 rounded-lg cursor-pointer transition border ${selectedLinkId === l.id ? "bg-white border-indigo-300 shadow-sm ring-1 ring-indigo-100" : "bg-white border-slate-200 hover:border-slate-300 hover:shadow-sm"}`}>
-                          <div className="text-xs font-medium text-slate-700 truncate">{objects.find((o) => o.id === l.from)?.name || "?"} ー {objects.find((o) => o.id === l.to)?.name || "?"}</div>
-                          <div className="text-[10px] text-slate-500 mt-1.5 bg-slate-100 px-1.5 py-0.5 rounded inline-block">{l.label || "ラベルなし"}</div>
+                        <div
+                          key={l.id}
+                          onClick={() => {
+                            setSelectedLinkId(l.id);
+                            setSelectedObjectId(null);
+                          }}
+                          className={`p-3 mb-2 rounded-lg cursor-pointer transition border ${
+                            selectedLinkId === l.id
+                              ? "bg-white border-indigo-300 shadow-sm ring-1 ring-indigo-100"
+                              : "bg-white border-slate-200 hover:border-slate-300 hover:shadow-sm"
+                          }`}
+                        >
+                          <div className="text-xs font-medium text-slate-700 truncate">
+                            {objects.find((o) => o.id === l.from)?.name || "?"} ー {objects.find((o) => o.id === l.to)?.name || "?"}
+                          </div>
+                          <div className="text-[10px] text-slate-500 mt-1.5 bg-slate-100 px-1.5 py-0.5 rounded inline-block">
+                            {l.label || "ラベルなし"}
+                          </div>
                         </div>
                       ))}
                     </div>
                   </div>
+
                   <div className="w-1/2 overflow-y-auto overflow-x-hidden bg-white">
                     <div className="p-4 pb-8">
                       {selectedLink ? (
                         <div className="space-y-5">
                           <div>
-                            <label className="text-xs font-bold text-slate-700 mb-1.5 flex items-center">接続先 <HelpBadge title={TOOLTIP.linkEndpoints} /></label>
+                            <label className="text-xs font-bold text-slate-700 mb-1.5 flex items-center">
+                              接続先 <HelpBadge title={TOOLTIP.linkEndpoints} />
+                            </label>
                             <div className="flex items-center gap-2">
-                              <select className="flex-1 min-w-0 text-xs px-2 py-2 border border-slate-300 rounded-md" value={selectedLink.from} onChange={(e) => handleUpdateLink(selectedLink.id, { from: e.target.value })}>
-                                {objects.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                              <select
+                                className="flex-1 min-w-0 text-xs px-2 py-2 border border-slate-300 rounded-md"
+                                value={selectedLink.from}
+                                onChange={(e) => handleUpdateLink(selectedLink.id, { from: e.target.value })}
+                              >
+                                {objects.map((o) => (
+                                  <option key={o.id} value={o.id}>
+                                    {o.name}
+                                  </option>
+                                ))}
                               </select>
                               <span className="text-slate-400 flex-shrink-0 font-bold">ー</span>
-                              <select className="flex-1 min-w-0 text-xs px-2 py-2 border border-slate-300 rounded-md" value={selectedLink.to} onChange={(e) => handleUpdateLink(selectedLink.id, { to: e.target.value })}>
-                                {objects.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                              <select
+                                className="flex-1 min-w-0 text-xs px-2 py-2 border border-slate-300 rounded-md"
+                                value={selectedLink.to}
+                                onChange={(e) => handleUpdateLink(selectedLink.id, { to: e.target.value })}
+                              >
+                                {objects.map((o) => (
+                                  <option key={o.id} value={o.id}>
+                                    {o.name}
+                                  </option>
+                                ))}
                               </select>
                             </div>
                           </div>
+
                           <div>
-                            <label className="text-xs font-bold text-slate-700 mb-1.5 flex items-center">リンクラベル <HelpBadge title={TOOLTIP.linkLabel} /></label>
-                            <input className="w-full min-w-0 text-xs px-3 py-2 border border-slate-300 rounded-md" placeholder="関係を示す言葉" value={selectedLink.label} onChange={(e) => handleUpdateLink(selectedLink.id, { label: e.target.value })} />
+                            <label className="text-xs font-bold text-slate-700 mb-1.5 flex items-center">
+                              リンクラベル <HelpBadge title={TOOLTIP.linkLabel} />
+                            </label>
+                            <input
+                              className="w-full min-w-0 text-xs px-3 py-2 border border-slate-300 rounded-md"
+                              placeholder="関係を示す言葉"
+                              value={selectedLink.label}
+                              onChange={(e) => handleUpdateLink(selectedLink.id, { label: e.target.value })}
+                            />
                           </div>
+
                           <div className="pt-4 border-t border-slate-100 flex justify-end">
-                            <button className="text-xs text-red-500 hover:underline font-medium" onClick={() => handleDeleteLink(selectedLink.id)}>このリンクを削除</button>
+                            <button
+                              className="text-xs text-red-500 hover:underline font-medium"
+                              onClick={() => handleDeleteLink(selectedLink.id)}
+                            >
+                              このリンクを削除
+                            </button>
                           </div>
                         </div>
-                      ) : <div className="text-sm text-slate-400 text-center mt-10">左のリストからリンクを選択してください</div>}
+                      ) : (
+                        <div className="text-sm text-slate-400 text-center mt-10">
+                          左のリストからリンクを選択してください
+                        </div>
+                      )}
                     </div>
                   </div>
                 </>
               ) : (
-                <div className="flex-1 overflow-y-auto overflow-x-hidden bg-slate-50" ref={linkAssistScrollRef}>
+                <div
+                  className="flex-1 overflow-y-auto overflow-x-hidden bg-slate-50"
+                  ref={linkAssistScrollRef}
+                >
                   <div className="p-6 pb-12">
                     {!linkChecked ? (
                       <div className="flex flex-col items-center justify-center h-full text-slate-500">
                         <p className="text-sm mb-4">まだ診断が実行されていません。</p>
-                        <button className="px-4 py-2 bg-indigo-600 text-white rounded-md text-sm shadow-sm hover:bg-indigo-700 transition" onClick={handleLinkDiagnose}>診断を実行する</button>
+                        <button
+                          className="px-4 py-2 bg-indigo-600 text-white rounded-md text-sm shadow-sm hover:bg-indigo-700 transition"
+                          onClick={handleLinkDiagnose}
+                        >
+                          診断を実行する
+                        </button>
                       </div>
                     ) : (
                       <div className="max-w-2xl mx-auto space-y-6">
-                        <HintCard
-                          title="リンク（線）"
-                          subtitle="要求と合っていない可能性があります。"
-                          countText={linkExtraLinksForReveal.length > 0 ? `${linkExtraLinksForReveal.length}件の候補` : null}
-                          primaryLabel="詳細を見る"
-                          onPrimary={handleRequestLinkDetails}
-                          disabled={false}
+                        <DiagnoseGroupCard
+                          title="不足しているもの"
+                          tone="missing"
+                          count={linkMissingCount}
+                          summary="まだ追加できていない関係があります。"
+                          detailLabel="不足に気づくヒントを見る"
+                          onDetail={handleRequestLinkMissingHints}
+                          disabled={
+                            linkMissingCount === 0 ||
+                            (!linkMissingDirtySinceHint && linkRevealMissingHints)
+                          }
+                        >
+                          <div className="flex flex-wrap gap-2">
+                            <CountBadge label="リンク不足" value={linkMissingCount} />
+                          </div>
+                        </DiagnoseGroupCard>
+
+                        <DiagnoseGroupCard
+                          title="見直したいもの"
+                          tone="review"
+                          count={linkExtraCount}
+                          summary="入っているが、つなぎ方を見直した方がよい関係があります。"
+                          detailLabel="見直しのヒントを見る"
+                          onDetail={handleRequestLinkReviewDetails}
+                          disabled={
+                            linkExtraCount === 0 ||
+                            (!linkDirtySinceHint &&
+                              linkRevealExtra >= linkExtraLinksForReveal.length)
+                          }
                         />
+
+                        {linkRevealMissingHints && (
+                          <div className="p-4 bg-white border-l-4 border-amber-400 rounded shadow-sm transition-all duration-300 space-y-4">
+                            <div className="flex flex-wrap gap-2">
+                              <CountBadge label="リンク不足" value={linkMissingCount} />
+                            </div>
+                            <div>
+                              <div className="text-xs font-bold text-slate-700 mb-2">
+                                ➕ 関係についてのヒント
+                              </div>
+                              <div className="text-sm text-slate-700 leading-relaxed">
+                                まだ図に表せていない関係がある可能性があります。
+                                <br />
+                                問題文の「担当する」「予約している」「所有する」「対応する」など、
+                                2つの対象を結ぶ表現がないかを確認してみましょう。
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
                         {linkRevealExtra > 0 && (
-                          <div className="p-4 bg-white border-l-4 border-red-400 rounded shadow-sm transition-all duration-300">
-                            <div className="text-xs font-bold text-slate-700 mb-2">💡 確認すべきリンク</div>
-                            <div className="flex flex-col gap-2">
-                              {linkExtraLinksForReveal.slice(0, linkRevealExtra).map((p) => (
-                                <div key={p.fullKey} className="px-3 py-1.5 bg-red-50 text-red-700 text-xs rounded border border-red-100">
-                                  {p.pretty}
-                                </div>
+                          <div className="p-4 bg-white border-l-4 border-rose-400 rounded shadow-sm transition-all duration-300">
+                            <div className="text-xs font-bold text-slate-700 mb-2">
+                              🔍 この対象どうしの関係を見直しましょう
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {Array.from(
+                                new Set(linkExtraLinksForReveal.flatMap((p) => [p.a, p.b]).filter(Boolean))
+                              ).map((base) => (
+                                <span
+                                  key={base}
+                                  className="px-2 py-1 bg-rose-50 text-rose-700 text-xs rounded border border-rose-100"
+                                >
+                                  {base}
+                                </span>
                               ))}
+                            </div>
+                            <div className="mt-2 text-[11px] text-slate-500">
+                              不自然なリンクの具体名は直接出さず、対象だけ示しています。
                             </div>
                           </div>
                         )}
@@ -1273,7 +1853,8 @@ const ExperimentPage: React.FC = () => {
               )}
             </div>
 
-            <div className="absolute bottom-0 left-0 w-full h-1.5 cursor-row-resize bg-slate-200 hover:bg-indigo-300 transition z-20"
+            <div
+              className="absolute bottom-0 left-0 w-full h-1.5 cursor-row-resize bg-slate-200 hover:bg-indigo-300 transition z-20"
               onMouseDown={(e) => {
                 const startY = e.clientY;
                 const startRatio = linkPanelRatio;
@@ -1281,8 +1862,12 @@ const ExperimentPage: React.FC = () => {
                   const delta = ((moveEvent.clientY - startY) / window.innerHeight) * 100;
                   setLinkPanelRatio(Math.min(80, Math.max(20, startRatio + delta)));
                 };
-                const onMouseUp = () => { document.removeEventListener("mousemove", onMouseMove); document.removeEventListener("mouseup", onMouseUp); };
-                document.addEventListener("mousemove", onMouseMove); document.addEventListener("mouseup", onMouseUp);
+                const onMouseUp = () => {
+                  document.removeEventListener("mousemove", onMouseMove);
+                  document.removeEventListener("mouseup", onMouseUp);
+                };
+                document.addEventListener("mousemove", onMouseMove);
+                document.addEventListener("mouseup", onMouseUp);
               }}
             />
           </div>
@@ -1307,7 +1892,9 @@ const ExperimentPage: React.FC = () => {
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-bold text-slate-800">継承のヒント</div>
-                      <div className="mt-1 text-[12px] text-slate-500">この画面では決めずに、次のページで確認します。</div>
+                      <div className="mt-1 text-[12px] text-slate-500">
+                        この画面では決めずに、次のページで確認します。
+                      </div>
                     </div>
                     <button
                       type="button"
@@ -1321,9 +1908,15 @@ const ExperimentPage: React.FC = () => {
                   {featuredInheritance ? (
                     <div className="mt-3 rounded-lg border border-indigo-200 bg-indigo-50 p-3">
                       <div className="text-xs font-semibold text-indigo-800">まず見る候補</div>
-                      <div className="mt-2 text-sm font-semibold text-slate-800">{featuredInheritance.children.join(" / ")}</div>
-                      <div className="mt-2 text-xs text-slate-700">共通属性: {featuredInheritance.sharedAttrs.join("、")}</div>
-                      <div className="mt-2 text-xs text-slate-600">共通部分を親クラスにまとめられるか、次のページで確認しましょう。</div>
+                      <div className="mt-2 text-sm font-semibold text-slate-800">
+                        {featuredInheritance.children.join(" / ")}
+                      </div>
+                      <div className="mt-2 text-xs text-slate-700">
+                        共通属性: {featuredInheritance.sharedAttrs.join("、")}
+                      </div>
+                      <div className="mt-2 text-xs text-slate-600">
+                        共通部分を親クラスにまとめられるか、次のページで確認しましょう。
+                      </div>
                     </div>
                   ) : (
                     <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
@@ -1336,17 +1929,33 @@ const ExperimentPage: React.FC = () => {
 
             <div className="absolute top-2 right-4 z-10 flex gap-2 bg-white/90 p-1.5 rounded shadow-sm border border-slate-200 backdrop-blur">
               <span className="text-xs font-bold text-slate-600 py-1 px-2">自動生成クラス図</span>
-              <input type="range" min={ZOOM_MIN} max={ZOOM_MAX} step={ZOOM_STEP} value={classZoom} onChange={(e) => setClassZoom(parseFloat(e.target.value))} className="w-24" />
+              <input
+                type="range"
+                min={0.3}
+                max={3}
+                step={0.1}
+                value={classZoom}
+                onChange={(e) => setClassZoom(parseFloat(e.target.value))}
+                className="w-24"
+              />
               <span className="text-xs w-10 text-center">{Math.round(classZoom * 100)}%</span>
             </div>
 
-            <div className={`flex-1 overflow-auto p-4 pt-16 ${classPan.isDragging ? "cursor-grabbing" : "cursor-grab"}`} ref={classPan.containerRef} {...classPan.handlers}>
+            <div
+              className={`flex-1 overflow-auto p-4 pt-16 ${classPan.isDragging ? "cursor-grabbing" : "cursor-grab"}`}
+              ref={classPan.containerRef}
+              {...classPan.handlers}
+            >
               {classPreviewUrl ? (
                 <div style={{ transform: `scale(${classZoom})`, transformOrigin: "top left", width: "max-content" }}>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={classPreviewUrl} alt="クラス図" className="pointer-events-none select-none drop-shadow-sm" />
                 </div>
-              ) : <div className="text-slate-400 text-sm text-center mt-10">オブジェクト名を入力してください</div>}
+              ) : (
+                <div className="text-slate-400 text-sm text-center mt-10">
+                  オブジェクト名を入力してください
+                </div>
+              )}
             </div>
           </div>
         </div>
