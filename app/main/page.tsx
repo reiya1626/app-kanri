@@ -1174,7 +1174,7 @@ const ExperimentPage: React.FC = () => {
       localStorage.setItem(STORAGE_KEY_EDITOR_INITIAL, JSON.stringify(editorPayload));
     } catch {}
 
-    router.push("/experiment/class-editor");
+    router.push("/main/class-editor");
   };
 
   const displayClassPuml = useMemo(

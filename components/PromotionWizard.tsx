@@ -3,7 +3,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useState } from "react";
-import type { PromoteItem } from "@/types";
+import type { PromoteItem } from "@/types/domain";
 
 export default function PromotionWizard({
   suggestions,

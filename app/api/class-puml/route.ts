@@ -2,6 +2,7 @@
 
 // Next.js が提供するサーバー側の機能を使うために
 // リクエスト/レスポンス用の型を読み込む
+//オブジェクト軍から推定クラス図のPumlを生成
 import { NextRequest, NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 

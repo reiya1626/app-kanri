@@ -4,8 +4,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import type {
-  WizardState, ClassPumlResponse, WizardClassAttr, WizardRelation
-} from "@/types";
+  WizardState,
+  WizardClassAttr,
+  WizardRelation,
+} from "@/types/domain";
+
+import type { ClassPumlResponse } from "@/types/api";
 
 type Target =
   | { kind: "node"; className: string }

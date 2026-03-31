@@ -1,6 +1,6 @@
 // /lib/puml.ts
 import { v4 as uuid } from "uuid";
-import type { Obj, Attr } from "@/types";
+import type { Obj, Attr } from "@/types/domain";
 
 /**
  * PlantUML object {...} → Obj[] 変換（日本語名 / "引用名" / :型 / 日本語属性キー対応）

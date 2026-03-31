@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import type { Obj, Link } from "@/types";
+import type { Obj, Link } from "@/types/domain";
 
 type Props = {
   objects: Obj[];

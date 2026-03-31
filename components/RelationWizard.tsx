@@ -3,7 +3,8 @@
 import { useCallback } from "react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import type { WizardRelation, CompareResponse } from "@/types";
+import type { WizardRelation } from "@/types/domain";
+import type { CompareResponse } from "@/types/api";
 
 type Props = {
   /** 現在の関係（配列） */

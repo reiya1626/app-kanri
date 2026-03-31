@@ -1,4 +1,4 @@
-import { Scenario } from "@/types";
+import { Scenario } from "@/types/domain";
 
 type Store = { scenarios: Scenario[] };
 const g = globalThis as any;

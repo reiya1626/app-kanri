@@ -1,7 +1,7 @@
 "use client";
 
 import { v4 as uuid } from "uuid";
-import type { LogEvent } from "@/types"; // ← types.ts に追加した LogEvent を使う
+import type { LogEvent } from "@/types/domain"; // ← types.ts に追加した LogEvent を使う
 
 const SESSION_KEY = "sess_v1";
 

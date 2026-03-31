@@ -2,7 +2,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useCallback } from "react";
-import type { WizardInheritance } from "@/types";
+import type { WizardInheritance } from "@/types/domain";
 
 export default function InheritanceWizard({
   classNames,

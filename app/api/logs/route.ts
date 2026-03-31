@@ -1,4 +1,5 @@
 // app/api/logs/route.ts
+//学習ログをDBに保存
 import { NextRequest, NextResponse } from "next/server";
 import { Pool } from "pg";
 import crypto from "node:crypto";

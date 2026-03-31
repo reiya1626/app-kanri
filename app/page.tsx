@@ -1,4 +1,5 @@
 // app/page.tsx
+// 教員用の設定ページ
 "use client";
 
 import React, { useState } from "react";

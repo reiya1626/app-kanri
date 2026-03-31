@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import type { WizardState, WizardClassAttr } from "@/types";
+import type { WizardState, WizardClassAttr } from "@/types/domain";
 
 type Target =
   | { type: "class"; name: string }

@@ -1,7 +1,7 @@
 "use client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import type { WizardClass } from "@/types";
+import type { WizardClass } from "@/types/domain";
 
 export default function ClusterWizard({
   items, onChange,

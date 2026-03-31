@@ -1,3 +1,5 @@
+//オブジェクト図からクラス図へ変換するAPI
+
 import { NextRequest, NextResponse } from "next/server";
 import plantumlEncoder from "plantuml-encoder";
 

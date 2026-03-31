@@ -1,5 +1,6 @@
 //Next.jsが提供するサーバー側の機能を利用するために
 //リクエストのデータと応答データという部品を読み込んでる
+//学習者が作った情報からオブジェクト図のPumlを作成するコード
 import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";

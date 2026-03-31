@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Obj } from "@/types";
+import { Obj } from "@/types/domain";
 
 export function ManualObjectsForm({
   objects,

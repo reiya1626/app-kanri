@@ -2,7 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import type { Obj } from "@/types";
+import type { Obj } from "@/types/domain";
 import { useCallback } from "react";
 
 type Props = {
