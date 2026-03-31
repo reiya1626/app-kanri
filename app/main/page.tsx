@@ -5,7 +5,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import plantumlEncoder from "plantuml-encoder";
-import { useProblemConfig } from "../../components/problem-config";
+import { useProblemConfig } from "@/components/config/problem-config";
 
 // ===== 型定義 =====
 type Slot = { key: string; value: string };
@@ -572,7 +572,7 @@ const ExperimentPage: React.FC = () => {
     const controller = new AbortController();
     const id = setTimeout(async () => {
       try {
-        const res = await fetch("/api/convert", {
+        const res = await fetch("/api/convert-object-to-class", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1113,7 +1113,7 @@ const ExperimentPage: React.FC = () => {
       };
     } else {
       try {
-        const res = await fetch("/api/convert", {
+        const res = await fetch("/api/convert-object-to-class", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({

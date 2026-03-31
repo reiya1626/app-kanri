@@ -28,7 +28,7 @@ This is a Next.js 15 web application for learning object-oriented design through
 - **API Routes**: Export `runtime = "nodejs"` and `dynamic = "force-dynamic"` for server-side logic
 
 ## Key Conventions
-- **File Naming**: Kebab-case for routes (e.g., `upload-scenario`), PascalCase for components
+- **File Naming**: Kebab-case for routes (e.g., `scenarios`), PascalCase for components
 - **Imports**: Absolute paths with `@/` alias (e.g., `@/types`, `@/components`)
 - **State Updates**: Immutable updates for arrays/objects; use `Object.assign` for patches in stores
 - **Error Handling**: Minimal; rely on TypeScript for type safety; async operations use try/catch sparingly

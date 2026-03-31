@@ -4,7 +4,7 @@
 import React, { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import plantumlEncoder from "plantuml-encoder";
-import { useProblemConfig } from "../../../components/problem-config";
+import { useProblemConfig } from "@/components/config/problem-config";
 
 // ===== 型定義 =====
 type ClassAttr = {

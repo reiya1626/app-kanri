@@ -3,7 +3,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { useProblemConfig } from "../components/problem-config";
+import { useProblemConfig } from "@/components/config/problem-config";
 
 // JSON からテキスト候補を拾うヘルパ
 function pickTextFromJson(json: any): string | null {

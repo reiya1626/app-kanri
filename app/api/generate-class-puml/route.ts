@@ -1,4 +1,4 @@
-// app/api/class-puml/route.ts
+// app/api/generate-class-puml/route.ts
 
 // Next.js が提供するサーバー側の機能を使うために
 // リクエスト/レスポンス用の型を読み込む
@@ -291,7 +291,7 @@ ${relLines.join("\n")}
 // ==== エンドポイント本体 ====
 
 // 外部からのアクセスが可能な export 関数（POST メソッド用）
-// レベル3などのページから fetch("/api/class-puml", { body: { snapshot }})
+// レベル3などのページから fetch("/api/generate-class-puml", { body: { snapshot }})
 // で呼び出されることを想定
 export async function POST(req: NextRequest) {
   try {

@@ -2,7 +2,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { getScenarioById, updateScenario, deleteScenario } from "../../scenarioStore";
+import { getScenarioById, updateScenario, deleteScenario } from "../../../../lib/server/scenarioStore";
 
 // 型定義: params は Promise<{ id: string }> になります
 type RouteParams = {
