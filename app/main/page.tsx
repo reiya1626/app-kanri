@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import plantumlEncoder from "plantuml-encoder";
 import { useProblemConfig } from "@/components/config/problem-config";
 
+
 // ===== 型定義 =====
 type Slot = { key: string; value: string };
 type Obj = { id: string; name: string; slots: Slot[] };
