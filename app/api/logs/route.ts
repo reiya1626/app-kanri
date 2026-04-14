@@ -1,84 +1,92 @@
-// app/api/logs/route.ts
-//学習ログをDBに保存
-import { NextRequest, NextResponse } from "next/server";
-import { Pool } from "pg";
-import crypto from "node:crypto";
+import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 
-export const runtime = "nodejs";          // Edge ではなく Node で動かす
-export const dynamic = "force-dynamic";   // キャッシュしない
+export const runtime = "nodejs";
 
-// 接続プール
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },     // Supabase/Neon などは基本必要
-});
-
-// （任意）自由入力の文字列を最小限スクラブ（ハッシュ化）
-const LOG_SCRUB = process.env.LOG_SCRUB === "1";
-const scrub = (p: any) => {
-  if (!LOG_SCRUB || !p || typeof p !== "object") return p ?? null;
-  const c = JSON.parse(JSON.stringify(p));
-  const hash = (s: any) =>
-    typeof s === "string"
-      ? crypto.createHash("sha256").update(s).digest("hex").slice(0, 16)
-      : s;
-  // よく使うフィールドだけ軽くハッシュ（必要に応じて拡張）
-  ["prev", "next", "label", "key", "value", "to", "from"].forEach(k => {
-    if (k in c) c[k] = hash(c[k]);
-  });
-  return c;
+type IncomingEvent = {
+  ts?: string;
+  seq?: number;
+  session_id?: string;
+  problem_id?: string | null;
+  user_id?: string | null;
+  screen?: string | null;
+  event?: string;
+  payload?: unknown;
+  tz_offset?: number | null;
 };
 
-export async function POST(req: NextRequest) {
+function getClientIp(req: Request): string | null {
+  const forwarded = req.headers.get("x-forwarded-for");
+  if (forwarded) {
+    return forwarded.split(",")[0]?.trim() || null;
+  }
+  return null;
+}
+
+export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const events = Array.isArray(body?.events) ? body.events : [];
-    if (!events.length) return NextResponse.json({ ok: true, saved: 0 });
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-    // 送信元情報
-    const ua = req.headers.get("user-agent") ?? "";
-    const ip =
-      req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
-      // @ts-ignore
-      (req as any).ip ??
-      null;
-
-    // まとめて insert（jsonb_to_recordset 経由）
-    const client = await pool.connect();
-    try {
-      const sanitized = events.map((e: any) => ({ ...e, payload: scrub(e.payload) }));
-      const sql = `
-        insert into log_events
-          (ts, seq, session_id, problem_id, user_id, event, payload, tz_offset, ip, user_agent)
-        select
-          ts, seq, session_id, problem_id, user_id, event, payload, tz_offset, $2::inet, $3
-        from jsonb_to_recordset($1::jsonb)
-          as x(
-            ts timestamptz,
-            seq int,
-            session_id text,
-            problem_id text,
-            user_id text,
-            event text,
-            payload jsonb,
-            tz_offset int
-          );
-      `;
-      await client.query(sql, [JSON.stringify(sanitized), ip, ua]);
-    } finally {
-      client.release();
+    if (!supabaseUrl || !serviceRoleKey) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is not set",
+        },
+        { status: 500 }
+      );
     }
 
-    return NextResponse.json({ ok: true, saved: events.length });
-  } catch (err: any) {
-    console.error("[/api/logs] DB error:", err);
+    const supabase = createClient(supabaseUrl, serviceRoleKey);
+
+    const body = await req.json();
+    const events = Array.isArray(body?.events) ? body.events : null;
+
+    if (!events || events.length === 0) {
+      return NextResponse.json(
+        { ok: false, error: "events is required" },
+        { status: 400 }
+      );
+    }
+
+    const ip = getClientIp(req);
+    const userAgent = req.headers.get("user-agent");
+
+    const normalized = events.map((e: IncomingEvent) => ({
+      ts: e.ts ?? new Date().toISOString(),
+      seq: typeof e.seq === "number" ? e.seq : 0,
+      session_id: e.session_id ?? "unknown",
+      problem_id: e.problem_id ?? null,
+      user_id: e.user_id ?? null,
+      screen: e.screen ?? null,
+      event: e.event ?? "unknown",
+      payload: e.payload ?? {},
+      tz_offset: typeof e.tz_offset === "number" ? e.tz_offset : null,
+      ip,
+      user_agent: userAgent,
+    }));
+
+    const { error } = await supabase.from("log_events").insert(normalized);
+
+    if (error) {
+      return NextResponse.json(
+        { ok: false, error: error.message },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json({
+      ok: true,
+      saved: normalized.length,
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown error";
+
     return NextResponse.json(
-      { ok: false, error: String(err?.message ?? err) },
+      { ok: false, error: message },
       { status: 500 }
     );
   }
-}
-
-export async function GET() {
-  return NextResponse.json({ ok: true });
 }

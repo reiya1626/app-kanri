@@ -6,6 +6,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import plantumlEncoder from "plantuml-encoder";
 import { useProblemConfig } from "@/components/config/problem-config";
+import { logEvent } from "@/app/main/logEvent";
 
 
 // ===== 型定義 =====
@@ -508,6 +509,20 @@ const ExperimentPage: React.FC = () => {
     } catch {}
   }, []);
 
+  useEffect(() => {
+    void logEvent(
+      "session.start",
+      {
+        problemId: "current",
+      },
+      {
+        screen: "main",
+        problemId: "current",
+      }
+    );
+  }, []);
+
+
   const hasUnnamedObject = useMemo(
     () => objects.some((o) => !o.name || o.name.trim().length === 0),
     [objects]
@@ -807,6 +822,19 @@ const ExperimentPage: React.FC = () => {
   const handleObjDiagnose = () => {
     setObjChecked(true);
     setObjTab("diagnose");
+
+    void logEvent(
+      "diagnose.object.run",
+      {
+        missing: objAssist.missingBases.length,
+        extra: objAssist.extraBases.length,
+        slotMissing: objAssist.missingSlotKeyTotal,
+      },
+      {
+        screen: "main",
+        problemId: "current",
+      }
+    );
 
     const inputObjs = objects.filter((o) => o.name?.trim() && o.id !== editingObjectId);
     const inputTotal = inputObjs.length;
