@@ -39,7 +39,31 @@ type LinkDiagnoseSnapshot = {
   extraLinks: LinkSig[];
 };
 
-type Link = { id: string; from: string; to: string; label: string };
+type RelationKind = "association" | "aggregation" | "composition" | "inheritance" | "unknown";
+type Boolish = boolean | null;
+type WholePartJudgement = {
+  isWholePart?: Boolish;
+  wholeId?: string;
+  partId?: string;
+  partDiesWithWhole?: Boolish;
+  partCanBeShared?: Boolish;
+  partCanExistAlone?: Boolish;
+};
+type InheritanceJudgement = {
+  isKindOf?: Boolish;
+  childId?: string;
+  parentId?: string;
+};
+
+type Link = {
+  id: string;
+  from: string;
+  to: string;
+  label: string;
+  relationKind?: RelationKind;
+  wholePart?: WholePartJudgement;
+  inheritance?: InheritanceJudgement;
+};
 
 type IssuesResponse = {
   classes: { name: string; incomplete: string[]; contradictory: string[] }[];
@@ -86,6 +110,14 @@ type LinkSig = {
   endpointKey: string;
   fullKey: string;
   pretty: string;
+};
+
+const RELATION_KIND_LABEL: Record<RelationKind, string> = {
+  association: "通常関連",
+  aggregation: "集約",
+  composition: "合成",
+  inheritance: "継承",
+  unknown: "未判定",
 };
 
 const STORAGE_KEY_STATE = "EXPERIMENT_OBJECT_EDITOR_STATE";
@@ -269,6 +301,51 @@ const makeEndpointKey = (aBase: string, bBase: string) => {
 };
 const makeFullKey = (endpointKey: string, labelNorm: string) => `${endpointKey}||${labelNorm}`;
 
+const judgeRelationKind = (
+  wholePart?: WholePartJudgement,
+  inheritance?: InheritanceJudgement
+): RelationKind => {
+  if (inheritance?.isKindOf === true) {
+    return inheritance.childId && inheritance.parentId ? "inheritance" : "unknown";
+  }
+  if (!wholePart || wholePart.isWholePart == null) return "unknown";
+  if (wholePart.isWholePart === false) return "association";
+  if (!wholePart.wholeId || !wholePart.partId) return "unknown";
+
+  if (
+    wholePart.partDiesWithWhole === true &&
+    wholePart.partCanBeShared === false
+  ) {
+    return "composition";
+  }
+
+  if (
+    wholePart.partCanExistAlone === true ||
+    wholePart.partCanBeShared === true ||
+    wholePart.partDiesWithWhole === false
+  ) {
+    return "aggregation";
+  }
+
+  return "unknown";
+};
+
+const relationKindHelp = (kind: RelationKind) => {
+  if (kind === "inheritance") {
+    return "一方がもう一方の種類であるため、クラス図では継承として扱います。";
+  }
+  if (kind === "composition") {
+    return "部分は全体に強く依存し、同時に複数の全体へ共有されないため、合成として扱います。";
+  }
+  if (kind === "aggregation") {
+    return "全体-部分ではありますが、部分が独立できる、共有される、または全体と同時に消えないため、集約として扱います。";
+  }
+  if (kind === "association") {
+    return "全体-部分ではないため、通常の関連として扱います。";
+  }
+  return "判断材料が足りないため、クラス図では通常の関連として扱います。";
+};
+
 const extractLinksFromPuml = (puml: string) => {
   const out: LinkSig[] = [];
   if (!puml) return out;
@@ -439,6 +516,41 @@ const CountBadge: React.FC<{ label: string; value: number }> = ({ label, value }
   </span>
 );
 
+const ChoiceButton: React.FC<{
+  active: boolean;
+  children: React.ReactNode;
+  onClick: () => void;
+}> = ({ active, children, onClick }) => (
+  <button
+    type="button"
+    className={`rounded border px-2 py-1.5 text-[11px] font-medium transition ${
+      active
+        ? "border-indigo-300 bg-indigo-50 text-indigo-700"
+        : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+    }`}
+    onClick={onClick}
+  >
+    {children}
+  </button>
+);
+
+const TriStateButtons: React.FC<{
+  value: Boolish | undefined;
+  onChange: (value: Boolish) => void;
+}> = ({ value, onChange }) => (
+  <div className="flex flex-wrap gap-1.5">
+    <ChoiceButton active={value === true} onClick={() => onChange(true)}>
+      はい
+    </ChoiceButton>
+    <ChoiceButton active={value === false} onClick={() => onChange(false)}>
+      いいえ
+    </ChoiceButton>
+    <ChoiceButton active={value == null} onClick={() => onChange(null)}>
+      わからない
+    </ChoiceButton>
+  </div>
+);
+
 const ExperimentPage: React.FC = () => {
   const router = useRouter();
   const { objectProblemText, objectAnswerPuml } = useProblemConfig();
@@ -596,11 +708,7 @@ const ExperimentPage: React.FC = () => {
               name: o.name,
               attrs: o.slots.map((s) => ({ key: s.key, value: s.value })),
             })),
-            links: links.map((l) => ({
-              from: objects.find((o) => o.id === l.from)?.name ?? "",
-              to: objects.find((o) => o.id === l.to)?.name ?? "",
-              label: l.label,
-            })),
+            links: buildConvertLinksPayload(),
           }),
           signal: controller.signal,
         });
@@ -645,6 +753,69 @@ const ExperimentPage: React.FC = () => {
     () => links.find((l) => l.id === selectedLinkId) ?? null,
     [links, selectedLinkId]
   );
+
+  const selectedRelationKind = useMemo(
+    () => judgeRelationKind(selectedLink?.wholePart, selectedLink?.inheritance),
+    [selectedLink]
+  );
+
+  const updateSelectedWholePart = (partial: Partial<WholePartJudgement>) => {
+    if (!selectedLink) return;
+    const nextWholePart: WholePartJudgement = {
+      ...(selectedLink.wholePart ?? {}),
+      ...partial,
+    };
+    const nextKind = judgeRelationKind(nextWholePart, selectedLink.inheritance);
+    handleUpdateLink(selectedLink.id, {
+      wholePart: nextWholePart,
+      relationKind: nextKind,
+    });
+  };
+
+  const updateSelectedInheritance = (partial: Partial<InheritanceJudgement>) => {
+    if (!selectedLink) return;
+    const nextInheritance: InheritanceJudgement = {
+      ...(selectedLink.inheritance ?? {}),
+      ...partial,
+    };
+    const nextKind = judgeRelationKind(selectedLink.wholePart, nextInheritance);
+    handleUpdateLink(selectedLink.id, {
+      inheritance: nextInheritance,
+      relationKind: nextKind,
+    });
+  };
+
+  const buildConvertLinksPayload = () =>
+    links.map((l) => {
+      const relationKind = judgeRelationKind(l.wholePart, l.inheritance);
+      const wholeName =
+        l.wholePart?.wholeId && relationKind !== "association"
+          ? objects.find((o) => o.id === l.wholePart?.wholeId)?.name ?? ""
+          : "";
+      const partName =
+        l.wholePart?.partId && relationKind !== "association"
+          ? objects.find((o) => o.id === l.wholePart?.partId)?.name ?? ""
+          : "";
+      const childName =
+        l.inheritance?.childId && relationKind === "inheritance"
+          ? objects.find((o) => o.id === l.inheritance?.childId)?.name ?? ""
+          : "";
+      const parentName =
+        l.inheritance?.parentId && relationKind === "inheritance"
+          ? objects.find((o) => o.id === l.inheritance?.parentId)?.name ?? ""
+          : "";
+
+      return {
+        from: objects.find((o) => o.id === l.from)?.name ?? "",
+        to: objects.find((o) => o.id === l.to)?.name ?? "",
+        label: l.label,
+        relationKind,
+        whole: wholeName,
+        part: partName,
+        child: childName,
+        parent: parentName,
+      };
+    });
 
   const objAssist = useMemo(() => {
     const enabled = !!(objectAnswerPuml && objectAnswerPuml.trim().length > 0);
@@ -1150,11 +1321,7 @@ const ExperimentPage: React.FC = () => {
               name: o.name,
               attrs: o.slots.map((s) => ({ key: s.key, value: s.value })),
             })),
-            links: links.map((l) => ({
-              from: objects.find((o) => o.id === l.from)?.name ?? "",
-              to: objects.find((o) => o.id === l.to)?.name ?? "",
-              label: l.label,
-            })),
+            links: buildConvertLinksPayload(),
           }),
         });
 
@@ -1713,8 +1880,13 @@ const ExperimentPage: React.FC = () => {
                           <div className="text-xs font-medium text-slate-700 truncate">
                             {objects.find((o) => o.id === l.from)?.name || "?"} ー {objects.find((o) => o.id === l.to)?.name || "?"}
                           </div>
-                          <div className="text-[10px] text-slate-500 mt-1.5 bg-slate-100 px-1.5 py-0.5 rounded inline-block">
-                            {l.label || "ラベルなし"}
+                          <div className="mt-1.5 flex flex-wrap gap-1">
+                            <span className="text-[10px] text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+                              {l.label || "ラベルなし"}
+                            </span>
+                            <span className="text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">
+                              {RELATION_KIND_LABEL[judgeRelationKind(l.wholePart, l.inheritance)]}
+                            </span>
                           </div>
                         </div>
                       ))}
@@ -1733,7 +1905,14 @@ const ExperimentPage: React.FC = () => {
                               <select
                                 className="flex-1 min-w-0 text-xs px-2 py-2 border border-slate-300 rounded-md"
                                 value={selectedLink.from}
-                                onChange={(e) => handleUpdateLink(selectedLink.id, { from: e.target.value })}
+                                onChange={(e) =>
+                                  handleUpdateLink(selectedLink.id, {
+                                    from: e.target.value,
+                                    wholePart: undefined,
+                                    inheritance: undefined,
+                                    relationKind: "unknown",
+                                  })
+                                }
                               >
                                 {objects.map((o) => (
                                   <option key={o.id} value={o.id}>
@@ -1745,7 +1924,14 @@ const ExperimentPage: React.FC = () => {
                               <select
                                 className="flex-1 min-w-0 text-xs px-2 py-2 border border-slate-300 rounded-md"
                                 value={selectedLink.to}
-                                onChange={(e) => handleUpdateLink(selectedLink.id, { to: e.target.value })}
+                                onChange={(e) =>
+                                  handleUpdateLink(selectedLink.id, {
+                                    to: e.target.value,
+                                    wholePart: undefined,
+                                    inheritance: undefined,
+                                    relationKind: "unknown",
+                                  })
+                                }
                               >
                                 {objects.map((o) => (
                                   <option key={o.id} value={o.id}>
@@ -1766,6 +1952,187 @@ const ExperimentPage: React.FC = () => {
                               value={selectedLink.label}
                               onChange={(e) => handleUpdateLink(selectedLink.id, { label: e.target.value })}
                             />
+                          </div>
+
+                          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                            <div className="flex items-start justify-between gap-2">
+                              <div>
+                                <div className="text-xs font-bold text-slate-700">
+                                  関係の性質
+                                </div>
+                                <div className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                                  言葉ではなく、意味から継承・集約・合成を判断します。
+                                </div>
+                              </div>
+                              <span className={`rounded px-2 py-1 text-[11px] font-semibold ${
+                                selectedRelationKind === "composition"
+                                  ? "bg-rose-100 text-rose-700"
+                                  : selectedRelationKind === "inheritance"
+                                    ? "bg-violet-100 text-violet-700"
+                                  : selectedRelationKind === "aggregation"
+                                    ? "bg-emerald-100 text-emerald-700"
+                                    : selectedRelationKind === "association"
+                                      ? "bg-slate-100 text-slate-700"
+                                      : "bg-amber-100 text-amber-700"
+                              }`}>
+                                {RELATION_KIND_LABEL[selectedRelationKind]}
+                              </span>
+                            </div>
+
+                            <div className="mt-3 space-y-3">
+                              <div>
+                                <div className="mb-1.5 text-[11px] font-semibold text-slate-700">
+                                  片方はもう片方の種類ですか？
+                                </div>
+                                <TriStateButtons
+                                  value={selectedLink.inheritance?.isKindOf}
+                                  onChange={(value) => {
+                                    if (value === false) {
+                                      updateSelectedInheritance({ isKindOf: false });
+                                      return;
+                                    }
+                                    if (value === true) {
+                                      handleUpdateLink(selectedLink.id, {
+                                        inheritance: { isKindOf: true },
+                                        wholePart: undefined,
+                                        relationKind: "unknown",
+                                      });
+                                      return;
+                                    }
+                                    handleUpdateLink(selectedLink.id, {
+                                      inheritance: { isKindOf: null },
+                                      relationKind: judgeRelationKind(selectedLink.wholePart, { isKindOf: null }),
+                                    });
+                                  }}
+                                />
+                              </div>
+
+                              {selectedLink.inheritance?.isKindOf === true && (
+                                <div>
+                                  <div className="mb-1.5 text-[11px] font-semibold text-slate-700">
+                                    どちらが具体的な種類ですか？
+                                  </div>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <ChoiceButton
+                                      active={selectedLink.inheritance?.childId === selectedLink.from}
+                                      onClick={() =>
+                                        updateSelectedInheritance({
+                                          childId: selectedLink.from,
+                                          parentId: selectedLink.to,
+                                        })
+                                      }
+                                    >
+                                      {objects.find((o) => o.id === selectedLink.from)?.name || "左"} が種類
+                                    </ChoiceButton>
+                                    <ChoiceButton
+                                      active={selectedLink.inheritance?.childId === selectedLink.to}
+                                      onClick={() =>
+                                        updateSelectedInheritance({
+                                          childId: selectedLink.to,
+                                          parentId: selectedLink.from,
+                                        })
+                                      }
+                                    >
+                                      {objects.find((o) => o.id === selectedLink.to)?.name || "右"} が種類
+                                    </ChoiceButton>
+                                  </div>
+                                  <div className="mt-1.5 text-[11px] text-slate-500">
+                                    例: 「予約会員」は「会員」の種類、という関係です。
+                                  </div>
+                                </div>
+                              )}
+
+                              {selectedLink.inheritance?.isKindOf !== true && (
+                                <>
+                              <div>
+                                <div className="mb-1.5 text-[11px] font-semibold text-slate-700">
+                                  片方はもう片方の一部ですか？
+                                </div>
+                                <TriStateButtons
+                                  value={selectedLink.wholePart?.isWholePart}
+                                  onChange={(value) => {
+                                    if (value === false) {
+                                      handleUpdateLink(selectedLink.id, {
+                                        relationKind: "association",
+                                        wholePart: { isWholePart: false },
+                                      });
+                                      return;
+                                    }
+                                    updateSelectedWholePart({ isWholePart: value });
+                                  }}
+                                />
+                              </div>
+
+                              {selectedLink.wholePart?.isWholePart === true && (
+                                <>
+                                  <div>
+                                    <div className="mb-1.5 text-[11px] font-semibold text-slate-700">
+                                      どちらが全体ですか？
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                      <ChoiceButton
+                                        active={selectedLink.wholePart?.wholeId === selectedLink.from}
+                                        onClick={() =>
+                                          updateSelectedWholePart({
+                                            wholeId: selectedLink.from,
+                                            partId: selectedLink.to,
+                                          })
+                                        }
+                                      >
+                                        {objects.find((o) => o.id === selectedLink.from)?.name || "左"} が全体
+                                      </ChoiceButton>
+                                      <ChoiceButton
+                                        active={selectedLink.wholePart?.wholeId === selectedLink.to}
+                                        onClick={() =>
+                                          updateSelectedWholePart({
+                                            wholeId: selectedLink.to,
+                                            partId: selectedLink.from,
+                                          })
+                                        }
+                                      >
+                                        {objects.find((o) => o.id === selectedLink.to)?.name || "右"} が全体
+                                      </ChoiceButton>
+                                    </div>
+                                  </div>
+
+                                  <div>
+                                    <div className="mb-1.5 text-[11px] font-semibold text-slate-700">
+                                      全体がなくなると、部分もなくなりますか？
+                                    </div>
+                                    <TriStateButtons
+                                      value={selectedLink.wholePart?.partDiesWithWhole}
+                                      onChange={(value) => updateSelectedWholePart({ partDiesWithWhole: value })}
+                                    />
+                                  </div>
+
+                                  <div>
+                                    <div className="mb-1.5 text-[11px] font-semibold text-slate-700">
+                                      同じ部分が、複数の全体に同時に属せますか？
+                                    </div>
+                                    <TriStateButtons
+                                      value={selectedLink.wholePart?.partCanBeShared}
+                                      onChange={(value) => updateSelectedWholePart({ partCanBeShared: value })}
+                                    />
+                                  </div>
+
+                                  <div>
+                                    <div className="mb-1.5 text-[11px] font-semibold text-slate-700">
+                                      部分は、全体から独立して意味を持ちますか？
+                                    </div>
+                                    <TriStateButtons
+                                      value={selectedLink.wholePart?.partCanExistAlone}
+                                      onChange={(value) => updateSelectedWholePart({ partCanExistAlone: value })}
+                                    />
+                                  </div>
+                                </>
+                              )}
+                                </>
+                              )}
+
+                              <div className="rounded border border-slate-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-slate-600">
+                                {relationKindHelp(selectedRelationKind)}
+                              </div>
+                            </div>
                           </div>
 
                           <div className="pt-4 border-t border-slate-100 flex justify-end">

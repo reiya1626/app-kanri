@@ -29,7 +29,17 @@ type PrimType = "int" | "real" | "boolean" | "string";
 type AttrIn = { key: string; value: string };
 type ObjIn = { name: string; attrs: AttrIn[] };
 
-type LinkIn = { from: string; to: string; label?: string };
+type RelationKind = "association" | "aggregation" | "composition" | "inheritance" | "unknown";
+type LinkIn = {
+  from: string;
+  to: string;
+  label?: string;
+  relationKind?: RelationKind;
+  whole?: string;
+  part?: string;
+  child?: string;
+  parent?: string;
+};
 
 type InputPayload = {
   objects: ObjIn[];
@@ -346,11 +356,15 @@ export async function POST(req: NextRequest) {
   // - relationHints は従来どおり「A::B（向き付き）」で保持
   // - 多重度ヒントは「A--B（無向）」で保持（クラス名を辞書順で並べる）
   const assocLabelCount = new Map<string, Map<string, number>>(); // key: "A::B" → label -> count
+  const inheritancePairs = new Map<string, { child: string; parent: string }>();
 
   // 多重度ヒント用の集計（無向）
   type PairAgg = {
     a: string;
     b: string;
+    wholeClass?: string;
+    partClass?: string;
+    relationKind?: RelationKind;
     // instanceName -> count
     aCounts: Map<string, number>;
     bCounts: Map<string, number>;
@@ -386,10 +400,28 @@ export async function POST(req: NextRequest) {
     classTo: string,
     fromInstance: string,
     toInstance: string,
-    rawLabel?: string
+    rawLabel?: string,
+    relationKind?: RelationKind,
+    wholeClass?: string,
+    partClass?: string
   ) => {
     const agg = getOrCreatePair(classFrom, classTo);
     agg.total += 1;
+
+    const currentRank =
+      agg.relationKind === "composition" ? 3 : agg.relationKind === "aggregation" ? 2 : 1;
+    const nextRank =
+      relationKind === "composition" ? 3 : relationKind === "aggregation" ? 2 : 1;
+    if (
+      (relationKind === "aggregation" || relationKind === "composition") &&
+      wholeClass &&
+      partClass &&
+      nextRank >= currentRank
+    ) {
+      agg.relationKind = relationKind;
+      agg.wholeClass = wholeClass;
+      agg.partClass = partClass;
+    }
 
     // どちらが agg.a / agg.b かでカウント先を分ける
     if (classFrom === agg.a && classTo === agg.b) {
@@ -425,11 +457,24 @@ export async function POST(req: NextRequest) {
     const a = obj2class.get(l.from);
     const b = obj2class.get(l.to);
     if (!a || !b) continue;
+    if (l.relationKind === "inheritance") {
+      const childClass = l.child ? obj2class.get(l.child) : undefined;
+      const parentClass = l.parent ? obj2class.get(l.parent) : undefined;
+      if (childClass && parentClass && childClass !== parentClass) {
+        inheritancePairs.set(`${childClass}--|>${parentClass}`, {
+          child: childClass,
+          parent: parentClass,
+        });
+      }
+      continue;
+    }
+    const wholeClass = l.whole ? obj2class.get(l.whole) : undefined;
+    const partClass = l.part ? obj2class.get(l.part) : undefined;
     // relationHints 用（向き付き）
     countLabel(`${a}::${b}`, l.label);
 
     // 多重度ヒント用（無向）
-    addPairObservation(a, b, l.from, l.to, l.label);
+    addPairObservation(a, b, l.from, l.to, l.label, l.relationKind, wholeClass, partClass);
   }
 
   // 2) 属性値が他オブジェクト名に一致する場合を参照としてカウント
@@ -556,11 +601,21 @@ export async function POST(req: NextRequest) {
     const agg = pairAgg.get(pairKey);
     if (!agg) continue;
 
-    const a = agg.a;
-    const b = agg.b;
+    const wholePartReady =
+      (agg.relationKind === "aggregation" || agg.relationKind === "composition") &&
+      agg.wholeClass &&
+      agg.partClass;
+    const a = wholePartReady ? agg.wholeClass! : agg.a;
+    const b = wholePartReady ? agg.partClass! : agg.b;
 
     // 観測が少ないときは点線（不確か）
-    const style = agg.total <= 1 ? ".." : "--";
+    const style = wholePartReady
+      ? agg.relationKind === "composition"
+        ? "*--"
+        : "o--"
+      : agg.total <= 1
+        ? ".."
+        : "--";
 
     // ODのみから断定しない（下限/上限とも）
     const multLeft = "0..*";
@@ -581,6 +636,12 @@ export async function POST(req: NextRequest) {
     }
 
     puml += `${esc(a)} "${multLeft}" ${style} "${multRight}" ${esc(b)}${labelPart}\n`;
+  }
+
+  for (const pair of Array.from(inheritancePairs.values()).sort((x, y) =>
+    `${x.child}--${x.parent}`.localeCompare(`${y.child}--${y.parent}`, "ja")
+  )) {
+    puml += `${esc(pair.child)} --|> ${esc(pair.parent)}\n`;
   }
 
   puml += "@enduml";

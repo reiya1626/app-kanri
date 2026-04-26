@@ -18,6 +18,7 @@ type Link = {
   from: string;
   to: string;
   label: string;
+  relationKind?: "association" | "aggregation" | "composition" | "inheritance" | "unknown";
 };
 
 type RelationHint = {
@@ -65,7 +66,7 @@ type Relation = {
   label: string;
   leftMultiplicity: string;
   rightMultiplicity: string;
-  kind: "association" | "inheritance";
+  kind: "association" | "aggregation" | "composition" | "inheritance";
 };
 
 const STORAGE_KEY_EDITOR_INITIAL = "EXPERIMENT_CLASS_EDITOR_INITIAL";
@@ -73,6 +74,12 @@ const STORAGE_KEY_EDITOR_STATE = "EXPERIMENT_CLASS_EDITOR_STATE";
 
 const makeId = () => Math.random().toString(36).slice(2);
 const esc = (s: string) => String(s ?? "").replace(/"/g, '\\"');
+const relationKindLabel = (kind: Relation["kind"]) => {
+  if (kind === "inheritance") return "継承";
+  if (kind === "composition") return "合成";
+  if (kind === "aggregation") return "集約";
+  return "通常関連";
+};
 
 const buildObjectDiagramPuml = (objects: Obj[], links: Link[]) => {
   const lines: string[] = ["@startuml"];
@@ -106,6 +113,11 @@ const parseClassPuml = (puml: string): { classes: ClassInfo[]; relations: Relati
   let current: ClassInfo | null = null;
 
   const normalizeRef = (s: string) => s.trim().replace(/^"|"$/g, "");
+  const relationKindFromOp = (op: string): Relation["kind"] => {
+    if (op.includes("*")) return "composition";
+    if (op.includes("o")) return "aggregation";
+    return "association";
+  };
 
   const resolveClassId = (ref: string) => {
     const key = normalizeRef(ref);
@@ -201,38 +213,38 @@ const parseClassPuml = (puml: string): { classes: ClassInfo[]; relations: Relati
     }
 
     const assocWithMultiplicity =
-      line.match(/^("[^"]+"|[^\s"]+)\s+"([^"]*)"\s+[-.#\[\]A-Za-z0-9]+\s+"([^"]*)"\s+("[^"]+"|[^\s"]+)(?:\s*:\s*(.+))?$/);
+      line.match(/^("[^"]+"|[^\s"]+)\s+"([^"]*)"\s+([-.o*#\[\]A-Za-z0-9]+)\s+"([^"]*)"\s+("[^"]+"|[^\s"]+)(?:\s*:\s*(.+))?$/);
     if (assocWithMultiplicity) {
       const fromId = resolveClassId(assocWithMultiplicity[1]);
-      const toId = resolveClassId(assocWithMultiplicity[4]);
+      const toId = resolveClassId(assocWithMultiplicity[5]);
       if (fromId && toId) {
         relations.push({
           id: makeId(),
           fromClassId: fromId,
           toClassId: toId,
-          label: (assocWithMultiplicity[5] || "").trim(),
+          label: (assocWithMultiplicity[6] || "").trim(),
           leftMultiplicity: assocWithMultiplicity[2] || "",
-          rightMultiplicity: assocWithMultiplicity[3] || "",
-          kind: "association",
+          rightMultiplicity: assocWithMultiplicity[4] || "",
+          kind: relationKindFromOp(assocWithMultiplicity[3] || "--"),
         });
       }
       continue;
     }
 
     const simpleAssoc =
-      line.match(/^("[^"]+"|[^\s"]+)\s+[-.#\[\]A-Za-z0-9]+\s+("[^"]+"|[^\s"]+)(?:\s*:\s*(.+))?$/);
+      line.match(/^("[^"]+"|[^\s"]+)\s+([-.o*#\[\]A-Za-z0-9]+)\s+("[^"]+"|[^\s"]+)(?:\s*:\s*(.+))?$/);
     if (simpleAssoc) {
       const fromId = resolveClassId(simpleAssoc[1]);
-      const toId = resolveClassId(simpleAssoc[2]);
+      const toId = resolveClassId(simpleAssoc[3]);
       if (fromId && toId) {
         relations.push({
           id: makeId(),
           fromClassId: fromId,
           toClassId: toId,
-          label: (simpleAssoc[3] || "").trim(),
+          label: (simpleAssoc[4] || "").trim(),
           leftMultiplicity: "",
           rightMultiplicity: "",
-          kind: "association",
+          kind: relationKindFromOp(simpleAssoc[2] || "--"),
         });
       }
     }
@@ -281,7 +293,8 @@ const buildClassPuml = (
     const leftMult = esc(r.leftMultiplicity || "");
     const rightMult = esc(r.rightMultiplicity || "");
     const labelPart = r.label ? ` : ${esc(r.label)}` : "";
-    lines.push(`${fromAlias} "${leftMult}" -- "${rightMult}" ${toAlias}${labelPart}`);
+    const op = r.kind === "composition" ? "*--" : r.kind === "aggregation" ? "o--" : "--";
+    lines.push(`${fromAlias} "${leftMult}" ${op} "${rightMult}" ${toAlias}${labelPart}`);
   }
 
   lines.push("@enduml");
@@ -809,7 +822,12 @@ const ClassEditorPage: React.FC = () => {
                               }}
                             >
                               <div className="font-semibold">{from} - {to}</div>
-                              <div className="mt-1 text-xs text-slate-500">{r.label || "ラベルなし"}</div>
+                              <div className="mt-1 flex flex-wrap gap-1 text-xs text-slate-500">
+                                <span>{r.label || "ラベルなし"}</span>
+                                <span className="rounded bg-slate-100 px-1.5 py-0.5">
+                                  {relationKindLabel(r.kind)}
+                                </span>
+                              </div>
                             </button>
                           );
                         })}
@@ -858,6 +876,23 @@ const ClassEditorPage: React.FC = () => {
                           value={selectedRelation.label}
                           onChange={(e) => handleUpdateRelation(selectedRelation.id, { label: e.target.value })}
                         />
+
+                        <div>
+                          <label className="mb-2 block text-sm font-semibold">関連の種類</label>
+                          <select
+                            className="w-full rounded border px-3 py-2 text-sm"
+                            value={selectedRelation.kind}
+                            onChange={(e) =>
+                              handleUpdateRelation(selectedRelation.id, {
+                                kind: e.target.value as Relation["kind"],
+                              })
+                            }
+                          >
+                            <option value="association">通常関連</option>
+                            <option value="aggregation">集約</option>
+                            <option value="composition">合成</option>
+                          </select>
+                        </div>
 
                         <button className="text-sm text-rose-500" onClick={() => handleDeleteRelation(selectedRelation.id)}>
                           この関連を削除
